@@ -23,6 +23,7 @@
 kernel_opt_<name>/
 ├── database/
 │   ├── config.json                       # 进化配置（§3.3，默认=原仓库默认）
+│   ├── state.json                        # 活动权威状态（种群/岛/精英/特征统计；CLI 跨次调用持久化，实现细节）
 │   ├── solutions/                        # 全量解池（内容寻址；含评测失败的 score=0 解）
 │   │   └── <solution_id>/
 │   │       ├── solution.json             # 解记录（schema §3.1）

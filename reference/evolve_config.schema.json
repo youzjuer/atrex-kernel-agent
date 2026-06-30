@@ -1,0 +1,28 @@
+{
+  "population_size": 100,
+  "num_islands": 3,
+  "elite_archive_size": 50,
+  "migration_interval": 10,
+  "migration_rate": 0.2,
+  "feature_dimensions": ["complexity", "diversity", "score"],
+  "feature_bins": null,
+  "diversity_reference_size": 20,
+  "selection": {
+    "strategy": "boltzmann",
+    "initial_temperature": 1.0,
+    "min_temperature": 0.5,
+    "max_temperature": 2.0,
+    "exploration_rate": 0.2,
+    "use_sampling_weight": true,
+    "sampling_weight_power": 1.0
+  },
+  "n_candidates": 3,
+  "budget": {
+    "max_generations": 30
+  },
+  "convergence": {
+    "no_improve_patience": 5,
+    "min_rel_improve": 0.01
+  },
+  "score_metric": "speedup_vs_baseline"
+}
