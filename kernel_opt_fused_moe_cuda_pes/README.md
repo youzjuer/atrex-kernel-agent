@@ -64,6 +64,30 @@ Using the full TP2 local expert shard (`--local-num-experts 256`) allocates prod
 weights and is not appropriate for the current scalar baseline except as an allocation/interface
 probe.
 
+## Automatic PES Run
+
+The runnable entry point mirrors the structure of
+`syhya/mlsys26-flashinfer-contest/full-agent/moe/run_moe.sh`, but uses the local Atrex PES database
+and evaluator instead of the external LoongFlow runtime:
+
+```bash
+cd kernel_opt_fused_moe_cuda_pes
+./run_moe.sh --fresh --generations 1 --n-candidates 3 --preset smoke --tokens 2
+```
+
+This creates `moe_run/` and automatically:
+
+- copies the FlashInfer-aligned task surface into the run directory
+- initializes `database/` with `tools/evolution_db.py`
+- profiles the seed kernel
+- writes `iteration/<K>/planner/plan.md`
+- materializes `n_candidates` executor workspaces
+- evaluates each candidate with `test_kernel.py`
+- records `evidence.json`, `history.md`, `summarizer/summary.md`, and database checkpoints
+
+The current local backend uses deterministic strategy templates for CUDA tile mutations. It is a
+working automatic PES loop, not yet an LLM-backed planner/executor replacement.
+
 ## Current Baseline
 
 - `kernel.py`: FlashInfer-compatible Python entrypoint and routing glue.

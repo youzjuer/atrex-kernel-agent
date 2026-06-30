@@ -5,3 +5,5 @@ __pycache__/
 *.o
 profiles/*/ncu/
 profiles/*/*.ncu-rep
+moe_run/
+auto_runs/
