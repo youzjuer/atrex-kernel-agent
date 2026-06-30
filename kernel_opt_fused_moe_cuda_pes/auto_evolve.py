@@ -104,6 +104,38 @@ def init_db(repo_root: Path, source: Path, run_dir: Path) -> None:
     )
 
 
+def configure_real_target_gate(repo_root: Path, run_dir: Path) -> None:
+    """Prevent local-baseline speedup from satisfying the real FlashInfer target."""
+    run_cmd(
+        [
+            sys.executable,
+            str(repo_root / "tools" / "evolution_db.py"),
+            "config",
+            "--workspace",
+            str(run_dir),
+            "--set",
+            "target_score=null",
+            "--set",
+            'score_metric="local_baseline_speedup_with_flashinfer_gate"',
+        ],
+        cwd=repo_root,
+    )
+
+
+def clear_stale_target_stop(run_dir: Path) -> None:
+    state_path = run_dir / "database" / "state.json"
+    if not state_path.exists():
+        return
+    state = parse_json(state_path)
+    convergence = state.get("convergence") or {}
+    if convergence.get("stop_reason") != "target_met":
+        return
+    convergence["stopped"] = False
+    convergence["stop_reason"] = None
+    state["convergence"] = convergence
+    write_json(state_path, state)
+
+
 def profile_kernel(run_dir: Path, kernel: Path, out_json: Path, args: argparse.Namespace) -> dict[str, Any]:
     cmd = [
         sys.executable,
@@ -120,9 +152,17 @@ def profile_kernel(run_dir: Path, kernel: Path, out_json: Path, args: argparse.N
         str(args.warmup),
         "--rep",
         str(args.rep),
+        "--flashinfer-target-speedup",
+        str(args.flashinfer_target_speedup),
+        "--flashinfer-timeout-s",
+        str(args.flashinfer_timeout_s),
         "--json-out",
         str(out_json),
     ]
+    if args.compare_flashinfer:
+        cmd += ["--compare-flashinfer"]
+    if args.require_flashinfer:
+        cmd += ["--require-flashinfer"]
     if args.hidden_size is not None:
         cmd += ["--hidden-size", str(args.hidden_size)]
     if args.intermediate_size is not None:
@@ -145,6 +185,17 @@ def first_latency(result: dict[str, Any]) -> float | None:
 
 def max_rel(result: dict[str, Any]) -> float | None:
     val = result.get("max_rel")
+    return None if val is None else float(val)
+
+
+def flashinfer_latency(result: dict[str, Any]) -> float | None:
+    flash = result.get("flashinfer") or {}
+    lat = flash.get("mean_latency_us")
+    return None if lat is None else float(lat)
+
+
+def target_speedup(result: dict[str, Any]) -> float | None:
+    val = result.get("target_speedup_vs_flashinfer")
     return None if val is None else float(val)
 
 
@@ -683,31 +734,42 @@ def write_summary(run_dir: Path, generation: int, rows: list[dict[str, Any]]) ->
     for row in ranked:
         lines.append(
             f"- `{row['child']}` `{row['strategy']}`: {row['status']}, "
-            f"latency_us={row.get('latency_us')}, max_rel={row.get('max_rel')}"
+            f"latency_us={row.get('latency_us')}, max_rel={row.get('max_rel')}, "
+            f"flashinfer_us={row.get('flashinfer_us')}, target_status={row.get('target_status')}, "
+            f"speedup_vs_flashinfer={row.get('target_speedup_vs_flashinfer')}"
         )
     if ranked:
         best = ranked[0]
         lines += [
             "",
             f"Best candidate: `{best['child']}` with strategy `{best['strategy']}`.",
-            "Next direction: keep planner/executor focused on grouped scheduling, tiled FP4 dequant, and grouped GEMM.",
         ]
+        met = [row for row in ranked if row.get("target_status") == "MET"]
+        if met:
+            target_best = max(met, key=lambda r: r.get("target_speedup_vs_flashinfer") or 0.0)
+            lines.append(
+                f"Real FlashInfer target met by `{target_best['child']}` "
+                f"at speedup {target_best.get('target_speedup_vs_flashinfer')}.")
+        else:
+            lines.append(
+                "Real FlashInfer target not met; continue grouped scheduling, tiled FP4 dequant, and grouped GEMM."
+            )
     (summary_dir / "summary.md").write_text("\n".join(lines) + "\n")
 
 
-def checkpoint(repo_root: Path, run_dir: Path, generation: int) -> None:
-    run_cmd(
-        [
-            sys.executable,
-            str(repo_root / "tools" / "evolution_db.py"),
-            "checkpoint",
-            "--workspace",
-            str(run_dir),
-            "--generation",
-            str(generation),
-        ],
-        cwd=repo_root,
-    )
+def checkpoint(repo_root: Path, run_dir: Path, generation: int, *, target_met: bool) -> None:
+    cmd = [
+        sys.executable,
+        str(repo_root / "tools" / "evolution_db.py"),
+        "checkpoint",
+        "--workspace",
+        str(run_dir),
+        "--generation",
+        str(generation),
+    ]
+    if target_met:
+        cmd.append("--target-met")
+    run_cmd(cmd, cwd=repo_root)
 
 
 def main() -> int:
@@ -726,6 +788,29 @@ def main() -> int:
     parser.add_argument("--local-expert-offset", type=int, default=0)
     parser.add_argument("--warmup", type=int, default=2)
     parser.add_argument("--rep", type=int, default=5)
+    parser.add_argument(
+        "--compare-flashinfer",
+        action=argparse.BooleanOptionalAction,
+        default=os.environ.get("ATREX_COMPARE_FLASHINFER", "1") != "0",
+        help="Benchmark real flashinfer.trtllm_fp4_block_scale_moe in an isolated worker.",
+    )
+    parser.add_argument(
+        "--require-flashinfer",
+        action="store_true",
+        help="Fail the evaluator if the real FlashInfer benchmark is unavailable.",
+    )
+    parser.add_argument(
+        "--flashinfer-target-speedup",
+        type=float,
+        default=float(os.environ.get("ATREX_FLASHINFER_TARGET_SPEEDUP", "1.0")),
+        help="Real target is met only when candidate_us is faster than FlashInfer by this factor.",
+    )
+    parser.add_argument(
+        "--flashinfer-timeout-s",
+        type=float,
+        default=float(os.environ.get("ATREX_FLASHINFER_TIMEOUT_S", "120")),
+        help="Timeout for the isolated real FlashInfer benchmark worker.",
+    )
     parser.add_argument(
         "--planner-backend",
         choices=("auto", "codex", "command", "local"),
@@ -760,6 +845,8 @@ def main() -> int:
     run_dir = args.run_dir.resolve()
     copy_task(source, run_dir, fresh=args.fresh)
     init_db(repo_root, source, run_dir)
+    configure_real_target_gate(repo_root, run_dir)
+    clear_stale_target_stop(run_dir)
 
     baseline_json = run_dir / "profiles" / "auto_baseline.json"
     baseline = profile_kernel(run_dir, run_dir / "kernel.py", baseline_json, args)
@@ -787,6 +874,10 @@ def main() -> int:
                 "status": result.get("status"),
                 "latency_us": first_latency(result),
                 "max_rel": result.get("max_rel"),
+                "flashinfer_us": flashinfer_latency(result),
+                "target_status": result.get("target_status"),
+                "target_speedup_vs_flashinfer": target_speedup(result),
+                "flashinfer": result.get("flashinfer"),
                 "result_file": str(result_path.relative_to(run_dir)),
             }
             evidence_path = child_dir / "evidence.json"
@@ -808,10 +899,18 @@ def main() -> int:
                     "status": result.get("status"),
                     "latency_us": first_latency(result),
                     "max_rel": result.get("max_rel"),
+                    "flashinfer_us": flashinfer_latency(result),
+                    "target_status": result.get("target_status"),
+                    "target_speedup_vs_flashinfer": target_speedup(result),
                 }
             )
         write_summary(run_dir, generation, rows)
-        checkpoint(repo_root, run_dir, generation)
+        checkpoint(
+            repo_root,
+            run_dir,
+            generation,
+            target_met=any(row.get("target_status") == "MET" for row in rows),
+        )
 
     run_cmd(
         [

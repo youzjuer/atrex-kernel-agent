@@ -28,8 +28,8 @@
     "no_improve_patience": 5,
     "min_rel_improve": 0.01
   },
-  "target_score": 2.0,
-  "score_metric": "speedup_vs_flashinfer_aligned_baseline",
+  "target_score": null,
+  "score_metric": "local_baseline_speedup_with_flashinfer_gate",
   "operator": "flashinfer.trtllm_fp4_block_scale_moe",
   "application_profile": "Qwen3_5-Plus_prefill_TP2",
   "candidate_language": "cuda",
