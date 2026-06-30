@@ -120,41 +120,68 @@ Launch the **planner** subagent once, passing the parents from Step 1, the lates
 returns **N strategies** (one per child), each a concrete single-category optimization plan derived
 from new, evidence-backed knowledge. The main agent must not search or plan directly.
 
-### Step 3 — Execute (subagents, fan-out)
+### Step 3 — Execute (fan-out, concurrent)
 
-For each of the N strategies, launch an **executor** subagent. Each child:
+Spawn one **executor** subagent per strategy. Name children `<K>_0 … <K>_{N-1}` →
+`iteration/<K>/executor/<K>_<i>/`. Each child reads exactly one strategy + its parent's `kernel.py`,
+implements one candidate at `iteration/<K>/executor/<K>_<i>/kernel.py`, and records its own history.
 
-- reads exactly one strategy + its parent's `kernel.py`,
-- implements one candidate kernel at `iteration/<K>/executor/<child>/kernel.py`,
-- records its own history under the same directory.
+- **True fan-out:** launch all N executors **in a single message** so they run concurrently. Do not
+  serialize them; do not let one child read another's files (isolation preserves diversity).
+- At `N=1` there is one child (degenerate = linear loop).
+- A child that errors out and produces **no** candidate file is logged and dropped from this
+  generation (no DB entry). A child that produces a candidate always proceeds to evaluation — even if
+  its self-check failed — so the evaluator can record it as negative evidence.
 
-Children are independent and must not see each other. At `N=1` there is a single child.
-**Launch the N executors in a single message so they run concurrently (M3 exercises true fan-out).**
+### Step 4 — Evaluate (batch, concurrent) — the only promotion gate
 
-### Step 4 — Evaluate (subagents) — the only promotion gate
+Spawn one **evaluator** subagent per produced candidate, **launched together** so the batch runs
+concurrently. Each evaluator runs `test_kernel.py` correctness (timeout guard), measures latency via
+`do_bench`, and returns `(correctness, score, latency_us, evidence)`;
+`score = baseline_latency / candidate_latency` when PASS, else `score = 0`.
 
-For each child, launch an **evaluator** subagent. Each evaluator compiles the candidate, runs
-`test_kernel.py` correctness (with timeout guard), measures latency via `do_bench`, optionally
-profiles with `ncu` / `profile_kernel.sh`, and returns `(correctness, score, latency_us, evidence)`.
-`score = baseline_latency / candidate_latency` when correctness is PASS, else `score = 0`. Failed
-candidates are not discarded — they become negative evidence.
+Two-tier profiling to bound cost under fan-out:
 
-### Step 5 — Admit to the Database
+- **Screen (all N):** correctness + `do_bench` latency for every candidate — cheap, decides the gate.
+- **Deep (survivors only):** full `ncu` / `profile_kernel.sh` evidence only for PASS candidates that
+  beat or approach the current best; these feed the next planner. Do not run full `ncu` on every
+  child of every generation.
 
-Register every evaluated child (including failures, score 0):
+Collect all N results before admitting (a batch barrier) so the generation is admitted atomically.
+
+### Step 5 — Admit the Batch to the Database
+
+Loop `add` over **every evaluated candidate this generation**, PASS and FAIL alike (failures carry
+`score = 0` as negative evidence — never silently drop them):
 
 ```bash
-python tools/evolution_db.py add --workspace kernel_opt_<name> --generation <K> \
-  --parent <parent_id> --code iteration/<K>/executor/<child>/kernel.py --lang <framework> \
-  --correctness <PASS|FAIL|TIMEOUT_FAIL> --latency-us <us> \
-  --action-category <category> --generate-plan "<strategy>" \
-  --evidence-file profiles/<K>/<child>/evidence.json \
-  --iteration-ref iteration/<K>/executor/<child>/ --json
+for child in <K>_0 <K>_1 … <K>_{N-1}; do
+  python tools/evolution_db.py add --workspace kernel_opt_<name> --generation <K> \
+    --parent <parent_id_of_child> --code iteration/<K>/executor/<child>/kernel.py --lang <framework> \
+    --correctness <PASS|FAIL|TIMEOUT_FAIL> --latency-us <us> \
+    --action-category <category> --generate-plan "<strategy>" \
+    --evidence-file profiles/<K>/<child>/evidence.json \
+    --iteration-ref iteration/<K>/executor/<child>/ --json
+done
 ```
 
-`add` computes the MAP-Elites cell, applies island/elite/migration/prune, and writes the
-`parent_id` lineage. Omit `--score` to let the tool compute speedup from `--latency-us`, or pass
-`--score` to use the evaluator's value directly.
+Each `add` computes the candidate's MAP-Elites cell and applies island placement / cell replacement /
+elite archive / migration / pruning, and records the `parent_id` lineage (siblings of one generation
+branch from their respective parents). Omit `--score` to let the tool compute speedup from
+`--latency-us`, or pass `--score` to use the evaluator's value directly.
+
+### Generation Failure Handling
+
+- **Partial failure** (some children fail): expected and fine — failures are admitted as negative
+  evidence, the surviving candidates compete normally.
+- **Total failure** (all N fail correctness this generation): still summarize and checkpoint so the
+  negative evidence is preserved; the best does not change. If total failure (or no score
+  improvement) persists for `convergence.no_improve_patience` generations, the `checkpoint` gate
+  reports `stopped = true, stop_reason = no_improve`. Before giving up, the orchestrator MAY escalate
+  to [gpu-kernel-partial-restart](../../agents/gpu-kernel-partial-restart.md) to reset a stalled
+  island / mask stale memory and reseed from the current best.
+- **Planner exhaustion** (planner returns `exhaustion = true`): no new actionable knowledge — escalate
+  to partial-restart rather than emitting a speculative plan.
 
 ### Step 6 — Summarize (subagent)
 

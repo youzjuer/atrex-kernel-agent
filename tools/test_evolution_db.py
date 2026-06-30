@@ -270,6 +270,85 @@ class TestConvergence(DBTestBase):
         self.assertEqual(r["stop_reason"], "budget_exhausted")
 
 
+class TestGenerationFanout(DBTestBase):
+    """M3: a full N-candidate generation (select -> add x N -> checkpoint)."""
+
+    def _add_child(self, db, name, body, gen, parent, **over):
+        self._write_kernel(name, body)
+        return db.add(make_add_ns(code=name, generation=gen, parent=parent, **over))
+
+    def test_n3_generation_admits_all_and_branches_lineage(self):
+        db = self._init()
+        seed = db.import_seed("memory/v0.json", "kernel.py")["solution_id"]
+        db.load()
+
+        # one generation, three concurrent candidates of the same parent (seed)
+        a = self._add_child(db, "a.py", "def run():\n    return 1\n" + "a" * 10,
+                            1, seed, latency_us=500.0, action_category="vectorized_load")
+        b = self._add_child(db, "b.py", "def run():\n    return 2\n" + "b" * 40,
+                            1, seed, latency_us=250.0, action_category="k_split")
+        c = self._add_child(db, "c.py", "def run():\n    return 3\n" + "c" * 70,
+                            1, seed, correctness="FAIL", latency_us=100.0,
+                            action_category="swizzle")
+
+        # all three admitted to the population alongside the seed
+        self.assertEqual(len(db.state["solutions"]), 4)
+        gens = sorted(db.state["solutions"][s]["generation"] for s in (a["solution_id"], b["solution_id"], c["solution_id"]))
+        self.assertEqual(gens, [1, 1, 1])
+
+        # scores: speedup for PASS, 0 for the failed candidate
+        self.assertAlmostEqual(a["score"], 2.0)
+        self.assertAlmostEqual(b["score"], 4.0)
+        self.assertEqual(c["score"], 0.0)
+
+        # best of the generation is the fastest PASS candidate
+        ck = db.checkpoint(1)
+        self.assertEqual(ck["best_solution_id"], b["solution_id"])
+        self.assertAlmostEqual(ck["best_score"], 4.0)
+
+        # siblings branch from the same parent in the lineage DAG
+        for child in (a, b, c):
+            chain = db.lineage(child["solution_id"])
+            self.assertEqual([x["solution_id"] for x in chain], [child["solution_id"], seed])
+
+        # first-generation checkpoint artifacts exist and list the candidates
+        cdir = self.ws / "database" / "checkpoints" / "iter-1"
+        self.assertTrue((cdir / "best_solution.json").exists())
+        self.assertTrue((cdir / "metadata.json").exists())
+        self.assertEqual(len(list((cdir / "solutions").glob("*.json"))), 4)
+
+    def test_two_generations_best_is_monotonic(self):
+        db = self._init()
+        seed = db.import_seed("memory/v0.json", "kernel.py")["solution_id"]
+        db.load()
+        # gen1: best speedup 2x
+        self._add_child(db, "g1a.py", "def run():\n    return 1\n" + "x" * 15,
+                        1, seed, latency_us=500.0)
+        self._add_child(db, "g1b.py", "def run():\n    return 1\n" + "y" * 35,
+                        1, seed, latency_us=800.0)
+        ck1 = db.checkpoint(1)
+        # gen2: a better child (4x) from the gen1 best
+        parent2 = ck1["best_solution_id"]
+        self._add_child(db, "g2a.py", "def run():\n    return 2\n" + "z" * 55,
+                        2, parent2, latency_us=250.0)
+        ck2 = db.checkpoint(2)
+        self.assertGreaterEqual(ck2["best_score"], ck1["best_score"])
+        self.assertAlmostEqual(ck2["best_score"], 4.0)
+        # history records seed(0), gen1, gen2
+        self.assertEqual([h["generation"] for h in db.state["history"]], [0, 1, 2])
+
+    def test_select_after_fanout_counts_samples(self):
+        db = self._init()
+        seed = db.import_seed("memory/v0.json", "kernel.py")["solution_id"]
+        db.load()
+        self._add_child(db, "f1.py", "def run():\n    return 1\n" + "q" * 20,
+                        1, seed, latency_us=500.0)
+        parents = db.select_parents(3)
+        self.assertEqual(len(parents), 3)
+        db.load()
+        self.assertEqual(sum(s["sample_cnt"] for s in db.state["solutions"].values()), 3)
+
+
 class TestCLISmoke(DBTestBase):
     def test_cli_end_to_end(self):
         ws = str(self.ws)
