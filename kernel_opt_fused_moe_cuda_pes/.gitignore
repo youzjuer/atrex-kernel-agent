@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.torch_extensions/
+*.so
+*.o
+profiles/*/ncu/
+profiles/*/*.ncu-rep

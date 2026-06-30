@@ -1,0 +1,32 @@
+{
+  "tool_used": "torch.cuda.Event",
+  "evidence_summary": "Local NVIDIA L20D CUDA baseline passed M=8/16/32. mean_latency_us=154.1547; max_abs=2.2701e-09; max_rel=2.3255e-04.",
+  "bottleneck_type": "compute_bound",
+  "evidence_chain": "baseline maps one CUDA thread to each (token, output_hidden) and recomputes all gate/up dot products per output element -> redundant per-h work dominates -> first CUDA PES candidates should introduce intermediate reuse, token/expert grouping, or parallel reductions",
+  "baseline_result": {
+    "status": "PASS",
+    "mean_latency_us": 154.15466328461966,
+    "max_abs": 2.270098775625229e-09,
+    "max_rel": 0.0002325464301975444,
+    "rows": [
+      {
+        "M": 8,
+        "candidate_us": 162.78399527072906,
+        "reference_us": 38121.50573730469,
+        "speedup_vs_reference": 234.18460564199881
+      },
+      {
+        "M": 16,
+        "candidate_us": 146.01600170135498,
+        "reference_us": 77789.05487060547,
+        "speedup_vs_reference": 532.743356647353
+      },
+      {
+        "M": 32,
+        "candidate_us": 153.6639928817749,
+        "reference_us": 198951.7059326172,
+        "speedup_vs_reference": 1294.719095876192
+      }
+    ]
+  }
+}

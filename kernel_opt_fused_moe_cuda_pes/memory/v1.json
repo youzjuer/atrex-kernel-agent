@@ -1,0 +1,42 @@
+{
+  "version": "v1",
+  "masked": false,
+  "timestamp": "2026-06-30T04:53:05.054975+00:00",
+  "performance": {
+    "latency_us": 17.653333644072216,
+    "tflops": null,
+    "bandwidth_gbps": null,
+    "tflops_peak_utilization_pct": null,
+    "bandwidth_peak_utilization_pct": null,
+    "comparison_with_previous": {
+      "latency_delta": -136.50132964054745,
+      "tflops_delta": null,
+      "bandwidth_delta": null
+    }
+  },
+  "optimization": {
+    "action_category": "stage1_intermediate_reuse",
+    "action_description": "Split fused baseline into stage1 intermediate CUDA kernel plus stage2 output CUDA kernel",
+    "expected_impact": "Remove redundant gate/up recomputation across output hidden columns",
+    "risks_and_rollback": "Two launches and temporary allocation can hurt tiny shapes; rollback to v0 single-kernel baseline"
+  },
+  "profile_evidence": {
+    "tool_used": "torch.cuda.Event",
+    "evidence_summary": "Gen1 child 1_0 PASS; latency 17.6533us; score 8.7323 vs v0",
+    "bottleneck_type": "compute_bound",
+    "evidence_chain": "redundant per-output stage1 dot products removed by intermediate reuse -> measured speedup"
+  },
+  "correctness": {
+    "rel_err": 0.0002325464301975444,
+    "status": "PASS"
+  },
+  "isa_metric_progress": [],
+  "search_log": [],
+  "pitfalls_and_fixes": [],
+  "references": [],
+  "quality_gate": {
+    "result": "PASS",
+    "failure_reason": null
+  },
+  "git_commit_hash": null
+}

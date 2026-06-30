@@ -1,0 +1,7 @@
+{
+  "tool_used": "torch.cuda.Event",
+  "evidence_summary": "Gen1 child 1_0 stage1_intermediate_reuse passed M=8/16/32 on NVIDIA L20D. mean_latency_us=17.6533 vs baseline 154.1547, score=8.7323.",
+  "bottleneck_type": "compute_bound",
+  "evidence_chain": "baseline recomputed stage1 gate/up per output column -> candidate computes stage1 intermediate once per token/topk/intermediate -> measured 8.73x speedup while preserving correctness",
+  "result_file": "profiles/1/1_0/result.json"
+}

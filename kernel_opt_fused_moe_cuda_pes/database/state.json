@@ -1,0 +1,152 @@
+{
+  "solutions": {
+    "0e31b197": {
+      "solution_id": "0e31b197",
+      "parent_id": null,
+      "generate_plan": "baseline seed",
+      "island_id": 0,
+      "iteration": 0,
+      "generation": 0,
+      "timestamp": 1782794963.1591704,
+      "sample_cnt": 0,
+      "sample_weight": 0.0,
+      "score": 1.0,
+      "evaluation": "seed (baseline)",
+      "summary": "",
+      "solution": "database/solutions/0e31b197/kernel.py",
+      "metadata": {
+        "lang": "",
+        "code_sha256": "2f7b72a401ac00536cf4cfdb1373c61080cf03b63b93f8319317c4ae99791e31",
+        "correctness": {
+          "rel_err": null,
+          "status": "PASS"
+        },
+        "performance": {
+          "latency_us": 154.15466328461966
+        },
+        "optimization": {
+          "action_category": "baseline",
+          "action_description": "seed"
+        },
+        "MAP_Elite_feature": "2-0-2"
+      }
+    },
+    "f4392cab": {
+      "solution_id": "f4392cab",
+      "parent_id": "0e31b197",
+      "generate_plan": "Split baseline into stage1 intermediate reuse plus stage2 output CUDA kernels",
+      "island_id": 0,
+      "iteration": 1,
+      "generation": 1,
+      "timestamp": 1782795154.1363075,
+      "sample_cnt": 0,
+      "sample_weight": 0.0,
+      "score": 8.732325938697873,
+      "evaluation": "PASS; mean_latency_us=17.6533; score=8.7323 vs v0 baseline",
+      "summary": "",
+      "solution": "database/solutions/f4392cab/kernel.py",
+      "metadata": {
+        "lang": "cuda",
+        "code_sha256": "2f7b72a401ac00536cf4cfdb1373c61080cf03b63b93f8319317c4ae99791e31",
+        "correctness": {
+          "rel_err": 0.0002325464301975444,
+          "status": "PASS"
+        },
+        "performance": {
+          "latency_us": 17.653333644072216,
+          "tflops": null,
+          "bandwidth_gbps": null
+        },
+        "optimization": {
+          "action_category": "stage1_intermediate_reuse",
+          "action_description": ""
+        },
+        "iteration_ref": "iteration/1/executor/1_0",
+        "profile_evidence": {
+          "tool_used": "torch.cuda.Event",
+          "evidence_summary": "Gen1 child 1_0 stage1_intermediate_reuse passed M=8/16/32 on NVIDIA L20D. mean_latency_us=17.6533 vs baseline 154.1547, score=8.7323.",
+          "bottleneck_type": "compute_bound",
+          "evidence_chain": "baseline recomputed stage1 gate/up per output column -> candidate computes stage1 intermediate once per token/topk/intermediate -> measured 8.73x speedup while preserving correctness",
+          "result_file": "profiles/1/1_0/result.json"
+        },
+        "MAP_Elite_feature": "2-2-3"
+      }
+    }
+  },
+  "islands": [
+    [
+      "0e31b197",
+      "f4392cab"
+    ],
+    [],
+    []
+  ],
+  "island_feature_maps": [
+    {
+      "2-0-2": "0e31b197",
+      "2-2-3": "f4392cab"
+    },
+    {},
+    {}
+  ],
+  "island_best": [
+    "f4392cab",
+    null,
+    null
+  ],
+  "elites": [
+    "f4392cab",
+    "0e31b197"
+  ],
+  "feature_stats": {
+    "complexity": {
+      "min": 1877.0,
+      "max": 1877.0,
+      "values": [
+        1877.0,
+        1877.0
+      ]
+    },
+    "score": {
+      "min": 1.0,
+      "max": 8.732325938697873,
+      "values": [
+        1.0,
+        8.732325938697873
+      ]
+    },
+    "diversity": {
+      "min": 0.0,
+      "max": 0.0,
+      "values": [
+        0.0
+      ]
+    }
+  },
+  "current_island": 0,
+  "current_island_counter": 1,
+  "last_migration_generation": 0,
+  "best_solution_id": "f4392cab",
+  "best_score": 8.732325938697873,
+  "baseline": {
+    "solution_id": "0e31b197",
+    "latency_us": 154.15466328461966
+  },
+  "history": [
+    {
+      "generation": 0,
+      "best_score": 1.0,
+      "best_solution_id": "0e31b197"
+    },
+    {
+      "generation": 1,
+      "best_score": 8.732325938697873,
+      "best_solution_id": "f4392cab"
+    }
+  ],
+  "convergence": {
+    "no_improve_streak": 0,
+    "stopped": true,
+    "stop_reason": "target_met"
+  }
+}

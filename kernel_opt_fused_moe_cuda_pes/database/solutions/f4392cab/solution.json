@@ -1,0 +1,41 @@
+{
+  "solution_id": "f4392cab",
+  "parent_id": "0e31b197",
+  "generate_plan": "Split baseline into stage1 intermediate reuse plus stage2 output CUDA kernels",
+  "island_id": 0,
+  "iteration": 1,
+  "generation": 1,
+  "timestamp": 1782795154.1363075,
+  "sample_cnt": 0,
+  "sample_weight": 0.0,
+  "score": 8.732325938697873,
+  "evaluation": "PASS; mean_latency_us=17.6533; score=8.7323 vs v0 baseline",
+  "summary": "",
+  "solution": "database/solutions/f4392cab/kernel.py",
+  "metadata": {
+    "lang": "cuda",
+    "code_sha256": "2f7b72a401ac00536cf4cfdb1373c61080cf03b63b93f8319317c4ae99791e31",
+    "correctness": {
+      "rel_err": 0.0002325464301975444,
+      "status": "PASS"
+    },
+    "performance": {
+      "latency_us": 17.653333644072216,
+      "tflops": null,
+      "bandwidth_gbps": null
+    },
+    "optimization": {
+      "action_category": "stage1_intermediate_reuse",
+      "action_description": ""
+    },
+    "iteration_ref": "iteration/1/executor/1_0",
+    "profile_evidence": {
+      "tool_used": "torch.cuda.Event",
+      "evidence_summary": "Gen1 child 1_0 stage1_intermediate_reuse passed M=8/16/32 on NVIDIA L20D. mean_latency_us=17.6533 vs baseline 154.1547, score=8.7323.",
+      "bottleneck_type": "compute_bound",
+      "evidence_chain": "baseline recomputed stage1 gate/up per output column -> candidate computes stage1 intermediate once per token/topk/intermediate -> measured 8.73x speedup while preserving correctness",
+      "result_file": "profiles/1/1_0/result.json"
+    },
+    "MAP_Elite_feature": "2-2-3"
+  }
+}

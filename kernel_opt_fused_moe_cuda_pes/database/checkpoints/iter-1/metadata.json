@@ -1,0 +1,86 @@
+{
+  "generation": 1,
+  "timestamp": 1782795154.191758,
+  "baseline": {
+    "solution_id": "0e31b197",
+    "latency_us": 154.15466328461966
+  },
+  "best_solution_id": "f4392cab",
+  "best_score": 8.732325938697873,
+  "population_size_current": 2,
+  "elites": [
+    "f4392cab",
+    "0e31b197"
+  ],
+  "islands_state": [
+    {
+      "island_id": 0,
+      "members": [
+        "0e31b197",
+        "f4392cab"
+      ],
+      "best_solution_id": "f4392cab",
+      "feature_map": {
+        "2-0-2": "0e31b197",
+        "2-2-3": "f4392cab"
+      }
+    },
+    {
+      "island_id": 1,
+      "members": [],
+      "best_solution_id": null,
+      "feature_map": {}
+    },
+    {
+      "island_id": 2,
+      "members": [],
+      "best_solution_id": null,
+      "feature_map": {}
+    }
+  ],
+  "feature_stats": {
+    "complexity": {
+      "min": 1877.0,
+      "max": 1877.0,
+      "values": [
+        1877.0,
+        1877.0
+      ]
+    },
+    "score": {
+      "min": 1.0,
+      "max": 8.732325938697873,
+      "values": [
+        1.0,
+        8.732325938697873
+      ]
+    },
+    "diversity": {
+      "min": 0.0,
+      "max": 0.0,
+      "values": [
+        0.0
+      ]
+    }
+  },
+  "migration": {
+    "last_migration_generation": 0
+  },
+  "history": [
+    {
+      "generation": 0,
+      "best_score": 1.0,
+      "best_solution_id": "0e31b197"
+    },
+    {
+      "generation": 1,
+      "best_score": 8.732325938697873,
+      "best_solution_id": "f4392cab"
+    }
+  ],
+  "convergence": {
+    "no_improve_streak": 0,
+    "stopped": true,
+    "stop_reason": "target_met"
+  }
+}

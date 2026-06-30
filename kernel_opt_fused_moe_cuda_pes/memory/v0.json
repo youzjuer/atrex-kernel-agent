@@ -1,0 +1,42 @@
+{
+  "version": "v0",
+  "masked": false,
+  "timestamp": "2026-06-30T04:48:35.312281+00:00",
+  "performance": {
+    "latency_us": 154.15466328461966,
+    "tflops": null,
+    "bandwidth_gbps": null,
+    "tflops_peak_utilization_pct": null,
+    "bandwidth_peak_utilization_pct": null,
+    "comparison_with_previous": {
+      "latency_delta": null,
+      "tflops_delta": null,
+      "bandwidth_delta": null
+    }
+  },
+  "optimization": {
+    "action_category": "baseline_cuda",
+    "action_description": "One CUDA thread per output element fused MoE fp32 baseline",
+    "expected_impact": "Seed solution for local CUDA Full-Agent PES",
+    "risks_and_rollback": "Simple but slow; rollback is baseline kernel.py plus src/fused_moe_kernel.*"
+  },
+  "profile_evidence": {
+    "tool_used": "torch.cuda.Event",
+    "evidence_summary": "Local CUDA L20D run passed M=8/16/32; mean_latency_us=154.1547",
+    "bottleneck_type": "compute_bound",
+    "evidence_chain": "one thread recomputes gate/up dot products for each output h -> redundant HxI work -> plan shared/intermediate reuse candidates"
+  },
+  "correctness": {
+    "rel_err": 0.0002325464301975444,
+    "status": "PASS"
+  },
+  "isa_metric_progress": [],
+  "search_log": [],
+  "pitfalls_and_fixes": [],
+  "references": [],
+  "quality_gate": {
+    "result": "PASS",
+    "failure_reason": null
+  },
+  "git_commit_hash": null
+}

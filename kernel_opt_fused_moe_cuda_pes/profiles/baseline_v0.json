@@ -1,0 +1,35 @@
+{
+  "status": "PASS",
+  "max_abs": 2.270098775625229e-09,
+  "max_rel": 0.0002325464301975444,
+  "mean_latency_us": 154.15466328461966,
+  "rows": [
+    {
+      "M": 8,
+      "status": "PASS",
+      "max_abs": 1.6298145055770874e-09,
+      "max_rel": 0.00010767477215267718,
+      "candidate_us": 162.78399527072906,
+      "reference_us": 38121.50573730469,
+      "speedup_vs_reference": 234.18460564199881
+    },
+    {
+      "M": 16,
+      "status": "PASS",
+      "max_abs": 2.0954757928848267e-09,
+      "max_rel": 0.0002325464301975444,
+      "candidate_us": 146.01600170135498,
+      "reference_us": 77789.05487060547,
+      "speedup_vs_reference": 532.743356647353
+    },
+    {
+      "M": 32,
+      "status": "PASS",
+      "max_abs": 2.270098775625229e-09,
+      "max_rel": 0.00015866418834775686,
+      "candidate_us": 153.6639928817749,
+      "reference_us": 198951.7059326172,
+      "speedup_vs_reference": 1294.719095876192
+    }
+  ]
+}
