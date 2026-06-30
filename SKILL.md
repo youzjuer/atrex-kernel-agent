@@ -166,19 +166,26 @@ Exit criteria:
 
 Then the main agent takes over and must enter Stage 2 immediately. It is forbidden to stop, summarize final deliverables, or exit the workflow after Stage 1 unless Stage 2 has also completed or the user explicitly asks to stop.
 
-### Stage 2: Profile-Driven Iterative Optimization
+### Stage 2: Iterative Optimization
 
-**Sub-skill**: [gpu-kernel-profile-optimizer](skills/gpu-kernel-profile-optimizer/SKILL.md)
+Two interchangeable search shapes solve the same problem; pick one for Stage 2:
+
+- **Evolutionary (default for the full-agent loop)** — [gpu-kernel-evolve](skills/gpu-kernel-evolve/SKILL.md):
+  a Plan-Execute-Summary loop over an island-model MAP-Elites population. Each generation selects
+  parents, fans out N candidates, evaluates them as the sole promotion gate, admits by
+  score/diversity, summarizes, checkpoints, and repeats. State lives in the evolution database
+  (`tools/evolution_db.py`). At `n_candidates = 1` it degenerates to the linear loop below.
+- **Linear (single trajectory)** — [gpu-kernel-profile-optimizer](skills/gpu-kernel-profile-optimizer/SKILL.md):
+  the classic profile -> single-category change -> validate -> commit loop recorded in
+  `memory/v<N>.json`. Equivalent to evolve with `n_candidates = 1`.
 
 **Helper skill**: [gpu-kernel-bottleneck-analysis](skills/gpu-kernel-bottleneck-analysis/SKILL.md)
 
-Goal: use Step 0 Roofline conclusions and multiple profile -> code change -> validation loops to approach the performance limit.
-
-Stage 2 researches, plans, searches gpu-wiki/reference projects, writes an optimization plan, profiles, modifies code, validates correctness, applies quality gates, commits, and writes `memory/v<N>.json`. It must continually compare against ISA optimization targets recorded in `README.md`.
+Goal: use Step 0 Roofline conclusions and repeated profile -> code change -> validation loops to approach the performance limit. Both shapes research, plan, search gpu-wiki/reference projects, profile, modify code, validate correctness, apply quality gates, and commit. They must continually compare against ISA optimization targets recorded in `README.md`.
 
 Entry criteria: Stage 1 passed and `README.md` contains Step 0 Roofline analysis and `Stop Conditions`.
 
-Exit condition: performance reaches the absolute target in `README.md` under `Stop Conditions`.
+Exit condition: performance reaches the absolute target in `README.md` under `Stop Conditions` (evolve also stops on its convergence / iteration-budget conditions).
 
 When the exit condition is met, stop optimization and summarize deliverables.
 
@@ -202,6 +209,7 @@ All sub-skills share top-level `tools/`:
 - `tools/classify_ncu.py`
 - `tools/extract_nvidia_asm.py`
 - `tools/memory_manager.py`
+- `tools/evolution_db.py` — evolutionary population database for the `gpu-kernel-evolve` PES loop
 
 ## Shared References
 
