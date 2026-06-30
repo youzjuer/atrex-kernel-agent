@@ -68,9 +68,12 @@ probe.
 
 - `kernel.py`: FlashInfer-compatible Python entrypoint and routing glue.
 - `src/fused_moe_kernel.cpp`: C++ validation and PyTorch binding.
-- `src/fused_moe_kernel.cu`: scalar correctness-first CUDA baseline for packed FP4 block-scale MoE.
+- `src/fused_moe_kernel.cu`: staged CUDA baseline for packed FP4 block-scale MoE:
+  - `stage1_activation_kernel`: computes `silu(X2) * X1` once for each `(token, topk, I)`.
+  - `stage2_output_kernel`: reuses the intermediate activation for all output columns.
 - `reference.py`: FlashInfer-aligned PyTorch oracle and deterministic input generator.
 - `test_kernel.py`: correctness/profile evaluator comparing candidate output to the aligned oracle.
 
-This baseline is intentionally not a performant Qwen full-shape implementation. Its purpose is to
-put PES on the correct operator surface before optimization starts.
+This baseline is still not a production grouped-GEMM implementation, but it removes the largest
+scalar redundancy from the initial correctness baseline and gives PES a better starting point for
+expert grouping and tiled FP4 dequantization.

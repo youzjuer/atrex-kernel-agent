@@ -59,11 +59,69 @@ __device__ __forceinline__ float load_fp4_scaled(const uint8_t* __restrict__ pac
   return e2m1_to_float(nibble) * scales[scale_base + col / scale_vec_size];
 }
 
-__global__ void fp4_moe_forward_kernel(
+__global__ void stage1_activation_kernel(
     const __nv_bfloat16* __restrict__ hidden_states,
     const uint8_t* __restrict__ gemm1_weights,
     const float* __restrict__ gemm1_weights_scale,
     const float* __restrict__ gemm1_bias,
+    const int64_t* __restrict__ topk_ids,
+    float* __restrict__ mid,
+    int T,
+    int H,
+    int I,
+    int E_local,
+    int TOPK,
+    int num_experts,
+    int local_expert_offset,
+    int gemm1_scale_cols,
+    bool has_gemm1_bias) {
+  const int i = blockIdx.x * blockDim.x + threadIdx.x;
+  const int tk = blockIdx.y * blockDim.y + threadIdx.y;
+  if (i >= I || tk >= T * TOPK) {
+    return;
+  }
+
+  const int t = tk / TOPK;
+  const int k = tk - t * TOPK;
+  const int64_t global_expert_raw = topk_ids[t * TOPK + k];
+  if (global_expert_raw < 0 || global_expert_raw >= num_experts) {
+    mid[static_cast<int64_t>(tk) * I + i] = 0.0f;
+    return;
+  }
+  const int le = static_cast<int>(global_expert_raw) - local_expert_offset;
+  if (le < 0 || le >= E_local) {
+    mid[static_cast<int64_t>(tk) * I + i] = 0.0f;
+    return;
+  }
+
+  const int gemm1_scale_vec = H / gemm1_scale_cols;
+  float x1 = has_gemm1_bias ? gemm1_bias[(static_cast<int64_t>(le) * 2 * I) + i] : 0.0f;
+  float x2 = has_gemm1_bias ? gemm1_bias[(static_cast<int64_t>(le) * 2 * I) + I + i] : 0.0f;
+  const int64_t w1_x1_packed_base = ((static_cast<int64_t>(le) * 2 * I + i) * (H / 2));
+  const int64_t w1_x2_packed_base =
+      ((static_cast<int64_t>(le) * 2 * I + I + i) * (H / 2));
+  const int64_t w1_x1_scale_base =
+      ((static_cast<int64_t>(le) * 2 * I + i) * gemm1_scale_cols);
+  const int64_t w1_x2_scale_base =
+      ((static_cast<int64_t>(le) * 2 * I + I + i) * gemm1_scale_cols);
+  const int64_t hidden_base = static_cast<int64_t>(t) * H;
+
+  for (int j = 0; j < H; ++j) {
+    const float hidden = __bfloat162float(hidden_states[hidden_base + j]);
+    const float w1_x1 = load_fp4_scaled(gemm1_weights, gemm1_weights_scale,
+                                        w1_x1_packed_base, w1_x1_scale_base, j,
+                                        gemm1_scale_vec);
+    const float w1_x2 = load_fp4_scaled(gemm1_weights, gemm1_weights_scale,
+                                        w1_x2_packed_base, w1_x2_scale_base, j,
+                                        gemm1_scale_vec);
+    x1 = fmaf(hidden, w1_x1, x1);
+    x2 = fmaf(hidden, w1_x2, x2);
+  }
+  mid[static_cast<int64_t>(tk) * I + i] = silu(x2) * x1;
+}
+
+__global__ void stage2_output_kernel(
+    const float* __restrict__ mid,
     const uint8_t* __restrict__ gemm2_weights,
     const float* __restrict__ gemm2_weights_scale,
     const float* __restrict__ gemm2_bias,
@@ -77,9 +135,7 @@ __global__ void fp4_moe_forward_kernel(
     int TOPK,
     int num_experts,
     int local_expert_offset,
-    int gemm1_scale_cols,
     int gemm2_scale_cols,
-    bool has_gemm1_bias,
     bool has_gemm2_bias) {
   const int h = blockIdx.x * blockDim.x + threadIdx.x;
   const int t = blockIdx.y * blockDim.y + threadIdx.y;
@@ -87,10 +143,8 @@ __global__ void fp4_moe_forward_kernel(
     return;
   }
 
-  const int gemm1_scale_vec = H / gemm1_scale_cols;
   const int gemm2_scale_vec = I / gemm2_scale_cols;
   float acc_out = 0.0f;
-
   for (int k = 0; k < TOPK; ++k) {
     const int64_t global_expert_raw = topk_ids[t * TOPK + k];
     if (global_expert_raw < 0 || global_expert_raw >= num_experts) {
@@ -102,38 +156,14 @@ __global__ void fp4_moe_forward_kernel(
     }
 
     float expert_sum = 0.0f;
+    const int64_t tk = static_cast<int64_t>(t) * TOPK + k;
+    const int64_t w2_packed_base = (static_cast<int64_t>(le) * H + h) * (I / 2);
+    const int64_t w2_scale_base = (static_cast<int64_t>(le) * H + h) * gemm2_scale_cols;
     for (int i = 0; i < I; ++i) {
-      float x1 = has_gemm1_bias ? gemm1_bias[(static_cast<int64_t>(le) * 2 * I) + i] : 0.0f;
-      float x2 = has_gemm1_bias ? gemm1_bias[(static_cast<int64_t>(le) * 2 * I) + I + i] : 0.0f;
-      const int64_t w1_x1_packed_base = ((static_cast<int64_t>(le) * 2 * I + i) * (H / 2));
-      const int64_t w1_x2_packed_base =
-          ((static_cast<int64_t>(le) * 2 * I + I + i) * (H / 2));
-      const int64_t w1_x1_scale_base =
-          ((static_cast<int64_t>(le) * 2 * I + i) * gemm1_scale_cols);
-      const int64_t w1_x2_scale_base =
-          ((static_cast<int64_t>(le) * 2 * I + I + i) * gemm1_scale_cols);
-      const int64_t hidden_base = static_cast<int64_t>(t) * H;
-
-      for (int j = 0; j < H; ++j) {
-        const float hidden = __bfloat162float(hidden_states[hidden_base + j]);
-        const float w1_x1 = load_fp4_scaled(gemm1_weights, gemm1_weights_scale,
-                                            w1_x1_packed_base, w1_x1_scale_base, j,
-                                            gemm1_scale_vec);
-        const float w1_x2 = load_fp4_scaled(gemm1_weights, gemm1_weights_scale,
-                                            w1_x2_packed_base, w1_x2_scale_base, j,
-                                            gemm1_scale_vec);
-        x1 = fmaf(hidden, w1_x1, x1);
-        x2 = fmaf(hidden, w1_x2, x2);
-      }
-
-      const float activated = silu(x2) * x1;
-      const int64_t w2_packed_base = (static_cast<int64_t>(le) * H + h) * (I / 2);
-      const int64_t w2_scale_base = (static_cast<int64_t>(le) * H + h) * gemm2_scale_cols;
       const float w2 = load_fp4_scaled(gemm2_weights, gemm2_weights_scale, w2_packed_base,
                                        w2_scale_base, i, gemm2_scale_vec);
-      expert_sum = fmaf(activated, w2, expert_sum);
+      expert_sum = fmaf(mid[tk * I + i], w2, expert_sum);
     }
-
     if (has_gemm2_bias) {
       expert_sum += gemm2_bias[static_cast<int64_t>(le) * H + h];
     }
@@ -160,17 +190,29 @@ void fused_moe_forward_cuda(torch::Tensor hidden_states, torch::Tensor gemm1_wei
   const int gemm1_scale_cols = static_cast<int>(gemm1_weights_scale.size(2));
   const int gemm2_scale_cols = static_cast<int>(gemm2_weights_scale.size(2));
 
-  constexpr dim3 block(16, 4);
-  const dim3 grid((H + block.x - 1) / block.x, (T + block.y - 1) / block.y);
+  auto mid = torch::empty({T * TOPK, I}, hidden_states.options().dtype(torch::kFloat32));
   const auto stream = at::cuda::getCurrentCUDAStream();
-  fp4_moe_forward_kernel<<<grid, block, 0, stream>>>(
+
+  constexpr dim3 block_stage1(16, 4);
+  const dim3 grid_stage1((I + block_stage1.x - 1) / block_stage1.x,
+                         (T * TOPK + block_stage1.y - 1) / block_stage1.y);
+  stage1_activation_kernel<<<grid_stage1, block_stage1, 0, stream>>>(
       reinterpret_cast<const __nv_bfloat16*>(hidden_states.data_ptr<at::BFloat16>()),
       gemm1_weights.data_ptr<uint8_t>(), gemm1_weights_scale.data_ptr<float>(),
-      gemm1_bias.data_ptr<float>(), gemm2_weights.data_ptr<uint8_t>(),
+      gemm1_bias.data_ptr<float>(), topk_ids.data_ptr<int64_t>(), mid.data_ptr<float>(), T, H, I,
+      E_local, TOPK, static_cast<int>(num_experts), static_cast<int>(local_expert_offset),
+      gemm1_scale_cols, gemm1_bias.numel() > 0);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+
+  constexpr dim3 block_stage2(16, 8);
+  const dim3 grid_stage2((H + block_stage2.x - 1) / block_stage2.x,
+                         (T + block_stage2.y - 1) / block_stage2.y);
+  stage2_output_kernel<<<grid_stage2, block_stage2, 0, stream>>>(
+      mid.data_ptr<float>(), gemm2_weights.data_ptr<uint8_t>(),
       gemm2_weights_scale.data_ptr<float>(), gemm2_bias.data_ptr<float>(),
       topk_ids.data_ptr<int64_t>(), topk_weights.data_ptr<float>(),
       reinterpret_cast<__nv_bfloat16*>(out.data_ptr<at::BFloat16>()), T, H, I, E_local, TOPK,
-      static_cast<int>(num_experts), static_cast<int>(local_expert_offset), gemm1_scale_cols,
-      gemm2_scale_cols, gemm1_bias.numel() > 0, gemm2_bias.numel() > 0);
+      static_cast<int>(num_experts), static_cast<int>(local_expert_offset), gemm2_scale_cols,
+      gemm2_bias.numel() > 0);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }

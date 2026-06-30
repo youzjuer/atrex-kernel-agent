@@ -90,5 +90,5 @@ torch::Tensor fused_moe_forward(torch::Tensor hidden_states, torch::Tensor gemm1
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("forward", &fused_moe_forward,
-        "FlashInfer-aligned FP4 block-scale MoE scalar CUDA baseline");
+        "FlashInfer-aligned FP4 block-scale MoE staged CUDA baseline");
 }

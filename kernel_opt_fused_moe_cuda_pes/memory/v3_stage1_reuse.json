@@ -1,0 +1,46 @@
+{
+  "version": "v3_stage1_reuse",
+  "masked": false,
+  "timestamp": "2026-06-30T15:18:56+08:00",
+  "operator": "flashinfer.trtllm_fp4_block_scale_moe",
+  "application_profile": "Qwen3_5-Plus_prefill_TP2",
+  "performance": {
+    "latency_us": 505.43999671936035,
+    "tflops": null,
+    "bandwidth_gbps": null,
+    "comparison_with_previous": {
+      "previous_latency_us": 26201.72882080078,
+      "latency_delta": -25696.28882408142,
+      "speedup_vs_previous": 51.84140112124284
+    }
+  },
+  "optimization": {
+    "action_category": "stage1_activation_reuse",
+    "action_description": "Split the scalar FP4 MoE into stage1 activation generation [T*top_k, I] and stage2 output accumulation [T, H].",
+    "expected_impact": "Remove repeated W1 gate/up projection work across output hidden columns.",
+    "risks_and_rollback": "Adds a temporary fp32 activation buffer and a second launch; rollback to v2 scalar single-kernel baseline if tiny shapes regress."
+  },
+  "profile_evidence": {
+    "tool_used": "torch.cuda.Event",
+    "evidence_summary": "Smoke profile PASS on NVIDIA L20D: 505.4400us vs previous scalar 26201.7288us.",
+    "bottleneck_type": "compute_bound",
+    "evidence_chain": "scalar baseline recomputed W1 gate/up for each output h -> staged kernel computes activation once per token/topk/intermediate -> W2 stage reuses mid buffer -> 51.84x faster on smoke profile"
+  },
+  "correctness": {
+    "status": "PASS",
+    "max_abs": 3.0517578125e-05,
+    "max_rel": 0.0058139534667134285,
+    "profiles": [
+      "profiles/stage1_reuse_smoke.json",
+      "profiles/stage1_reuse_qwen_micro.json",
+      "profiles/stage1_reuse_profile_smoke.json",
+      "profiles/stage1_reuse_qwen_tp2_interface.json",
+      "profiles/stage1_reuse_smoke_postcleanup.json"
+    ]
+  },
+  "quality_gate": {
+    "result": "PASS",
+    "failure_reason": null
+  },
+  "git_commit_hash": null
+}
