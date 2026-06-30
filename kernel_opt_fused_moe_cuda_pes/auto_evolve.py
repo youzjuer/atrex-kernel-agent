@@ -347,10 +347,7 @@ def codex_exec(repo_root: Path, prompt: str, args: argparse.Namespace) -> None:
         "exec",
         "--cd",
         str(repo_root),
-        "--sandbox",
-        "danger-full-access",
-        "--ask-for-approval",
-        "never",
+        "--dangerously-bypass-approvals-and-sandbox",
     ]
     if args.codex_model:
         cmd += ["--model", args.codex_model]
