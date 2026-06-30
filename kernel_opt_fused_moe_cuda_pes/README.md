@@ -1,58 +1,76 @@
-# CUDA Fused MoE PES Workspace
+# FlashInfer-Aligned FP4 MoE CUDA PES Workspace
 
 ## Target
-- platform: NVIDIA L20D
-- arch: CUDA / sm_89-compatible local GPU
-- framework: CUDA extension loaded through PyTorch
-- kernel type: fused MoE forward
-- dtype: fp32 baseline for local correctness and PES plumbing
 
-## Execution
-- execution_mode: local
-- local_gpu: NVIDIA L20D
-- CUDA_HOME: `/usr/local/cuda`
-- evaluator: `test_kernel.py`
+- API contract: `flashinfer.trtllm_fp4_block_scale_moe`
+- application profile: `Qwen3_5-Plus_prefill_TP2`
+- platform used here: NVIDIA L20D, CUDA, PyTorch extension
+- candidate code: CUDA C++ extension, not FlyDSL
+
+## Qwen3.5 Plus TP2 Contract
+
+The checked-in metadata follows the public Qwen3.5-397B/Plus MoE configuration used for the
+prefill TP2 target:
+
+- `num_experts = 512`
+- `top_k = 10`
+- `hidden_size = 4096`
+- `intermediate_size = 1024`
+- TP2 local expert shard default: `local_num_experts = 256`
+- default routing mode: `routing_method_type = 0` (`Softmax -> TopK`)
+
+The default smoke tests keep the same expert/routing contract but reduce hidden/intermediate sizes
+to make the scalar CUDA baseline practical:
+
+- `smoke`: `T in [2, 4]`, `H=128`, `I=64`, `E_global=512`, `top_k=10`, `E_local=16`
+- `qwen_micro`: `T in [2, 4]`, `H=256`, `I=128`, `E_global=512`, `top_k=10`, `E_local=16`
+- `qwen_tp2`: full metadata (`H=4096`, `I=1024`, `E_local=256`) unless overridden, but the current
+  scalar baseline is intended only for very small token counts.
 
 ## Inputs
-- shapes: `M in [8, 16, 32]`, `E=8`, `TOPK=2`, `H=64`, `I=32`
-- input tensors:
-  - `x`: `[M, H]` fp32
-  - `w1`: `[E, 2 * I, H]` fp32
-  - `w2`: `[E, H, I]` fp32
-  - `topk_ids`: `[M, TOPK]` int64
-  - `topk_weights`: `[M, TOPK]` fp32, normalized
-- reference: PyTorch implementation in `reference.py`
-- correctness threshold: max abs error <= `1e-3`, max rel error <= `1e-3`
 
-## Full-Agent PES Reference
-This workspace follows the LoongFlow-style PES layout from the cloned reference repository:
+The candidate `kernel.py::run` matches the FlashInfer signature:
 
-- planner/executor/summarizer traces under `iteration/<K>/`
-- population/checkpoint state under `database/`
-- evaluator evidence under `profiles/<K>/<child>/`
+- `routing_logits`: `[T, num_experts]`, bf16/fp32
+- `routing_bias`: optional `[num_experts]`
+- `hidden_states`: `[T, H]` bf16 in the current CUDA baseline
+- `hidden_states_scale`: accepted for API parity; unused for bf16 hidden states
+- `gemm1_weights`: `[E_local, 2 * I, H // 2]`, packed e2m1 FP4 in uint8
+- `gemm1_weights_scale`: `[E_local, 2 * I, H // 32]`, fp8 block scale
+- `gemm2_weights`: `[E_local, H, I // 2]`, packed e2m1 FP4 in uint8
+- `gemm2_weights_scale`: `[E_local, H, I // 32]`, fp8 block scale
+- `local_expert_offset`, `local_num_experts`, `routed_scaling_factor`, `routing_method_type`
 
-The reference repo's MoE trace is used for workflow structure and strategy vocabulary, but this
-workspace intentionally emits CUDA code for the current local environment rather than the archived
-Triton or FlyDSL implementations.
+The reference implements FlashInfer's documented semantics: unpack e2m1 FP4, apply block scales,
+route from logits, use TRT-LLM SwiGLU convention `silu(X2) * X1`, and scatter-add local expert
+outputs into `[T, H]` bf16.
 
-## Baseline
-- `kernel.py`: Python wrapper and PyTorch extension loader.
-- `src/fused_moe_kernel.cpp`: C++ binding and validation.
-- `src/fused_moe_kernel.cu`: one-kernel fused baseline.
+## Commands
 
-The baseline launches one CUDA thread per `(token, hidden_out)` element and computes both MoE GEMMs
-inside the thread. This is deliberately simple and correct; PES candidates should improve data reuse,
-parallelism, and decomposition.
+```bash
+cd kernel_opt_fused_moe_cuda_pes
+python test_kernel.py --mode correctness --preset smoke --tokens 2,4
+python test_kernel.py --mode profile --preset smoke --tokens 2
+python test_kernel.py --mode correctness --preset qwen_micro --tokens 1
+```
 
-## Stop Conditions
-- Correctness PASS on all local M values.
-- Performance score >= `2.0x` speedup over v0 baseline, or budget exhausted.
-- Candidate must be CUDA source, not FlyDSL or Triton.
+For a full metadata allocation smoke, override token count and local experts carefully:
 
-## Evolve Config
-- mode: Full-Agent PES
-- n_candidates: 3
-- num_islands: 3
-- max_generations: 10
-- no_improve_patience: 5
-- score_metric: speedup_vs_baseline_latency
+```bash
+python test_kernel.py --mode correctness --preset qwen_tp2 --tokens 1 --local-num-experts 16
+```
+
+Using the full TP2 local expert shard (`--local-num-experts 256`) allocates production-sized FP4
+weights and is not appropriate for the current scalar baseline except as an allocation/interface
+probe.
+
+## Current Baseline
+
+- `kernel.py`: FlashInfer-compatible Python entrypoint and routing glue.
+- `src/fused_moe_kernel.cpp`: C++ validation and PyTorch binding.
+- `src/fused_moe_kernel.cu`: scalar correctness-first CUDA baseline for packed FP4 block-scale MoE.
+- `reference.py`: FlashInfer-aligned PyTorch oracle and deterministic input generator.
+- `test_kernel.py`: correctness/profile evaluator comparing candidate output to the aligned oracle.
+
+This baseline is intentionally not a performant Qwen full-shape implementation. Its purpose is to
+put PES on the correct operator surface before optimization starts.

@@ -29,5 +29,9 @@
     "min_rel_improve": 0.01
   },
   "target_score": 2.0,
-  "score_metric": "speedup_vs_baseline"
+  "score_metric": "speedup_vs_flashinfer_aligned_baseline",
+  "operator": "flashinfer.trtllm_fp4_block_scale_moe",
+  "application_profile": "Qwen3_5-Plus_prefill_TP2",
+  "candidate_language": "cuda",
+  "notes": "Task reset from toy FP32 MoE to FlashInfer-compatible packed FP4 block-scale MoE. Current scalar CUDA baseline is correctness-first; optimize after this contract."
 }

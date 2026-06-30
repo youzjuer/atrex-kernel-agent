@@ -1,0 +1,42 @@
+{
+  "version": "v2_flashinfer_alignment",
+  "masked": false,
+  "timestamp": "2026-06-30T15:04:30+08:00",
+  "operator": "flashinfer.trtllm_fp4_block_scale_moe",
+  "application_profile": "Qwen3_5-Plus_prefill_TP2",
+  "performance": {
+    "latency_us": 26201.72882080078,
+    "tflops": null,
+    "bandwidth_gbps": null,
+    "comparison_with_previous": {
+      "latency_delta": null,
+      "note": "Task contract reset; previous v0/v1 numbers were toy FP32 MoE and are not comparable."
+    }
+  },
+  "optimization": {
+    "action_category": "contract_alignment",
+    "action_description": "Replace toy FP32 MoE task with FlashInfer-compatible packed FP4 block-scale MoE API and scalar CUDA baseline.",
+    "expected_impact": "PES candidates now optimize the requested operator surface instead of the earlier local toy shape.",
+    "risks_and_rollback": "Scalar CUDA is slow and supports bf16 hidden states only; rollback by restoring pre-alignment kernel.py/reference.py/src/test_kernel.py."
+  },
+  "profile_evidence": {
+    "tool_used": "torch.cuda.Event",
+    "evidence_summary": "Smoke profile PASS on NVIDIA L20D for E_global=512, top_k=10, H=128, I=64, E_local=16.",
+    "bottleneck_type": "compute_bound",
+    "evidence_chain": "one scalar thread computes a full FP4-dequantized expert path per output element -> correctness baseline only -> grouped/tiled CUDA is required for production Qwen dimensions"
+  },
+  "correctness": {
+    "status": "PASS",
+    "max_abs": 0.0,
+    "max_rel": 0.0,
+    "profiles": [
+      "profiles/flashinfer_aligned_smoke.json",
+      "profiles/flashinfer_aligned_qwen_micro.json"
+    ]
+  },
+  "quality_gate": {
+    "result": "PASS",
+    "failure_reason": null
+  },
+  "git_commit_hash": null
+}
