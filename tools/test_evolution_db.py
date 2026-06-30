@@ -269,6 +269,39 @@ class TestConvergence(DBTestBase):
         self.assertTrue(r["stopped"])
         self.assertEqual(r["stop_reason"], "budget_exhausted")
 
+    def test_target_met_via_flag(self):
+        db = self._init(num_islands=1)
+        db.import_seed("memory/v0.json", "kernel.py")
+        db.load()
+        r = db.checkpoint(1, target_met=True)
+        self.assertTrue(r["stopped"])
+        self.assertEqual(r["stop_reason"], "target_met")
+
+    def test_target_met_via_score_threshold(self):
+        db = self._init(num_islands=1)
+        db.config["target_score"] = 3.0
+        db.config["budget"] = {"max_generations": 100}
+        db._write_config()
+        seed = db.import_seed("memory/v0.json", "kernel.py")["solution_id"]
+        db.load()
+        self._write_kernel("fast.py", "def run():\n    return 1\n" + "f" * 30)
+        db.add(make_add_ns(code="fast.py", generation=1, parent=seed, latency_us=200.0))  # 5x
+        r = db.checkpoint(1)
+        self.assertTrue(r["stopped"])
+        self.assertEqual(r["stop_reason"], "target_met")
+
+    def test_target_takes_priority_over_budget(self):
+        db = self._init(num_islands=1)
+        db.config["target_score"] = 2.0
+        db.config["budget"] = {"max_generations": 1}
+        db._write_config()
+        seed = db.import_seed("memory/v0.json", "kernel.py")["solution_id"]
+        db.load()
+        self._write_kernel("p.py", "def run():\n    return 1\n" + "p" * 20)
+        db.add(make_add_ns(code="p.py", generation=1, parent=seed, latency_us=250.0))  # 4x >= 2
+        r = db.checkpoint(1)
+        self.assertEqual(r["stop_reason"], "target_met")
+
 
 class TestGenerationFanout(DBTestBase):
     """M3: a full N-candidate generation (select -> add x N -> checkpoint)."""

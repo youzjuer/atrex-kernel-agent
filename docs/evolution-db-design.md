@@ -153,6 +153,7 @@ kernel_opt_<name>/
   "n_candidates": 3,                      // 每代 child 数（executor fan-out）
   "budget": { "max_generations": 30 },
   "convergence": { "no_improve_patience": 5, "min_rel_improve": 0.01 },
+  "target_score": null,                   // best_score >= 此值即 target_met（Stop Conditions）；null=仅由编排 --target-met 触发
   "score_metric": "speedup_vs_baseline"
 }
 ```
@@ -290,6 +291,7 @@ python tools/evolution_db.py checkpoint   --workspace $WS --generation $K --json
 | `n_candidates` (N) | 3 | atrex 方案 |
 | `budget.max_generations` | 30 | atrex 方案 |
 | `convergence` | patience 5 / min_rel_improve 0.01 | atrex 方案 |
+| `target_score` | null（达标即 target_met；null=仅 `--target-met` 触发） | atrex 方案 |
 | `score_metric` | speedup_vs_baseline | atrex 方案 |
 
 > ⚠️ 容量类参数（population 100 / elite 50）是**上限**。atrex 本地评测下 N=3×≤30 代 ≈ 最多 90 候选，种群不会填满、剪枝很少触发、迁移约 3 次——属正常，参数全可配。若要更激进可调大 N 或代数预算。

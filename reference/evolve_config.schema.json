@@ -24,5 +24,6 @@
     "no_improve_patience": 5,
     "min_rel_improve": 0.01
   },
+  "target_score": null,
   "score_metric": "speedup_vs_baseline"
 }

@@ -57,6 +57,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "n_candidates": 3,
     "budget": {"max_generations": 30},
     "convergence": {"no_improve_patience": 5, "min_rel_improve": 0.01},
+    "target_score": None,  # stop when best_score >= this (Stop Conditions); null = orchestrator-signaled only
     "score_metric": "speedup_vs_baseline",
 }
 
@@ -636,7 +637,7 @@ class EvolutionDB:
         self.save()
         return out
 
-    def checkpoint(self, generation: int) -> Dict[str, Any]:
+    def checkpoint(self, generation: int, target_met: bool = False) -> Dict[str, Any]:
         self._update_best()
         best_id = self.state["best_solution_id"]
         best_score = self.state["best_score"]
@@ -654,9 +655,16 @@ class EvolutionDB:
         self.state["history"].append(
             {"generation": generation, "best_score": best_score, "best_solution_id": best_id}
         )
+        # target_met (Stop Conditions) takes priority over no_improve / budget.
+        target_score = self.config.get("target_score")
+        target_reached = bool(target_met) or (
+            target_score is not None and best_score is not None and best_score >= target_score
+        )
         patience = self.config["convergence"]["no_improve_patience"]
         max_gen = self.config["budget"]["max_generations"]
-        if conv["no_improve_streak"] >= patience:
+        if target_reached:
+            conv["stopped"], conv["stop_reason"] = True, "target_met"
+        elif conv["no_improve_streak"] >= patience:
             conv["stopped"], conv["stop_reason"] = True, "no_improve"
         elif generation >= max_gen:
             conv["stopped"], conv["stop_reason"] = True, "budget_exhausted"
@@ -864,6 +872,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("checkpoint", help="Finalize a generation.")
     common(sp)
     sp.add_argument("--generation", type=int, required=True)
+    sp.add_argument("--target-met", dest="target_met", action="store_true",
+                    help="Signal Stop Conditions reached -> stop_reason=target_met.")
 
     sp = sub.add_parser("best", help="Print the current best solution.")
     common(sp)
@@ -907,7 +917,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             n = args.n if args.n is not None else db.config["n_candidates"]
             _emit(db.select_parents(n), args.json)
         elif args.command == "checkpoint":
-            _emit(db.checkpoint(args.generation), args.json)
+            _emit(db.checkpoint(args.generation, target_met=args.target_met), args.json)
         elif args.command == "best":
             _emit(db.best(args.island), args.json)
         elif args.command == "lineage":

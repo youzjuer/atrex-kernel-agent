@@ -313,6 +313,48 @@ The `tools/` directory provides:
 - `profile_nvidia.sh`: NVIDIA profiling wrapper for ncu; parses metrics and classifies symptoms via `classify_ncu.py` and the bundled `ncu_helpers/`.
 - `extract_nvidia_asm.py`: extract and analyze NVIDIA SASS (from `.ncu-rep`, cubin, Triton, or CuteDSL).
 - `memory_manager.py`: manage structured iteration records.
+- `evolution_db.py`: manage the evolutionary population database — islands, MAP-Elites, elite archive, ring migration, diversity-adaptive Boltzmann selection, and `parent_id` lineage — for the PES loop.
+
+## Evolutionary Optimization (Full-Agent PES)
+
+Stage 2 supports a second, population-based search shape that generalizes the linear loop above: an
+evolutionary **Plan–Execute–Summary (PES)** loop. Instead of advancing one kernel along a single
+trajectory, each generation maintains a population, fans out multiple candidates, and keeps the best
+by an explicit fitness gate. See [`full-agent-refactor-plan.md`](full-agent-refactor-plan.md) for the
+rationale and [`evolution-db-design.md`](evolution-db-design.md) for the database design.
+
+### Components
+
+- **`tools/evolution_db.py`** — the state hub / single source of truth: an island-model MAP-Elites
+  population with an elite archive, ring migration, diversity-adaptive Boltzmann parent selection,
+  and full `parent_id` lineage. State lives under the workspace `database/` (config, live state,
+  per-solution snapshots, per-generation checkpoints), not in linear `memory/v<N>.json`.
+- **`skills/gpu-kernel-evolve/SKILL.md`** — the per-generation orchestrator.
+- **Sub-agents** — `agents/gpu-kernel-{planner,executor,evaluator,summarizer}.md`.
+
+### The Loop
+
+```text
+init + import-seed (baseline v0 -> seed)
+repeat per generation K:
+  select-parents (Boltzmann)        -> N parents
+  planner                           -> N single-category, evidence-backed strategies
+  executor (fan-out, isolated)      -> N candidate kernels
+  evaluator (sole promotion gate)   -> (correctness, score=speedup, latency, evidence)
+  evolution_db add (x N)            -> MAP-Elites / island / elite / migration / prune + lineage
+  summarizer                        -> distilled feedback for the next planner
+  checkpoint                        -> best, metadata, stop_reason
+until stop_reason in {target_met, no_improve, budget_exhausted}
+finalize                            -> sync best -> kernel.py; optional output-contract packaging
+```
+
+### Relationship to the Linear Loop
+
+This is a strict generalization. At `n_candidates = 1` it degenerates to the single-trajectory
+profile-driven loop (no regression). All global constraints are inherited unchanged: hardware specs
+come from `gpu-wiki`, every change traces to profiler evidence, correctness gates performance, and
+every accepted generation is committed. The evaluator is the only promotion gate; failed candidates
+are retained as negative evidence (score 0) rather than discarded.
 
 ## Critical Constraints
 

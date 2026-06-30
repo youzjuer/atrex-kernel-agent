@@ -183,16 +183,21 @@ branch from their respective parents). Omit `--score` to let the tool compute sp
 - **Planner exhaustion** (planner returns `exhaustion = true`): no new actionable knowledge — escalate
   to partial-restart rather than emitting a speculative plan.
 
-### Step 6 — Summarize (subagent)
+### Step 6 — Summarize (subagent) — closes the feedback loop
 
 Launch the **summarizer** subagent over this generation's candidates (what worked, what failed, why)
-and write the distilled feedback to `iteration/<K>/summarizer/`. It is the planner's context next
-generation.
+and write the distilled feedback to `iteration/<K>/summarizer/summary.md`. This is the PES feedback
+loop: in Step 2 of generation `K+1` the planner reads `iteration/<K>/summarizer/` as `prev_summary`,
+so each generation's lessons (failed categories not to repeat, promising directions, crowded vs empty
+MAP-Elites regions) directly shape the next plan. The loop is `plan → execute → evaluate → summarize
+→ plan`.
 
 ### Step 7 — Checkpoint, Sync, Commit
 
 ```bash
-python tools/evolution_db.py checkpoint --workspace kernel_opt_<name> --generation <K> --json
+# pass --target-met when README Stop Conditions are reached this generation
+# (or set config target_score once, and checkpoint detects it automatically)
+python tools/evolution_db.py checkpoint --workspace kernel_opt_<name> --generation <K> [--target-met] --json
 ```
 
 This writes `checkpoints/iter-<K>/{best_solution.json, metadata.json, solutions/}` and reports
@@ -221,15 +226,27 @@ Read the `checkpoint` result:
   `budget_exhausted` (`budget.max_generations` reached).
 - otherwise → next generation (K+1), back to Step 1.
 
-On stop, print the final summary and the winning lineage:
+## Finalization (on stop)
 
-```bash
-python tools/evolution_db.py summary --workspace kernel_opt_<name>
-python tools/evolution_db.py lineage --workspace kernel_opt_<name> --solution <best_id>
-```
+When the loop stops, produce the deliverables:
 
-Then hand the winning `kernel.py` to `gpu-kernel-output-contract` if a clean evaluator candidate is
-required.
+1. Print the final summary and the winning lineage (audit trail back to the seed):
+
+   ```bash
+   python tools/evolution_db.py summary --workspace kernel_opt_<name>
+   BEST=$(python tools/evolution_db.py best --workspace kernel_opt_<name> --json)
+   python tools/evolution_db.py lineage --workspace kernel_opt_<name> --solution <best_id>
+   ```
+
+2. Confirm the workspace `kernel.py` is the global best (synced in Step 7).
+
+3. If a hidden evaluator needs a clean candidate, hand the winning `kernel.py` to
+   [gpu-kernel-output-contract](../gpu-kernel-output-contract/SKILL.md) to package
+   `generated_kernel.py` (valid runtime code only — no tests, benchmarks, or debug output).
+
+4. Report the result: best `solution_id`, score (speedup vs baseline), `stop_reason`, generations
+   run, and the winning lineage. If `stop_reason` is `no_improve` and Stop Conditions were not met,
+   note that the run converged below target (consider partial-restart or a larger budget / N).
 
 ## Islands, Migration & Lineage
 
