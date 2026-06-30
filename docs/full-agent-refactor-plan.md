@@ -96,10 +96,10 @@
 ### 决策 C：种群与并行规模 ✅ 已定（保守默认，可配置）
 
 - **每代候选数 N = 3**（executor fan-out 3 个 child）。
-- **岛数量 = 1（单岛起步）**：M2/M3 先单岛跑通，M4 再开多岛（默认上限 2 岛，可配置）。
+- **种群/岛/精英/选择 = 复用原仓库 LoongFlow 默认**（`num_islands=3`、`population_size=100`、`elite_archive_size=50`、迁移每 10 代/20%、MAP-Elites 特征网格、自适应温度 Boltzmann）。详见 [evolution-db-design.md](evolution-db-design.md) §4/§7。
 - **迭代预算 = 最多 30 代**（参考实现 MoE 用了 40 代；本地评测更慢，先设 30 上限，可配置）。
 - **收敛/停止判据**（满足任一即停）：① README `Stop Conditions` 达标；② 连续 **5** 代 best 无提升（相对提升 < 1%）；③ 迭代预算耗尽。
-- 以上数值全部做成**可配置项**（写进 workspace `README.md` 的 `Evolve Config` 段），默认值如上。
+- 容量类参数（population 100 / elite 50）是上限；本地 N=3×≤30 代下种群不会填满，属正常，全部可配置。
 
 ### 4.4 默认参数表（本稿锁定值）
 
@@ -108,10 +108,12 @@
 | 目标形态 | A1 融入（不移植 LoongFlow） | 否（已确认） | §5 / §6 |
 | evaluator 运行环境 | 本地（do_bench + ncu/rocprofv3） | 是 | §5.3 evaluator |
 | 每代候选数 N | 3 | 是 | `gpu-kernel-evolve` |
-| 岛数量 | 1（起步）→ ≤2（M4） | 是 | `evolution_db` |
+| 岛数量 | **3（原仓库默认）** | 是 | `evolution_db` |
 | 迭代预算 | ≤30 代 | 是 | workspace README `Evolve Config` |
 | 收敛判据 | 达标 / 连续5代无提升(<1%) / 预算耗尽 | 是 | `gpu-kernel-evolve` |
-| 父代选择 | Boltzmann（温度可调） | 是 | `evolution_db select-parents` |
+| score 口径 | **加速比(原仓库:单float越大越好)** | 是 | evaluator |
+| novelty / 准入 | **代码距离 + MAP-Elites + 精英存档 + 迁移(原仓库)** | 是 | `evolution_db add` |
+| 父代选择 | **自适应温度 Boltzmann(原仓库)** | 是 | `evolution_db select-parents` |
 | 复用 LoongFlow 代码 | 否（仅借鉴概念） | 否（A1 已确认） | 全局 |
 | partial-restart | 保留，退化为停滞兜底/岛重置 | 是 | `agents/gpu-kernel-partial-restart.md` |
 | 首验证算子 / 平台 | moe 方向 / **按实际可用 GPU 硬件选择**（运行时由 atrex `platform` 输入确定，规格从 gpu-wiki 取；atrex 支持 H20/H100/H200/MI300X/MI308X/MI355X 等） | 是 | M6 验证 |
