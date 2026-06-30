@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Local automatic PES runner for the FlashInfer-aligned FP4 MoE task.
+"""Automatic PES runner for the FlashInfer-aligned FP4 MoE CUDA task.
 
-This is the runnable counterpart to the LoongFlow-style ``run_moe.sh`` entry
-point.  It does not call an LLM by itself; instead it drives the local Atrex
-evolution database, creates candidate workspaces from deterministic strategy
-templates, evaluates them with ``test_kernel.py``, and records the full
+The runner owns orchestration only: it selects parents from the local evolution
+database, asks a planner backend for structured strategies, asks an executor
+backend to materialize one child workspace per strategy, evaluates those
+candidates with ``test_kernel.py``, and records the full
 planner/executor/evaluator/summarizer trace.
 """
 
@@ -13,7 +13,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import shutil
 import subprocess
 import sys
@@ -23,39 +22,15 @@ from typing import Any
 
 
 @dataclass(frozen=True)
-class Strategy:
-    name: str
-    description: str
-    replacements: tuple[tuple[str, str], ...]
-
-
-STRATEGIES = (
-    Strategy(
-        name="keep_stage1_reuse",
-        description="Control candidate: keep the staged activation reuse kernel unchanged.",
-        replacements=(),
-    ),
-    Strategy(
-        name="wide_stage1_tiles",
-        description="Increase stage1 x tile width to expose more intermediate columns per CTA.",
-        replacements=(("constexpr dim3 block_stage1(16, 4);", "constexpr dim3 block_stage1(32, 2);"),),
-    ),
-    Strategy(
-        name="wide_stage2_tiles",
-        description="Increase stage2 hidden-column tile width to improve output write coalescing.",
-        replacements=(("constexpr dim3 block_stage2(16, 8);", "constexpr dim3 block_stage2(32, 4);"),),
-    ),
-    Strategy(
-        name="tall_stage1_tiles",
-        description="Increase stage1 token/top-k tile height to improve occupancy on small I.",
-        replacements=(("constexpr dim3 block_stage1(16, 4);", "constexpr dim3 block_stage1(16, 8);"),),
-    ),
-    Strategy(
-        name="narrow_stage2_tiles",
-        description="Use narrower stage2 hidden tiles with more token rows per CTA.",
-        replacements=(("constexpr dim3 block_stage2(16, 8);", "constexpr dim3 block_stage2(8, 16);"),),
-    ),
-)
+class PlanStrategy:
+    child: str
+    parent_id: str | None
+    action_category: str
+    action_description: str
+    evidence_chain: str
+    expected_impact: str
+    risks: str
+    raw: dict[str, Any]
 
 
 def run_cmd(cmd: list[str], *, cwd: Path, env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
@@ -66,6 +41,23 @@ def run_cmd(cmd: list[str], *, cwd: Path, env: dict[str, str] | None = None) -> 
 def run_capture(cmd: list[str], *, cwd: Path, env: dict[str, str] | None = None) -> str:
     print("+", " ".join(cmd), flush=True)
     proc = subprocess.run(cmd, cwd=cwd, env=env, text=True, check=True, stdout=subprocess.PIPE)
+    if proc.stdout:
+        print(proc.stdout, end="")
+    return proc.stdout
+
+
+def run_shell(command: str, payload: dict[str, Any], *, cwd: Path) -> str:
+    print("+", command, flush=True)
+    proc = subprocess.run(
+        command,
+        cwd=cwd,
+        input=json.dumps(payload, indent=2),
+        text=True,
+        shell=True,
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=None,
+    )
     if proc.stdout:
         print(proc.stdout, end="")
     return proc.stdout
@@ -89,7 +81,7 @@ def parse_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text())
 
 
-def write_json(path: Path, data: dict[str, Any]) -> None:
+def write_json(path: Path, data: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2) + "\n")
 
@@ -160,7 +152,9 @@ def ensure_seed(repo_root: Path, run_dir: Path, baseline_result: dict[str, Any])
     state_path = run_dir / "database" / "state.json"
     state = parse_json(state_path)
     if state.get("baseline", {}).get("solution_id"):
-        return state["baseline"]["solution_id"]
+        seed_id = state["baseline"]["solution_id"]
+        snapshot_solution_src(run_dir, seed_id, run_dir / "src")
+        return seed_id
 
     latency = first_latency(baseline_result)
     mem = {
@@ -187,7 +181,26 @@ def ensure_seed(repo_root: Path, run_dir: Path, baseline_result: dict[str, Any])
         ],
         cwd=repo_root,
     )
-    return json.loads(out)["solution_id"]
+    seed_id = json.loads(out)["solution_id"]
+    snapshot_solution_src(run_dir, seed_id, run_dir / "src")
+    return seed_id
+
+
+def snapshot_solution_src(run_dir: Path, solution_id: str, src_dir: Path) -> None:
+    """Keep CUDA companion sources with the DB kernel snapshot.
+
+    ``evolution_db.py`` snapshots a single code file.  This task is a Python
+    extension candidate whose implementation also lives under ``src/``, so the
+    orchestrator mirrors that tree beside the DB snapshot for future parent
+    materialization.
+    """
+    db_solution_dir = run_dir / "database" / "solutions" / solution_id
+    if not db_solution_dir.exists() or not src_dir.exists():
+        return
+    dst = db_solution_dir / "src"
+    if dst.exists():
+        shutil.rmtree(dst)
+    shutil.copytree(src_dir, dst)
 
 
 def next_generation(run_dir: Path) -> int:
@@ -198,7 +211,7 @@ def next_generation(run_dir: Path) -> int:
     return max(int(row["generation"]) for row in history) + 1
 
 
-def selected_parent(repo_root: Path, run_dir: Path) -> str | None:
+def selected_parents(repo_root: Path, run_dir: Path, n: int) -> list[dict[str, Any]]:
     out = run_capture(
         [
             sys.executable,
@@ -207,47 +220,406 @@ def selected_parent(repo_root: Path, run_dir: Path) -> str | None:
             "--workspace",
             str(run_dir),
             "--n",
-            "1",
+            str(n),
             "--json",
         ],
         cwd=repo_root,
     )
-    parents = json.loads(out)
-    if not parents:
+    return json.loads(out)
+
+
+def solution_record(run_dir: Path, solution_id: str | None) -> dict[str, Any] | None:
+    if solution_id is None:
         return None
-    return parents[0]["solution_id"]
+    state_path = run_dir / "database" / "state.json"
+    if not state_path.exists():
+        return None
+    return (parse_json(state_path).get("solutions") or {}).get(solution_id)
 
 
-def mutate_candidate(run_dir: Path, child_dir: Path, strategy: Strategy) -> None:
+def parent_workspace(run_dir: Path, parent_id: str | None) -> Path:
+    if parent_id is None:
+        return run_dir
+    db_solution_dir = run_dir / "database" / "solutions" / parent_id
+    if (db_solution_dir / "kernel.py").exists() and (db_solution_dir / "src").exists():
+        return db_solution_dir
+
+    sol = solution_record(run_dir, parent_id)
+    iter_ref = ((sol or {}).get("metadata") or {}).get("iteration_ref")
+    if iter_ref:
+        candidate_dir = run_dir / iter_ref
+        if (candidate_dir / "kernel.py").exists() and (candidate_dir / "src").exists():
+            return candidate_dir
+    return run_dir
+
+
+def materialize_candidate_base(run_dir: Path, child_dir: Path, parent_id: str | None) -> Path:
+    parent_dir = parent_workspace(run_dir, parent_id)
     child_dir.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(run_dir / "kernel.py", child_dir / "kernel.py")
+    shutil.copy2(parent_dir / "kernel.py", child_dir / "kernel.py")
     if (child_dir / "src").exists():
         shutil.rmtree(child_dir / "src")
-    shutil.copytree(run_dir / "src", child_dir / "src")
-    cu_path = child_dir / "src" / "fused_moe_kernel.cu"
-    text = cu_path.read_text()
-    for old, new in strategy.replacements:
-        if old not in text:
-            raise RuntimeError(f"strategy {strategy.name} pattern not found: {old}")
-        text = text.replace(old, new)
-    cu_path.write_text(text)
+    shutil.copytree(parent_dir / "src", child_dir / "src")
+    return parent_dir
 
 
-def write_plan(run_dir: Path, generation: int, strategies: list[Strategy], parent_id: str | None) -> None:
+def normalize_strategy(
+    raw: dict[str, Any],
+    *,
+    generation: int,
+    idx: int,
+    parent_id: str | None,
+) -> PlanStrategy:
+    child = f"{generation}_{idx}"
+    action_category = str(raw.get("action_category") or "agent_generated")
+    action_description = str(raw.get("action_description") or raw.get("description") or "")
+    raw_parent = raw.get("parent_id")
+    if raw_parent in (None, "", "null", "None", "..."):
+        raw_parent = parent_id
+    return PlanStrategy(
+        child=child,
+        parent_id=raw_parent,
+        action_category=action_category,
+        action_description=action_description,
+        evidence_chain=str(raw.get("evidence_chain") or ""),
+        expected_impact=str(raw.get("expected_impact") or ""),
+        risks=str(raw.get("risks") or ""),
+        raw=raw,
+    )
+
+
+def strategy_to_json(strategy: PlanStrategy) -> dict[str, Any]:
+    data = dict(strategy.raw)
+    data.update(
+        {
+            "child": strategy.child,
+            "parent_id": strategy.parent_id,
+            "action_category": strategy.action_category,
+            "action_description": strategy.action_description,
+            "evidence_chain": strategy.evidence_chain,
+            "expected_impact": strategy.expected_impact,
+            "risks": strategy.risks,
+        }
+    )
+    return data
+
+
+def write_plan(run_dir: Path, generation: int, plan: dict[str, Any]) -> None:
     plan_dir = run_dir / "iteration" / str(generation) / "planner"
     plan_dir.mkdir(parents=True, exist_ok=True)
+    write_json(plan_dir / "plan.json", plan)
+    if (plan_dir / "plan.md").exists():
+        return
     lines = [
-        f"# Auto PES Plan - Generation {generation}",
+        f"# Planner Plan - Generation {generation}",
         "",
-        f"- parent: `{parent_id}`",
         "- operator: `flashinfer.trtllm_fp4_block_scale_moe`",
         "- profile: `Qwen3_5-Plus_prefill_TP2`",
         "",
         "## Strategies",
     ]
-    for idx, strategy in enumerate(strategies):
-        lines.append(f"{idx}. `{strategy.name}` - {strategy.description}")
+    for idx, strategy in enumerate(plan.get("strategies") or []):
+        lines.append(
+            f"{idx}. `{strategy.get('child')}` `{strategy.get('action_category')}` - "
+            f"{strategy.get('action_description')}"
+        )
     (plan_dir / "plan.md").write_text("\n".join(lines) + "\n")
+
+
+def backend_choice(kind: str, requested: str, command: str | None) -> str:
+    if requested != "auto":
+        if requested == "command" and not command:
+            raise RuntimeError(f"--{kind}-backend command requires --{kind}-cmd")
+        if requested == "codex" and shutil.which("codex") is None:
+            raise RuntimeError("codex backend requested but `codex` is not on PATH")
+        return requested
+    if command:
+        return "command"
+    if shutil.which("codex") is not None:
+        return "codex"
+    print(f"[Atrex] warning: no {kind} backend found; using local no-op backend", flush=True)
+    return "local"
+
+
+def codex_exec(repo_root: Path, prompt: str, args: argparse.Namespace) -> None:
+    cmd = [
+        "codex",
+        "exec",
+        "--cd",
+        str(repo_root),
+        "--sandbox",
+        "danger-full-access",
+        "--ask-for-approval",
+        "never",
+    ]
+    if args.codex_model:
+        cmd += ["--model", args.codex_model]
+    cmd.append(prompt)
+    run_cmd(cmd, cwd=repo_root)
+
+
+def previous_summary_path(run_dir: Path, generation: int) -> str | None:
+    if generation <= 1:
+        return None
+    path = run_dir / "iteration" / str(generation - 1) / "summarizer" / "summary.md"
+    return str(path) if path.exists() else None
+
+
+def planner_context(
+    repo_root: Path,
+    run_dir: Path,
+    generation: int,
+    n_candidates: int,
+    parents: list[dict[str, Any]],
+    baseline_json: Path,
+    args: argparse.Namespace,
+) -> dict[str, Any]:
+    enriched_parents: list[dict[str, Any]] = []
+    for parent in parents:
+        parent_id = parent.get("solution_id")
+        sol = solution_record(run_dir, parent_id)
+        workspace = parent_workspace(run_dir, parent_id)
+        enriched = dict(parent)
+        enriched["workspace"] = str(workspace)
+        enriched["kernel_path"] = str(workspace / "kernel.py")
+        enriched["src_path"] = str(workspace / "src")
+        enriched["iteration_ref"] = ((sol or {}).get("metadata") or {}).get("iteration_ref")
+        enriched["optimization"] = (((sol or {}).get("metadata") or {}).get("optimization") or {})
+        enriched_parents.append(enriched)
+
+    return {
+        "workspace_path": str(run_dir),
+        "repo_root": str(repo_root),
+        "generation": generation,
+        "n_candidates": n_candidates,
+        "parents": enriched_parents,
+        "previous_summary": previous_summary_path(run_dir, generation),
+        "profiles": {
+            "baseline": str(baseline_json),
+            "directory": str(run_dir / "profiles"),
+        },
+        "operator_surface": "flashinfer.trtllm_fp4_block_scale_moe",
+        "application_profile": "Qwen3_5-Plus_prefill_TP2",
+        "optimization_focus": [
+            "grouped expert scheduling",
+            "tiled FP4 dequantization",
+            "grouped GEMM",
+        ],
+        "framework": "CUDA C++ PyTorch extension",
+        "constraints": [
+            "Do not generate FlyDSL.",
+            "Preserve the FlashInfer-compatible run(...) signature.",
+            "Preserve Qwen3.5 Plus TP2 routing/top_k/local expert semantics.",
+            "Each strategy must target exactly one optimization category.",
+        ],
+        "eval_args": {
+            "preset": args.preset,
+            "tokens": args.tokens,
+            "hidden_size": args.hidden_size,
+            "intermediate_size": args.intermediate_size,
+            "local_num_experts": args.local_num_experts,
+            "local_expert_offset": args.local_expert_offset,
+            "warmup": args.warmup,
+            "rep": args.rep,
+        },
+    }
+
+
+def local_plan(generation: int, n_candidates: int, parents: list[dict[str, Any]]) -> dict[str, Any]:
+    strategies: list[dict[str, Any]] = []
+    for idx in range(n_candidates):
+        parent = parents[idx % len(parents)] if parents else {}
+        strategies.append(
+            {
+                "child": f"{generation}_{idx}",
+                "parent_id": parent.get("solution_id"),
+                "action_category": "control_parent_clone",
+                "action_description": "Local fallback only: clone the selected parent without optimization.",
+                "evidence_chain": "No planner backend was available.",
+                "expected_impact": "Correctness/control signal only.",
+                "risks": "No performance improvement expected.",
+            }
+        )
+    return {
+        "plan_path": f"iteration/{generation}/planner/plan.md",
+        "strategies": strategies,
+        "evidence_summary": "local fallback; no agent planning",
+        "search_sources": [],
+        "exhaustion": False,
+    }
+
+
+def read_plan(plan_path: Path) -> dict[str, Any]:
+    if not plan_path.exists():
+        raise RuntimeError(f"planner did not produce {plan_path}")
+    plan = parse_json(plan_path)
+    if not isinstance(plan.get("strategies"), list) or not plan["strategies"]:
+        raise RuntimeError(f"planner output missing non-empty strategies: {plan_path}")
+    return plan
+
+
+def run_planner(
+    repo_root: Path,
+    run_dir: Path,
+    generation: int,
+    parents: list[dict[str, Any]],
+    baseline_json: Path,
+    args: argparse.Namespace,
+) -> tuple[dict[str, Any], list[PlanStrategy]]:
+    plan_dir = run_dir / "iteration" / str(generation) / "planner"
+    plan_dir.mkdir(parents=True, exist_ok=True)
+    plan_json = plan_dir / "plan.json"
+    plan_md = plan_dir / "plan.md"
+    if plan_json.exists():
+        plan_json.unlink()
+    if plan_md.exists():
+        plan_md.unlink()
+    context = planner_context(
+        repo_root, run_dir, generation, args.n_candidates, parents, baseline_json, args
+    )
+    context["output_plan_json"] = str(plan_json)
+    context["output_plan_md"] = str(plan_md)
+    context_path = plan_dir / "planner_context.json"
+    write_json(context_path, context)
+
+    backend = backend_choice("planner", args.planner_backend, args.planner_cmd)
+    print(f"[Atrex] planner backend: {backend}", flush=True)
+    if backend == "command":
+        stdout = run_shell(args.planner_cmd or "", context, cwd=repo_root)
+        if not plan_json.exists() and stdout.strip():
+            write_json(plan_json, json.loads(stdout))
+    elif backend == "codex":
+        prompt = f"""You are the gpu-kernel-planner agent for an automatic PES run.
+
+Read and follow `{repo_root / "agents" / "gpu-kernel-planner.md"}`.
+Use the JSON context at `{context_path}`. Inspect the referenced CUDA task files,
+database lineage, profiles, local gpu-wiki/reference-projects as needed.
+
+Produce exactly {args.n_candidates} strategies for the FlashInfer-aligned CUDA
+FP4 MoE operator. The optimization direction is grouped expert scheduling,
+tiled FP4 dequantization, and grouped GEMM. Do not edit implementation files.
+
+Write machine-readable output to `{plan_json}` with this shape:
+{{"plan_path": "...", "strategies": [{{"child": "{generation}_0", "parent_id": "...",
+"action_category": "...", "action_description": "...", "evidence_chain": "...",
+"expected_impact": "...", "risks": "..."}}], "evidence_summary": "...",
+"search_sources": [...], "exhaustion": false}}
+
+Also write a human-readable plan to `{plan_md}`. Return only after both files
+exist."""
+        codex_exec(repo_root, prompt, args)
+    else:
+        write_json(plan_json, local_plan(generation, args.n_candidates, parents))
+
+    plan = read_plan(plan_json)
+    if plan.get("exhaustion"):
+        raise RuntimeError("planner reported exhaustion; no speculative candidates generated")
+
+    default_parent = parents[0]["solution_id"] if parents else None
+    strategies = [
+        normalize_strategy(raw, generation=generation, idx=idx, parent_id=default_parent)
+        for idx, raw in enumerate(plan["strategies"][: args.n_candidates])
+    ]
+    if len(strategies) < args.n_candidates:
+        raise RuntimeError(
+            f"planner produced {len(strategies)} strategies, expected {args.n_candidates}"
+        )
+    plan["strategies"] = [strategy_to_json(strategy) for strategy in strategies]
+    write_plan(run_dir, generation, plan)
+    return plan, strategies
+
+
+def local_execute(child_dir: Path, strategy: PlanStrategy, parent_id: str | None) -> dict[str, Any]:
+    history = child_dir / "history.md"
+    history.write_text(
+        f"# {strategy.child}\n\n"
+        f"- parent: `{parent_id}`\n"
+        f"- action_category: `{strategy.action_category}`\n"
+        f"- action_description: {strategy.action_description}\n"
+        "- backend: local fallback clone\n"
+    )
+    return {
+        "child": strategy.child,
+        "parent_id": parent_id,
+        "candidate_code": str(child_dir / "kernel.py"),
+        "action_category": strategy.action_category,
+        "action_description": strategy.action_description,
+        "self_check": "skipped",
+        "history_path": str(history),
+    }
+
+
+def run_executor(
+    repo_root: Path,
+    run_dir: Path,
+    generation: int,
+    strategy: PlanStrategy,
+    args: argparse.Namespace,
+) -> dict[str, Any]:
+    child_dir = run_dir / "iteration" / str(generation) / "executor" / strategy.child
+    parent_id = strategy.parent_id
+    parent_dir = materialize_candidate_base(run_dir, child_dir, parent_id)
+    result_path = child_dir / "executor_result.json"
+    if result_path.exists():
+        result_path.unlink()
+    history_path = child_dir / "history.md"
+    if history_path.exists():
+        history_path.unlink()
+    context = {
+        "workspace_path": str(run_dir),
+        "repo_root": str(repo_root),
+        "generation": generation,
+        "child": strategy.child,
+        "strategy": strategy_to_json(strategy),
+        "parent_id": parent_id,
+        "parent_workspace": str(parent_dir),
+        "candidate_dir": str(child_dir),
+        "candidate_code": str(child_dir / "kernel.py"),
+        "candidate_src": str(child_dir / "src"),
+        "output_result_json": str(result_path),
+        "operator_surface": "flashinfer.trtllm_fp4_block_scale_moe",
+        "application_profile": "Qwen3_5-Plus_prefill_TP2",
+        "constraints": [
+            "Edit only files under candidate_dir.",
+            "Do not generate FlyDSL.",
+            "Preserve the FlashInfer-compatible run(...) signature.",
+            "Apply exactly one optimization category.",
+            "Do not run the evaluator; this runner evaluates after executor returns.",
+        ],
+    }
+    context_path = child_dir / "executor_context.json"
+    write_json(context_path, context)
+
+    backend = backend_choice("executor", args.executor_backend, args.executor_cmd)
+    print(f"[Atrex] executor backend for {strategy.child}: {backend}", flush=True)
+    if backend == "command":
+        stdout = run_shell(args.executor_cmd or "", context, cwd=repo_root)
+        if not result_path.exists() and stdout.strip():
+            write_json(result_path, json.loads(stdout))
+    elif backend == "codex":
+        prompt = f"""You are one gpu-kernel-executor child in an automatic PES run.
+
+Read and follow `{repo_root / "agents" / "gpu-kernel-executor.md"}`.
+Use the JSON context at `{context_path}`. The child workspace is already
+materialized from its parent at `{child_dir}`.
+
+Implement exactly the assigned strategy and edit only files under `{child_dir}`.
+The target is CUDA C++/PyTorch extension code for
+`flashinfer.trtllm_fp4_block_scale_moe`, used by Qwen3_5-Plus_prefill_TP2.
+Do not generate FlyDSL and do not run benchmark/evaluator commands.
+
+Write `{child_dir / "history.md"}` and machine-readable `{result_path}` with
+fields: child, parent_id, candidate_code, action_category, action_description,
+self_check, history_path. Return only after the candidate files exist."""
+        codex_exec(repo_root, prompt, args)
+    else:
+        write_json(result_path, local_execute(child_dir, strategy, parent_id))
+
+    if not (child_dir / "kernel.py").exists() or not (child_dir / "src").exists():
+        raise RuntimeError(f"executor did not produce a complete candidate: {child_dir}")
+    if not result_path.exists():
+        write_json(result_path, local_execute(child_dir, strategy, parent_id))
+    return parse_json(result_path)
 
 
 def add_candidate(
@@ -256,14 +628,14 @@ def add_candidate(
     generation: int,
     child_name: str,
     parent_id: str | None,
-    strategy: Strategy,
+    strategy: PlanStrategy,
     result: dict[str, Any],
     evidence_path: Path,
-) -> None:
+) -> str:
     latency = first_latency(result)
     correctness = "PASS" if result.get("status") == "PASS" else "FAIL"
     rel = max_rel(result)
-    evaluation = f"{correctness}; latency_us={latency}; strategy={strategy.name}"
+    evaluation = f"{correctness}; latency_us={latency}; strategy={strategy.action_category}"
     cmd = [
         sys.executable,
         str(repo_root / "tools" / "evolution_db.py"),
@@ -279,15 +651,16 @@ def add_candidate(
         "--correctness",
         correctness,
         "--action-category",
-        strategy.name,
+        strategy.action_category,
         "--generate-plan",
-        strategy.description,
+        strategy.action_description,
         "--evaluation",
         evaluation,
         "--evidence-file",
         str(evidence_path),
         "--iteration-ref",
         f"iteration/{generation}/executor/{child_name}",
+        "--json",
     ]
     if parent_id is not None:
         cmd += ["--parent", parent_id]
@@ -295,7 +668,14 @@ def add_candidate(
         cmd += ["--latency-us", str(latency)]
     if rel is not None:
         cmd += ["--rel-err", str(rel)]
-    run_cmd(cmd, cwd=repo_root)
+    out = run_capture(cmd, cwd=repo_root)
+    solution_id = json.loads(out)["solution_id"]
+    snapshot_solution_src(
+        run_dir,
+        solution_id,
+        run_dir / "iteration" / str(generation) / "executor" / child_name / "src",
+    )
+    return solution_id
 
 
 def write_summary(run_dir: Path, generation: int, rows: list[dict[str, Any]]) -> None:
@@ -313,7 +693,7 @@ def write_summary(run_dir: Path, generation: int, rows: list[dict[str, Any]]) ->
         lines += [
             "",
             f"Best candidate: `{best['child']}` with strategy `{best['strategy']}`.",
-            "Next direction: replace deterministic tile mutations with expert compaction and tiled FP4 dequant candidates.",
+            "Next direction: keep planner/executor focused on grouped scheduling, tiled FP4 dequant, and grouped GEMM.",
         ]
     (summary_dir / "summary.md").write_text("\n".join(lines) + "\n")
 
@@ -349,6 +729,33 @@ def main() -> int:
     parser.add_argument("--local-expert-offset", type=int, default=0)
     parser.add_argument("--warmup", type=int, default=2)
     parser.add_argument("--rep", type=int, default=5)
+    parser.add_argument(
+        "--planner-backend",
+        choices=("auto", "codex", "command", "local"),
+        default=os.environ.get("ATREX_PLANNER_BACKEND", "auto"),
+        help="Strategy planner backend. auto uses --planner-cmd, then codex, then local fallback.",
+    )
+    parser.add_argument(
+        "--executor-backend",
+        choices=("auto", "codex", "command", "local"),
+        default=os.environ.get("ATREX_EXECUTOR_BACKEND", "auto"),
+        help="Candidate executor backend. auto uses --executor-cmd, then codex, then local fallback.",
+    )
+    parser.add_argument(
+        "--planner-cmd",
+        default=os.environ.get("ATREX_PLANNER_CMD"),
+        help="Shell command for planner backend. Receives JSON context on stdin.",
+    )
+    parser.add_argument(
+        "--executor-cmd",
+        default=os.environ.get("ATREX_EXECUTOR_CMD"),
+        help="Shell command for executor backend. Receives JSON context on stdin.",
+    )
+    parser.add_argument(
+        "--codex-model",
+        default=os.environ.get("ATREX_CODEX_MODEL"),
+        help="Optional model override for codex exec planner/executor backends.",
+    )
     args = parser.parse_args()
 
     source = args.source.resolve()
@@ -362,25 +769,24 @@ def main() -> int:
     seed_id = ensure_seed(repo_root, run_dir, baseline)
     print(f"[Atrex] seed solution: {seed_id}")
 
-    strategies = list(STRATEGIES[: max(1, args.n_candidates)])
     for _ in range(args.generations):
         generation = next_generation(run_dir)
-        parent_id = selected_parent(repo_root, run_dir) or seed_id
-        write_plan(run_dir, generation, strategies, parent_id)
+        parents = selected_parents(repo_root, run_dir, max(1, args.n_candidates))
+        if not parents:
+            parents = [{"solution_id": seed_id, "code": "kernel.py", "score": 1.0}]
+        _, strategies = run_planner(repo_root, run_dir, generation, parents, baseline_json, args)
         rows: list[dict[str, Any]] = []
-        for idx, strategy in enumerate(strategies):
-            child = f"{generation}_{idx}"
+        for strategy in strategies:
+            child = strategy.child
             child_dir = run_dir / "iteration" / str(generation) / "executor" / child
-            mutate_candidate(run_dir, child_dir, strategy)
-            (child_dir / "history.md").write_text(
-                f"# {child}\n\n- parent: `{parent_id}`\n- strategy: `{strategy.name}`\n"
-                f"- description: {strategy.description}\n"
-            )
+            executor_result = run_executor(repo_root, run_dir, generation, strategy, args)
+            parent_id = strategy.parent_id
             result_path = child_dir / "result.json"
             result = profile_kernel(run_dir, child_dir / "kernel.py", result_path, args)
             evidence = {
                 "tool_used": "torch.cuda.Event",
-                "strategy": strategy.name,
+                "strategy": strategy_to_json(strategy),
+                "executor_result": executor_result,
                 "status": result.get("status"),
                 "latency_us": first_latency(result),
                 "max_rel": result.get("max_rel"),
@@ -388,11 +794,20 @@ def main() -> int:
             }
             evidence_path = child_dir / "evidence.json"
             write_json(evidence_path, evidence)
-            add_candidate(repo_root, run_dir, generation, child, parent_id, strategy, result, evidence_path)
+            add_candidate(
+                repo_root,
+                run_dir,
+                generation,
+                child,
+                parent_id,
+                strategy,
+                result,
+                evidence_path,
+            )
             rows.append(
                 {
                     "child": child,
-                    "strategy": strategy.name,
+                    "strategy": strategy.action_category,
                     "status": result.get("status"),
                     "latency_us": first_latency(result),
                     "max_rel": result.get("max_rel"),

@@ -80,13 +80,26 @@ This creates `moe_run/` and automatically:
 - copies the FlashInfer-aligned task surface into the run directory
 - initializes `database/` with `tools/evolution_db.py`
 - profiles the seed kernel
-- writes `iteration/<K>/planner/plan.md`
-- materializes `n_candidates` executor workspaces
+- asks the planner backend to write `iteration/<K>/planner/plan.json` and `plan.md`
+- asks the executor backend to materialize `n_candidates` CUDA workspaces
 - evaluates each candidate with `test_kernel.py`
 - records `evidence.json`, `history.md`, `summarizer/summary.md`, and database checkpoints
 
-The current local backend uses deterministic strategy templates for CUDA tile mutations. It is a
-working automatic PES loop, not yet an LLM-backed planner/executor replacement.
+By default the runner uses `codex exec` as the planner and executor backend when the Codex CLI is on
+`PATH`. This makes candidate generation agentic rather than template-based. For an external
+full-agent/runtime, provide command hooks that receive the JSON context on stdin:
+
+```bash
+./run_moe.sh --planner-backend command --planner-cmd /path/to/planner \
+  --executor-backend command --executor-cmd /path/to/executor \
+  --generations 1 --n-candidates 3 --preset smoke --tokens 2
+```
+
+The planner must write or print JSON with a `strategies` list matching the agent contract:
+`child`, `parent_id`, `action_category`, `action_description`, `evidence_chain`,
+`expected_impact`, and `risks`. The executor receives one strategy plus a pre-populated candidate
+directory and must edit only that directory. `--planner-backend local --executor-backend local` is
+available only as a no-op orchestration smoke fallback.
 
 ## Current Baseline
 
