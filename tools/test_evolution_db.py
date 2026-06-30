@@ -349,6 +349,102 @@ class TestGenerationFanout(DBTestBase):
         self.assertEqual(sum(s["sample_cnt"] for s in db.state["solutions"].values()), 3)
 
 
+class TestIslandsSelectionLineage(DBTestBase):
+    """M4: multi-island, migration cadence, adaptive Boltzmann, deep lineage."""
+
+    def _add_child(self, db, name, body, gen, parent, **over):
+        self._write_kernel(name, body)
+        return db.add(make_add_ns(code=name, generation=gen, parent=parent, **over))
+
+    def test_round_robin_spreads_across_islands(self):
+        db = self._init(num_islands=4, population_size=4, migration_interval=10)
+        seed = db.import_seed("memory/v0.json", "kernel.py")["solution_id"]
+        db.load()
+        for i in range(3):
+            self._add_child(db, f"rr{i}.py", f"def run():\n    return {i}\n" + "r" * (i + 5),
+                            1, seed, score=float(i + 1))
+        nonempty = sum(1 for m in db.state["islands"] if m)
+        self.assertGreaterEqual(nonempty, 3)
+
+    def test_migration_respects_interval(self):
+        db = self._init(num_islands=2, migration_interval=3, migration_rate=0.5,
+                        population_size=100)
+        seed = db.import_seed("memory/v0.json", "kernel.py")["solution_id"]
+        db.load()
+        self._add_child(db, "g1.py", "def run():\n    return 1\n" + "a" * 10, 1, seed, score=2.0)
+        self.assertEqual(db.state["last_migration_generation"], 0)  # before interval
+        self._add_child(db, "g2.py", "def run():\n    return 2\n" + "b" * 20, 2, seed, score=3.0)
+        self.assertEqual(db.state["last_migration_generation"], 0)
+        self._add_child(db, "g3.py", "def run():\n    return 3\n" + "c" * 30, 3, seed, score=4.0)
+        self.assertEqual(db.state["last_migration_generation"], 3)  # fired at interval
+        self.assertGreaterEqual(len(db.state["islands"][1]), 1)     # island 1 received migrants
+
+    def test_adaptive_temperature_bounds(self):
+        db = self._init()
+        seed = db.import_seed("memory/v0.json", "kernel.py")["solution_id"]
+        db.load()
+        self._add_child(db, "t1.py", "def run():\n    return 1\n" + "z" * 99, 1, seed, score=2.0)
+        temp = db._adaptive_temperature()
+        sel = db.config["selection"]
+        self.assertGreaterEqual(temp, sel["min_temperature"] - 1e-9)
+        self.assertLessEqual(temp, sel["max_temperature"] + 1e-9)
+
+    def test_adaptive_temperature_low_when_identical(self):
+        # seed code and all children identical -> diversity 0 -> temperature floor blend
+        db = self._init()
+        same = (self.ws / "kernel.py").read_text()
+        seed = db.import_seed("memory/v0.json", "kernel.py")["solution_id"]
+        db.load()
+        for i in range(2):
+            self._add_child(db, f"id{i}.py", same, 1, seed, score=1.0)
+        # diversity == 0 -> new_temp = clamp(1*(0)) = 0.5 -> blend 0.8*0.5 + 0.2*1.0 = 0.6
+        self.assertAlmostEqual(db._adaptive_temperature(), 0.6, places=6)
+
+    def test_boltzmann_favors_high_score(self):
+        db = self._init(num_islands=1, population_size=100)
+        db.config["selection"]["exploration_rate"] = 0.0
+        db._write_config()
+        self._add_child(db, "lo.py", "def run():\n    return 0\n" + "l" * 10, 1, None, score=1.0)
+        hi = self._add_child(db, "hi.py", "def run():\n    return 0\n" + "h" * 40, 1, None,
+                             score=10.0)["solution_id"]
+        counts = {}
+        for _ in range(120):
+            pick = db._select_one(0.5)
+            counts[pick] = counts.get(pick, 0) + 1
+        self.assertGreater(counts.get(hi, 0), 90)  # high score dominates
+
+    def test_deep_lineage_across_generations(self):
+        db = self._init()
+        seed = db.import_seed("memory/v0.json", "kernel.py")["solution_id"]
+        db.load()
+        g1 = self._add_child(db, "d1.py", "def run():\n    return 1\n" + "p" * 12, 1, seed,
+                             score=2.0)["solution_id"]
+        g2 = self._add_child(db, "d2.py", "def run():\n    return 2\n" + "p" * 24, 2, g1,
+                             score=3.0)["solution_id"]
+        g3 = self._add_child(db, "d3.py", "def run():\n    return 3\n" + "p" * 36, 3, g2,
+                             score=4.0)["solution_id"]
+        chain = [c["solution_id"] for c in db.lineage(g3)]
+        self.assertEqual(chain, [g3, g2, g1, seed])
+        self.assertIsNone(db.lineage(seed)[-1]["parent_id"])  # seed has no parent
+
+    def test_metadata_islands_state(self):
+        db = self._init(num_islands=2, population_size=100, migration_interval=10)
+        seed = db.import_seed("memory/v0.json", "kernel.py")["solution_id"]
+        db.load()
+        self._add_child(db, "i0.py", "def run():\n    return 1\n" + "m" * 10, 1, seed,
+                        island=0, score=2.0)
+        self._add_child(db, "i1.py", "def run():\n    return 2\n" + "n" * 30, 1, seed,
+                        island=1, score=3.0)
+        db.checkpoint(1)
+        meta = json.loads(
+            (self.ws / "database" / "checkpoints" / "iter-1" / "metadata.json").read_text()
+        )
+        self.assertEqual(len(meta["islands_state"]), 2)
+        self.assertGreaterEqual(len(meta["islands_state"][1]["members"]), 1)
+        self.assertEqual(meta["best_solution_id"], db.state["best_solution_id"])
+        self.assertIn("feature_map", meta["islands_state"][0])
+
+
 class TestCLISmoke(DBTestBase):
     def test_cli_end_to_end(self):
         ws = str(self.ws)

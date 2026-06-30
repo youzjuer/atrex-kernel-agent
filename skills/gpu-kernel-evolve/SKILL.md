@@ -231,6 +231,34 @@ python tools/evolution_db.py lineage --workspace kernel_opt_<name> --solution <b
 Then hand the winning `kernel.py` to `gpu-kernel-output-contract` if a clean evaluator candidate is
 required.
 
+## Islands, Migration & Lineage
+
+The database keeps an **island-model population** so the search explores several lineages in parallel
+instead of collapsing onto one. All of this is handled inside `tools/evolution_db.py` (defaults in
+`database/config.json`); the orchestrator only needs to drive it and inspect it.
+
+- **Islands** (`num_islands`, default 3): new candidates are spread across islands round-robin
+  (`population_size // num_islands` per island before advancing), unless `add --island <id>` pins one.
+  Each island runs its own MAP-Elites grid over `[complexity, diversity, score]`.
+- **Migration** (`migration_interval` 10 generations, `migration_rate` 0.2): periodically the top
+  fraction of each island is copied to the next island (ring), so good ideas cross-pollinate without
+  erasing local diversity. Triggered automatically inside `add` on the generation boundary.
+- **Selection** (`select-parents`): diversity-adaptive-temperature Boltzmann. Temperature rises when
+  the population is diverse (explore) and falls when it converges (exploit), bounded
+  `[min_temperature, max_temperature]`; an `exploration_rate` reserves some purely random picks. Higher
+  `score` ⇒ higher selection probability.
+- **Lineage**: every candidate stores `parent_id`; siblings of one generation branch from their
+  parents, and any winner is fully traceable back to the seed.
+
+Inspect during or after a run:
+
+```bash
+python tools/evolution_db.py best    --workspace kernel_opt_<name> --island <id>   # per-island best
+python tools/evolution_db.py list    --workspace kernel_opt_<name> --island <id>   # island members
+python tools/evolution_db.py lineage --workspace kernel_opt_<name> --solution <id> # parent chain to seed
+python tools/evolution_db.py summary --workspace kernel_opt_<name>                 # islands, elites, history
+```
+
 ## Constraints
 
 - The main agent orchestrates only: it MUST NOT search knowledge, implement kernels, run benchmarks,
