@@ -1,0 +1,155 @@
+{
+  "status": "FAIL",
+  "operator": "task08 hand-written SM103 FP4 BMM bridge contract",
+  "preset": "g11",
+  "tokens": 9500,
+  "shape": {
+    "hidden_size": 4096,
+    "intermediate_size": 1024,
+    "num_experts": 512,
+    "local_num_experts": 512,
+    "top_k": 10,
+    "tile_tokens_dim": 256,
+    "padded_rows": 238
+  },
+  "task08_contract": {
+    "a_fp4": [
+      512,
+      235,
+      2048
+    ],
+    "a_scale_swizzled": [
+      512,
+      65536
+    ],
+    "b_fp4": [
+      512,
+      2048,
+      2048
+    ],
+    "b_scale_swizzled": [
+      512,
+      524288
+    ],
+    "out": [
+      512,
+      235,
+      2048
+    ]
+  },
+  "current_contract": {
+    "hidden_bmm": [
+      512,
+      238,
+      2048
+    ],
+    "hidden_scale_swizzled": [
+      512,
+      65536
+    ],
+    "gemm1_weights_prepared": [
+      512,
+      2048,
+      2048
+    ],
+    "gemm1_weights_scale_prepared": [
+      512,
+      2048,
+      256
+    ],
+    "gemm1_scale_swizzled_bytes_per_expert": 524288
+  },
+  "expert_counts": {
+    "min": 141,
+    "max": 238,
+    "mean": 185.546875,
+    "nonzero": 512,
+    "total": 95000
+  },
+  "checks": [
+    {
+      "name": "experts",
+      "status": "PASS",
+      "actual": {
+        "num_experts": 512,
+        "local_num_experts": 512
+      },
+      "expected": {
+        "num_experts": 512,
+        "local_num_experts": 512
+      },
+      "note": ""
+    },
+    {
+      "name": "activation_packed_bytes",
+      "status": "PASS",
+      "actual": 2048,
+      "expected": 2048,
+      "note": ""
+    },
+    {
+      "name": "activation_scale_cols",
+      "status": "PASS",
+      "actual": 256,
+      "expected": 256,
+      "note": ""
+    },
+    {
+      "name": "rows_per_expert",
+      "status": "FAIL",
+      "actual": 238,
+      "expected": 235,
+      "note": "task08 v83/v310 lineage is compiled around fixed Mpad=235"
+    },
+    {
+      "name": "activation_swizzled_scale_bytes",
+      "status": "PASS",
+      "actual": 65536,
+      "expected": 65536,
+      "note": "same bytes when both row counts stay in the 129..256 swizzle block"
+    },
+    {
+      "name": "gemm1_weight_shape",
+      "status": "PASS",
+      "actual": [
+        512,
+        2048,
+        2048
+      ],
+      "expected": [
+        512,
+        2048,
+        2048
+      ],
+      "note": ""
+    },
+    {
+      "name": "gemm1_scale_shape",
+      "status": "PASS",
+      "actual": [
+        512,
+        2048,
+        256
+      ],
+      "expected": [
+        512,
+        2048,
+        256
+      ],
+      "note": ""
+    },
+    {
+      "name": "gemm1_swizzled_scale_bytes",
+      "status": "PASS",
+      "actual": 524288,
+      "expected": 524288,
+      "note": ""
+    }
+  ],
+  "integration_requirements": [
+    "Make the task08 BMM M dimension runtime-driven or recompile for the routed padded_rows; current full G11 seed needs more rows than fixed Mpad=235 when status is FAIL on rows_per_expert.",
+    "Keep A as expert-major packed NVFP4 [E, padded_rows, H/2] with FlashInfer/SM100 swizzled scales; the existing pack_hidden_bmm_swizzled_from_metadata output already matches that memory family.",
+    "Consume FlashInfer prepared GEMM1 weights/scales as B, but add an epilogue or output reorder that restores logical GEMM1 row semantics before SwiGLU; prepared storage order is not the activation order.",
+    "Fuse or account for routing metadata, hidden pack, GEMM1 SwiGLU/FP4 requant, GEMM2, and final top-k scatter before comparing against flashinfer.trtllm_fp4_block_scale_moe."
+  ]
+}

@@ -194,6 +194,14 @@ the oracle. The measured winner in `profiles/prepared_gemm1_order_g11_top1.json`
 GEMM1 output order was much worse, so a custom tensor-core GEMM must restore the logical SwiGLU row
 semantics in its epilogue.
 
+Task08 hand-written BMM bridge evidence: `probe_task08_bridge_contract.py` compares the current
+full G11 routed BMM pack against the task08 SM103 FP4 BMM contract. The current full G11 seed packs
+`hidden_bmm=[512,238,2048]`, while task08's runnable lineage is compiled around fixed
+`Mpad=235`; the packed activation bytes, activation swizzled-scale bytes, prepared GEMM1 weight
+shape, and prepared GEMM1 swizzled-scale bytes otherwise match. To reuse that self-written BMM in
+the candidate path, the M dimension must become runtime-driven or be recompiled for the routed
+`padded_rows`, and its epilogue must restore the prepared GEMM1 rows to logical SwiGLU order.
+
 `ncu` on G11 tokens=8 attributes the current CUDA time mostly to scalar stage1 (`407.136 us`) and
 warp stage2 (`189.344 us`). The tokens=128 scaling confirms that scalar FP4 FMA is not a viable
 path to the tp=1 G11 target. The next implementation step must replace stage1/stage2 with
