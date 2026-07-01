@@ -67,7 +67,14 @@ def copy_task(source: Path, run_dir: Path, *, fresh: bool) -> None:
     if fresh and run_dir.exists():
         shutil.rmtree(run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
-    for rel in ("kernel.py", "reference.py", "test_kernel.py", "README.md", ".gitignore"):
+    for rel in (
+        "kernel.py",
+        "reference.py",
+        "test_kernel.py",
+        "workload_shapes.py",
+        "README.md",
+        ".gitignore",
+    ):
         shutil.copy2(source / rel, run_dir / rel)
     src_dst = run_dir / "src"
     if src_dst.exists():
@@ -873,8 +880,14 @@ def main() -> int:
     parser.add_argument("--fresh", action="store_true", help="Delete and recreate run dir first.")
     parser.add_argument("--generations", type=int, default=1)
     parser.add_argument("--n-candidates", type=int, default=3)
-    parser.add_argument("--preset", choices=("smoke", "qwen_micro", "qwen_tp2"), default="smoke")
-    parser.add_argument("--tokens", default="2")
+    parser.add_argument(
+        "--preset",
+        choices=("smoke", "qwen_micro", "qwen_tp2", "g11", "g8"),
+        default="smoke",
+    )
+    # Left as None so tp=1 perf presets (g11/g8) can resolve their token buckets
+    # from the proj_019 catalog; other presets fall back to "2".
+    parser.add_argument("--tokens", default=None)
     parser.add_argument("--hidden-size", type=int)
     parser.add_argument("--intermediate-size", type=int)
     parser.add_argument("--local-num-experts", type=int)
@@ -938,6 +951,19 @@ def main() -> int:
         help="Reuse existing incomplete-generation planner/executor/evaluator artifacts.",
     )
     args = parser.parse_args()
+
+    # Resolve token buckets: tp=1 catalog presets (g11/g8) default to the
+    # proj_019 catalog buckets; everything else defaults to "2".
+    if args.tokens is None:
+        try:
+            from workload_shapes import get_shape, is_catalog_preset
+
+            if is_catalog_preset(args.preset):
+                args.tokens = ",".join(str(t) for t in get_shape(args.preset)["tokens"])
+            else:
+                args.tokens = "2"
+        except Exception:
+            args.tokens = "2"
 
     source = args.source.resolve()
     repo_root = args.repo_root.resolve()

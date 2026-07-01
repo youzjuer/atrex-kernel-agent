@@ -325,8 +325,14 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--kernel", default="kernel.py")
     parser.add_argument("--mode", choices=("correctness", "profile"), default="correctness")
-    parser.add_argument("--preset", choices=("smoke", "qwen_micro", "qwen_tp2"), default="smoke")
-    parser.add_argument("--tokens", default="2,4")
+    parser.add_argument(
+        "--preset",
+        choices=("smoke", "qwen_micro", "qwen_tp2", "g11", "g8"),
+        default="smoke",
+    )
+    # Default None: catalog presets (g11/g8) fall back to the catalog token
+    # buckets; other presets fall back to a small smoke default.
+    parser.add_argument("--tokens", default=None)
     parser.add_argument("--hidden-size", type=int)
     parser.add_argument("--intermediate-size", type=int)
     parser.add_argument("--local-num-experts", type=int)
@@ -344,7 +350,15 @@ def main():
     parser.add_argument("--json-out")
     args = parser.parse_args()
 
-    token_values = _parse_tokens(args.tokens)
+    if args.tokens is not None:
+        token_values = _parse_tokens(args.tokens)
+    else:
+        from workload_shapes import get_shape, is_catalog_preset
+
+        if is_catalog_preset(args.preset):
+            token_values = list(get_shape(args.preset)["tokens"])
+        else:
+            token_values = [2, 4]
     if args.flashinfer_worker:
         result = _bench_flashinfer_in_worker(token_values, args.warmup, args.rep, args)
     else:

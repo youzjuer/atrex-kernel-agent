@@ -3,7 +3,9 @@
 ## Target
 
 - API contract: `flashinfer.trtllm_fp4_block_scale_moe`
-- application profile: `Qwen3_5-Plus_prefill_TP2`
+- **performance target profile: tp=1** — `G11` (active P0) and `G8`, sourced from the proj_019
+  workload catalog (see *Performance Shapes* below). The legacy `qwen_tp2` preset is kept only as a
+  reference/interface profile, not the perf target.
 - platform used here: NVIDIA L20D, CUDA, PyTorch extension
 - candidate code: CUDA C++ extension, not FlyDSL
 
@@ -26,6 +28,25 @@ to make the scalar CUDA baseline practical:
 - `qwen_micro`: `T in [2, 4]`, `H=256`, `I=128`, `E_global=512`, `top_k=10`, `E_local=16`
 - `qwen_tp2`: full metadata (`H=4096`, `I=1024`, `E_local=256`) unless overridden, but the current
   scalar baseline is intended only for very small token counts.
+
+## Performance Shapes (tp=1, from proj_019 catalog)
+
+The performance test must use **tp=1** shapes, read from the single source of truth
+`proj_019_moe_workload_op_opt/assets/workload_shape_catalog.py` via `workload_shapes.py` (never
+hardcoded — task03 acceptance). tp=1 keeps the **full** `intermediate_size = 1024` and all **512
+experts local** (`E_local = 512`), unlike the TP2 preset which shards per rank.
+
+| preset | group | tokens | H | I | E_global | E_local | top_k | dtype | note |
+|---|---|---|---|---|---|---|---|---|---|
+| `g11` | G11 | 9500 | 4096 | 1024 | 512 | 512 | 10 | nvfp4 | active P0 |
+| `g8` | G8 | 7680,8064,8320,8576 | 4096 | 1024 | 512 | 512 | 10 | mxfp4 | P2 backlog |
+
+Point the loader at proj_019 (auto-discovered if it sits near this repo, else set the env var):
+
+```bash
+export PROJ019_ROOT=/path/to/proj_019_moe_workload_op_opt
+python workload_shapes.py   # prints the resolved g11/g8 shapes
+```
 
 ## Inputs
 
@@ -52,6 +73,15 @@ cd kernel_opt_fused_moe_cuda_pes
 python test_kernel.py --mode correctness --preset smoke --tokens 2,4
 python test_kernel.py --mode profile --preset smoke --tokens 2
 python test_kernel.py --mode correctness --preset qwen_micro --tokens 1
+```
+
+Performance test on the tp=1 target shapes (tokens default to the catalog buckets; omit `--tokens`):
+
+```bash
+# G11 (active P0): tokens=9500, H=4096, I=1024, E=512, top_k=10, tp=1
+python test_kernel.py --mode profile --preset g11 --compare-flashinfer
+# G8: tokens 7680,8064,8320,8576 (same tp=1 dims)
+python test_kernel.py --mode profile --preset g8 --compare-flashinfer
 ```
 
 For a full metadata allocation smoke, override token count and local experts carefully:

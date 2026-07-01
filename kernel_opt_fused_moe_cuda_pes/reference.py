@@ -12,6 +12,11 @@ default case models the Qwen3.5-397B/Plus MoE prefill TP2 metadata:
 The smoke tests intentionally use smaller hidden/intermediate dimensions while
 keeping the same routing/expert contract, because the checked-in CUDA baseline
 is a correctness-first scalar implementation.
+
+Performance presets ``g11`` / ``g8`` are the tp=1 production shapes sourced from
+the proj_019 workload catalog (see ``workload_shapes.py``); tp=1 keeps the full
+intermediate_size=1024 and all 512 experts local (unlike the TP2 default, which
+shards intermediate/experts per rank).
 """
 
 from __future__ import annotations
@@ -394,6 +399,32 @@ def _scale_tensor(shape: tuple[int, ...], *, device: str, value: float = 0.03125
     return torch.full(shape, value, device=device, dtype=torch.float32).to(torch.float8_e4m3fn)
 
 
+def _resolve_base(preset: str) -> MoeShape:
+    """Resolve a preset name to a base ``MoeShape``.
+
+    ``smoke`` / ``qwen_micro`` / ``qwen_tp2`` are local; tp=1 performance presets
+    (``g11``, ``g8``, ...) are sourced from the proj_019 workload catalog via
+    ``workload_shapes`` (never hardcoded here).
+    """
+    if preset == "qwen_tp2":
+        return QWEN3_5_PLUS_PREFILL_TP2
+    if preset in SMOKE_SHAPES:
+        return SMOKE_SHAPES[preset]
+    from workload_shapes import get_shape
+
+    s = get_shape(preset)
+    return MoeShape(
+        name=s["name"],
+        tokens=s["tokens"][0],
+        hidden_size=s["hidden_size"],
+        intermediate_size=s["intermediate_size"],
+        num_experts=s["num_experts"],
+        top_k=s["top_k"],
+        local_expert_offset=0,
+        local_num_experts=s["local_num_experts"],
+    )
+
+
 def make_inputs(
     *,
     preset: str = "smoke",
@@ -406,10 +437,7 @@ def make_inputs(
     seed: int = 1234,
 ) -> tuple:
     """Create deterministic FlashInfer-compatible FP4 MoE inputs."""
-    if preset not in SMOKE_SHAPES and preset != "qwen_tp2":
-        raise ValueError(f"unknown preset {preset!r}; valid: {sorted(SMOKE_SHAPES)} + qwen_tp2")
-
-    base = QWEN3_5_PLUS_PREFILL_TP2 if preset == "qwen_tp2" else SMOKE_SHAPES[preset]
+    base = _resolve_base(preset)
     shape = MoeShape(
         name=base.name,
         tokens=tokens if tokens is not None else base.tokens,
