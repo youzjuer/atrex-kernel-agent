@@ -1532,37 +1532,54 @@ __global__ void final_scatter_from_bmm_kernel(
     int local_num_experts,
     int padded_rows,
     bool use_prepared_output_layout) {
-  const int64_t linear = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-  const int64_t total = static_cast<int64_t>(T) * H;
-  if (linear >= total) {
+  const int token = blockIdx.x;
+  const int h = blockIdx.y * blockDim.x + threadIdx.x;
+  if (token >= T) {
     return;
   }
 
-  const int h = static_cast<int>(linear % H);
+  __shared__ int rows[16];
+  __shared__ float weights[16];
+  if (threadIdx.x < 16) {
+    rows[threadIdx.x] = -1;
+    weights[threadIdx.x] = 0.0f;
+  }
+  if (threadIdx.x < TOPK) {
+    const int slot = token * TOPK + threadIdx.x;
+    const int dynamic_row = expanded_idx_to_permuted_idx[slot];
+    if (dynamic_row >= 0) {
+      const int32_t packed = topk_packed[slot];
+      const int expert = unpack_packed_expert_idx(packed);
+      const int local_expert = expert - local_expert_offset;
+      if (local_expert >= 0 && local_expert < local_num_experts) {
+        const int rank = dynamic_row - expert_padded_offsets[local_expert];
+        if (rank >= 0 && rank < padded_rows) {
+          rows[threadIdx.x] = local_expert * padded_rows + rank;
+          weights[threadIdx.x] = unpack_packed_bf16_score(packed);
+        }
+      }
+    }
+  }
+  __syncthreads();
+
+  if (h >= H) {
+    return;
+  }
+
   const int src_h = prepared_gemm2_row(h, use_prepared_output_layout);
-  const int token = static_cast<int>(linear / H);
   float acc = 0.0f;
 
-  for (int k = 0; k < TOPK; ++k) {
-    const int token_slot = token * TOPK + k;
-    const int dynamic_row = expanded_idx_to_permuted_idx[token_slot];
-    if (dynamic_row < 0) {
+#pragma unroll
+  for (int k = 0; k < 16; ++k) {
+    if (k >= TOPK) {
+      break;
+    }
+    const int row = rows[k];
+    if (row < 0) {
       continue;
     }
-    const int32_t packed = topk_packed[token_slot];
-    const int expert = unpack_packed_expert_idx(packed);
-    const int local_expert = expert - local_expert_offset;
-    if (local_expert < 0 || local_expert >= local_num_experts) {
-      continue;
-    }
-    const int rank = dynamic_row - expert_padded_offsets[local_expert];
-    if (rank < 0 || rank >= padded_rows) {
-      continue;
-    }
-    const int row = local_expert * padded_rows + rank;
-    const float weight = unpack_packed_bf16_score(packed);
     const float value = __bfloat162float(gemm2_out[static_cast<int64_t>(row) * H + src_h]);
-    acc = fmaf(weight, value, acc);
+    acc = fmaf(weights[k], value, acc);
   }
 
   out[static_cast<int64_t>(token) * H + h] = __float2bfloat16(acc);
@@ -2074,8 +2091,8 @@ void final_scatter_from_bmm_cuda(torch::Tensor gemm2_out, torch::Tensor topk_pac
     return;
   }
 
-  constexpr int block = 256;
-  const int grid = static_cast<int>((total + block - 1) / block);
+  constexpr int block = 128;
+  const dim3 grid(T, (H + block - 1) / block, 1);
   const auto stream = at::cuda::getCurrentCUDAStream();
   final_scatter_from_bmm_kernel<<<grid, block, 0, stream>>>(
       reinterpret_cast<const __nv_bfloat16*>(gemm2_out.data_ptr<at::BFloat16>()),
