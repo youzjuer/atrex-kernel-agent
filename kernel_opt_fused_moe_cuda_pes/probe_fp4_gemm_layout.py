@@ -39,14 +39,88 @@ def _max_errors(actual: torch.Tensor, expected: torch.Tensor) -> dict[str, float
     expected_f = expected.to(torch.float32)
     diff = (actual_f - expected_f).abs()
     denom = expected_f.abs().clamp_min(1e-6)
+    finite = bool(torch.isfinite(actual_f).all() and torch.isfinite(expected_f).all())
+    max_abs = float(diff.max().item())
+    max_rel = float((diff / denom).max().item())
     return {
-        "max_abs": float(diff.max().item()),
-        "max_rel": float((diff / denom).max().item()),
+        "finite": finite,
+        "max_abs": _finite_or_none(max_abs),
+        "max_rel": _finite_or_none(max_rel),
     }
 
 
 def _finite_or_none(value: float) -> float | None:
     return value if math.isfinite(value) else None
+
+
+def _shuffle32_src_to_dst_row(row: int) -> int:
+    in_block = row & 31
+    return (row & ~31) + ((in_block & 3) << 3) + (in_block >> 2)
+
+
+def _prepared_gemm1_row(logical_row: int, intermediate_size: int) -> int:
+    if logical_row < intermediate_size:
+        gated_row = logical_row << 1
+    else:
+        gated_row = ((logical_row - intermediate_size) << 1) + 1
+    return _shuffle32_src_to_dst_row(gated_row)
+
+
+def _scale_offset_128x4(row: int, col: int, cols: int) -> int:
+    padded_cols = (cols + 3) & ~3
+    column_idx_in_group = col & 3
+    column_group_idx = col >> 2
+    row_idx_in_group0 = row & 31
+    row_idx_in_group1 = (row & 127) >> 5
+    row_group_idx = row >> 7
+    return (
+        row_group_idx * 128 * padded_cols
+        + column_group_idx * 512
+        + row_idx_in_group0 * 16
+        + row_idx_in_group1 * 4
+        + column_idx_in_group
+    )
+
+
+def _prepared_stage1_reference(
+    hidden_states: torch.Tensor,
+    hidden_states_scale: torch.Tensor,
+    gemm1_weight: torch.Tensor,
+    gemm1_scale: torch.Tensor,
+    intermediate_size: int,
+) -> torch.Tensor:
+    from reference import decode_block_scales, dequantize_fp4_tensor, unpack_fp4_e2m1
+
+    hidden = dequantize_fp4_tensor(hidden_states, hidden_states_scale)
+    hidden_size = hidden.shape[1]
+    rows = torch.tensor(
+        [
+            _prepared_gemm1_row(row, intermediate_size)
+            for row in range(2 * intermediate_size)
+        ],
+        device=hidden_states.device,
+        dtype=torch.long,
+    )
+    packed = gemm1_weight.index_select(0, rows)
+    unpacked = unpack_fp4_e2m1(packed)
+    scale_cols = hidden_size // 16
+    scale_offsets = torch.empty(
+        (2 * intermediate_size, scale_cols),
+        device=hidden_states.device,
+        dtype=torch.long,
+    )
+    for row in range(2 * intermediate_size):
+        prepared_row = int(rows[row].item())
+        for col in range(scale_cols):
+            scale_offsets[row, col] = _scale_offset_128x4(
+                prepared_row, col, scale_cols
+            )
+    flat_scales = decode_block_scales(gemm1_scale).reshape(-1)
+    scales = flat_scales.index_select(0, scale_offsets.reshape(-1)).reshape(
+        2 * intermediate_size, scale_cols
+    )
+    weights = unpacked * scales.repeat_interleave(16, dim=1)
+    return hidden.matmul(weights.T)
 
 
 def _dense_cutlass_sanity(args: argparse.Namespace) -> dict[str, Any]:
@@ -153,6 +227,22 @@ def _prepared_weight_probe(args: argparse.Namespace) -> dict[str, Any]:
             use_nvfp4=True,
         )
 
+    trtllm_stage1: dict[str, Any] | None = None
+
+    def run_trtllm_stage1() -> torch.Tensor:
+        return mm_fp4(
+            hidden_states,
+            gemm1_weights[expert].T,
+            hidden_states_scale,
+            gemm1_weights_scale[expert].T,
+            alpha,
+            torch.bfloat16,
+            trtllm_out,
+            block_size=16,
+            backend="trtllm",
+            use_nvfp4=True,
+        )
+
     stage2_in = torch.randn(
         args.tokens, int(intermediate_size), device=device, dtype=torch.bfloat16
     ) / 10
@@ -209,6 +299,38 @@ def _prepared_weight_probe(args: argparse.Namespace) -> dict[str, Any]:
         stage2_sample = None
         stage2_error = f"{type(exc).__name__}: {exc}"
 
+    if args.include_trtllm:
+        trtllm_out = torch.empty_like(stage1_out)
+        try:
+            run_trtllm_stage1()
+            trtllm_us = _bench(run_trtllm_stage1, args.warmup, args.rep)
+            raw_sample = float(trtllm_out.flatten()[0].item())
+            trtllm_stage1 = {
+                "latency_us": trtllm_us,
+                "sample": _finite_or_none(raw_sample),
+                "error": None,
+            }
+            if args.check_prepared_reference:
+                expected = _prepared_stage1_reference(
+                    hidden_states,
+                    hidden_states_scale,
+                    gemm1_weights[expert],
+                    gemm1_weights_scale[expert],
+                    int(intermediate_size),
+                )
+                trtllm_stage1["prepared_reference_errors"] = _max_errors(
+                    trtllm_out, expected
+                )
+                trtllm_stage1["prepared_reference_sample"] = _finite_or_none(
+                    float(expected.flatten()[0].item())
+                )
+        except Exception as exc:  # pragma: no cover - diagnostic path
+            trtllm_stage1 = {
+                "latency_us": None,
+                "sample": None,
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+
     return {
         "name": "g11_prepared_weight_cutlass_probe",
         "backend": "flashinfer.mm_fp4(cutlass)",
@@ -230,9 +352,11 @@ def _prepared_weight_probe(args: argparse.Namespace) -> dict[str, Any]:
             "sample": stage2_sample,
             "error": stage2_error,
         },
+        "trtllm_stage1": trtllm_stage1,
         "notes": [
             "The real G11 tensors use FlashInfer/TRT-LLM prepared weights from prepare_static_weights_for_trtllm_fp4_moe.",
             "This probe intentionally tests whether the prepared layout can be consumed by cutlass mm_fp4 directly.",
+            "The optional trtllm_stage1 probe tests the lower-level standalone trtllm GEMM API, not the fused MoE operator.",
             "A finite latency is not a correctness proof; the final custom kernel still needs a prepared-layout grouped GEMM/finalize implementation.",
         ],
     }
@@ -248,6 +372,8 @@ def main() -> None:
     parser.add_argument("--warmup", type=int, default=3)
     parser.add_argument("--rep", type=int, default=5)
     parser.add_argument("--seed", type=int, default=1234)
+    parser.add_argument("--include-trtllm", action="store_true")
+    parser.add_argument("--check-prepared-reference", action="store_true")
     parser.add_argument("--json-out", type=Path)
     args = parser.parse_args()
 

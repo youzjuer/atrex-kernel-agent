@@ -47,5 +47,5 @@
     "action_category": "prepared_layout_grouped_gemm",
     "description": "Build a custom prepared-layout grouped GEMM path that uses routing_pack_type1 metadata, preserves FlashInfer/TensorRT-LLM row/scale shuffles, quantizes the SwiGLU intermediate, and fuses stage2 finalize/scatter."
   },
-  "git_commit_hash": "pending"
+  "git_commit_hash": "01bca1f"
 }

@@ -1,0 +1,49 @@
+{
+  "capability": [
+    10,
+    3
+  ],
+  "device": "NVIDIA L20D",
+  "results": [
+    {
+      "backend": "flashinfer.mm_fp4(cutlass)",
+      "expert": 0,
+      "name": "g11_prepared_weight_cutlass_probe",
+      "notes": [
+        "The real G11 tensors use FlashInfer/TRT-LLM prepared weights from prepare_static_weights_for_trtllm_fp4_moe.",
+        "This probe intentionally tests whether the prepared layout can be consumed by cutlass mm_fp4 directly.",
+        "The optional trtllm_stage1 probe tests the lower-level standalone trtllm GEMM API, not the fused MoE operator.",
+        "A finite latency is not a correctness proof; the final custom kernel still needs a prepared-layout grouped GEMM/finalize implementation."
+      ],
+      "stage1": {
+        "error": "non-finite sample nan",
+        "k": 4096,
+        "latency_us": 96.12800180912018,
+        "m": 8,
+        "n": 2048,
+        "sample": null
+      },
+      "stage2": {
+        "error": null,
+        "k": 1024,
+        "latency_us": 90.87999910116196,
+        "m": 8,
+        "n": 4096,
+        "sample": -1752.0
+      },
+      "tokens": 8,
+      "trtllm_stage1": {
+        "error": null,
+        "latency_us": 70.36799937486649,
+        "prepared_reference_errors": {
+          "finite": false,
+          "max_abs": null,
+          "max_rel": null
+        },
+        "prepared_reference_sample": -0.9538507461547852,
+        "sample": null
+      }
+    }
+  ],
+  "script": "probe_fp4_gemm_layout.py"
+}

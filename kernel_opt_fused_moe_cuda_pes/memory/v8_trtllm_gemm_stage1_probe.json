@@ -1,0 +1,48 @@
+{
+  "version": "v8_trtllm_gemm_stage1_probe",
+  "masked": false,
+  "timestamp": "2026-07-02T01:36:00Z",
+  "operator": "flashinfer.trtllm_fp4_block_scale_moe",
+  "application_profile": "Qwen3_5-Plus_prefill_TP1_G11",
+  "input_contract": "packed_nvfp4_flashinfer",
+  "optimization": {
+    "action_category": "trtllm_standalone_gemm_probe",
+    "action_description": "Extend probe_fp4_gemm_layout.py with an optional lower-level mm_fp4(backend='trtllm') stage1 diagnostic and a prepared-layout Python reference check using the same row/scale mapping as the current CUDA candidate.",
+    "expected_impact": "Rule out a second shortcut: the standalone TRT-LLM GEMM API can be made callable locally, but it still does not directly reproduce the fused MoE prepared-layout stage1 result on the real G11 input contract.",
+    "risks_and_rollback": "The trtllm standalone GEMM probe required a local, uncommitted FlashInfer JIT build.ninja patch adding -include tuple and -include functional. The candidate kernel and default probe path do not depend on that patch."
+  },
+  "profile_evidence": {
+    "tool_used": "torch.cuda.Event + flashinfer.mm_fp4(trtllm) probe",
+    "commands": [
+      "python -m py_compile kernel_opt_fused_moe_cuda_pes/probe_fp4_gemm_layout.py",
+      "CUDA_VISIBLE_DEVICES=6 PROJ019_ROOT=/home/youchunbo/code/sumu/omoExplore/proj/proj_019_moe_workload_op_opt python probe_fp4_gemm_layout.py --mode prepared --tokens 8 --warmup 3 --rep 5 --include-trtllm --check-prepared-reference --json-out profiles/fp4_gemm_layout_probe_t8_trtllm.json"
+    ],
+    "profile_jsons": [
+      "profiles/fp4_gemm_layout_probe_t8_trtllm.json"
+    ],
+    "evidence_summary": "The optional trtllm stage1 probe ran after locally adding missing <tuple>/<functional> includes via JIT flags. On real G11 prepared tensors with T=8, standalone mm_fp4(trtllm) stage1 measured 70.368 us for one expert but returned a non-finite sample; the prepared-layout Python reference sample was -0.953851, so this low-level GEMM API is not a drop-in stage1 replacement.",
+    "bottleneck_type": "standalone_gemm_layout_mismatch",
+    "evidence_chain": "The real fused MoE path uses TensorRT-LLM MoE-specific routing/permutation and prepared layouts. Generic cutlass mm_fp4 produced non-finite prepared stage1 output in v7, and standalone trtllm mm_fp4 also failed the prepared reference diagnostic here. Therefore the next viable implementation must mirror the fused MoE data-prep/grouped-GEMM contract rather than call dense GEMM with the prepared tensors directly."
+  },
+  "correctness": {
+    "status": "FAIL_EVIDENCE",
+    "details": "trtllm_stage1 returned a non-finite sample for the real G11 prepared T=8 probe. prepared_reference_errors reported finite=false."
+  },
+  "performance": {
+    "trtllm_stage1_t8_single_expert_us": 70.36799937486649,
+    "cutlass_stage1_t8_single_expert_us": 96.12800180912018,
+    "cutlass_stage2_t8_single_expert_us": 90.87999910116196,
+    "candidate_latency_us": null,
+    "flashinfer_latency_us": null,
+    "speedup_vs_flashinfer": null
+  },
+  "quality_gate": {
+    "result": "NEGATIVE_EVIDENCE",
+    "failure_reason": "The low-level standalone TRT-LLM GEMM probe is faster than generic cutlass for one dense expert stage, but it is not numerically aligned and cannot be promoted into the candidate."
+  },
+  "next_step": {
+    "action_category": "moe_specific_prepared_grouped_gemm",
+    "description": "Inspect and port the TensorRT-LLM fused MoE grouped-GEMM data-prep contract: packed routing, expert token permutation, MoE-specific A/SF layout, stage1 SwiGLU+FP4 quantization, and fused stage2 finalize/scatter."
+  },
+  "git_commit_hash": "pending"
+}

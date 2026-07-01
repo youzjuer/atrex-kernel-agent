@@ -184,6 +184,7 @@ Routing/GEMM decomposition evidence:
 | SM103 dense 128x4 NVFP4 `mm_fp4(cutlass)` probe (`M=8,N=2048,K=4096`) | 96.704 us | lower-level dense GEMM building block, not a MoE candidate |
 | G11 prepared gemm1 -> generic `mm_fp4(cutlass)` probe (`T=8`, one expert) | 98.080 us | produced a NaN sample; prepared TRT-LLM layout is not a direct generic CUTLASS drop-in |
 | G11 prepared gemm1 -> generic `mm_fp4(cutlass)` probe (`T=128`, one expert) | 105.248 us | finite sample but no correctness proof; still requires prepared-layout grouped GEMM |
+| G11 prepared gemm1 -> standalone `mm_fp4(trtllm)` probe (`T=8`, one expert) | 70.368 us | required local JIT include workaround and produced a non-finite sample; not a candidate path |
 
 `ncu` on G11 tokens=8 attributes the current CUDA time mostly to scalar stage1 (`407.136 us`) and
 warp stage2 (`189.344 us`). The tokens=128 scaling confirms that scalar FP4 FMA is not a viable
@@ -193,7 +194,8 @@ block-scale structure. The full G11 profile confirms the same conclusion on the 
 shape: the implementation is functionally aligned with FlashInfer but misses the performance
 objective by roughly 416x. The SM103 `mm_fp4(cutlass)` probe narrows the next step further:
 ordinary 128x4 dense FP4 GEMM is callable, but the real `prepare_static_weights_for_trtllm_fp4_moe`
-layout cannot be treated as an ordinary CUTLASS weight/scale layout. The custom path must therefore
-consume the TRT-LLM prepared row/scale layout explicitly or use a TRT-LLM-compatible grouped GEMM
-interface, then fuse the routing permutation, SwiGLU intermediate FP4 quantization, and stage2
-finalize/scatter.
+layout cannot be treated as an ordinary CUTLASS weight/scale layout. A standalone
+`mm_fp4(trtllm)` probe, after a local JIT include workaround, was faster for one dense expert GEMM
+but still produced non-finite output on the real prepared tensors. The custom path must therefore
+mirror the fused MoE-specific prepared/grouped GEMM contract, then fuse the routing permutation,
+SwiGLU intermediate FP4 quantization, and stage2 finalize/scatter.
