@@ -226,6 +226,44 @@ def swiglu_requant_from_bmm(
 
 
 @torch.no_grad()
+def swiglu_requant_from_bmm_metadata(
+    gemm1_out: torch.Tensor,
+    topk_packed: torch.Tensor,
+    expanded_idx_to_permuted_idx: torch.Tensor,
+    expert_padded_offsets: torch.Tensor,
+    *,
+    local_expert_offset: int,
+    padded_rows: int,
+    intermediate_size: int,
+) -> list[torch.Tensor]:
+    """Apply prepared-layout SwiGLU/requant only for valid routed BMM rows."""
+    if gemm1_out.dtype != torch.bfloat16:
+        raise TypeError("gemm1_out must be torch.bfloat16")
+    if gemm1_out.ndim != 2:
+        raise ValueError("gemm1_out must have shape [E*padded_rows, 2I]")
+    if topk_packed.dtype != torch.int32 or topk_packed.ndim != 2:
+        raise TypeError("topk_packed must be torch.int32 [T, top_k]")
+    if expanded_idx_to_permuted_idx.dtype != torch.int32:
+        raise TypeError("expanded_idx_to_permuted_idx must be torch.int32")
+    if expanded_idx_to_permuted_idx.shape != topk_packed.shape:
+        raise ValueError("expanded_idx_to_permuted_idx shape mismatch")
+    if expert_padded_offsets.dtype != torch.int32 or expert_padded_offsets.ndim != 1:
+        raise TypeError("expert_padded_offsets must be torch.int32 [E_local + 1]")
+    ext = _load_ext()
+    return list(
+        ext.swiglu_requant_from_bmm_metadata(
+            gemm1_out.contiguous(),
+            topk_packed.contiguous(),
+            expanded_idx_to_permuted_idx.contiguous(),
+            expert_padded_offsets.contiguous(),
+            int(local_expert_offset),
+            int(padded_rows),
+            int(intermediate_size),
+        )
+    )
+
+
+@torch.no_grad()
 def final_scatter_from_bmm(
     gemm2_out: torch.Tensor,
     topk_packed: torch.Tensor,

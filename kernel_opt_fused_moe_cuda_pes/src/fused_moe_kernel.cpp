@@ -46,6 +46,12 @@ void swiglu_requant_from_bmm_cuda(torch::Tensor gemm1_out, torch::Tensor expert_
                                   torch::Tensor mid_scale_swizzled, int64_t padded_rows,
                                   int64_t intermediate_size);
 
+void swiglu_requant_from_bmm_metadata_cuda(
+    torch::Tensor gemm1_out, torch::Tensor topk_packed,
+    torch::Tensor expanded_idx_to_permuted_idx, torch::Tensor expert_padded_offsets,
+    torch::Tensor mid_packed, torch::Tensor mid_scale, torch::Tensor mid_scale_swizzled,
+    int64_t local_expert_offset, int64_t padded_rows, int64_t intermediate_size);
+
 void final_scatter_from_bmm_cuda(torch::Tensor gemm2_out, torch::Tensor topk_packed,
                                  torch::Tensor expanded_idx_to_permuted_idx,
                                  torch::Tensor expert_padded_offsets, torch::Tensor out,
@@ -396,6 +402,73 @@ std::vector<torch::Tensor> swiglu_requant_from_bmm(
   return {mid_packed, mid_scale, mid_scale_swizzled};
 }
 
+std::vector<torch::Tensor> swiglu_requant_from_bmm_metadata(
+    torch::Tensor gemm1_out, torch::Tensor topk_packed,
+    torch::Tensor expanded_idx_to_permuted_idx, torch::Tensor expert_padded_offsets,
+    int64_t local_expert_offset, int64_t padded_rows, int64_t intermediate_size) {
+  check_tensor(gemm1_out, "gemm1_out");
+  check_tensor(topk_packed, "topk_packed");
+  check_tensor(expanded_idx_to_permuted_idx, "expanded_idx_to_permuted_idx");
+  check_tensor(expert_padded_offsets, "expert_padded_offsets");
+  TORCH_CHECK(gemm1_out.scalar_type() == torch::kBFloat16,
+              "gemm1_out must be bf16 [E*padded_rows, 2I]");
+  TORCH_CHECK(topk_packed.scalar_type() == torch::kInt32,
+              "topk_packed must be int32 [T, top_k]");
+  TORCH_CHECK(expanded_idx_to_permuted_idx.scalar_type() == torch::kInt32,
+              "expanded_idx_to_permuted_idx must be int32 [T, top_k]");
+  TORCH_CHECK(expert_padded_offsets.scalar_type() == torch::kInt32,
+              "expert_padded_offsets must be int32 [E_local + 1]");
+  TORCH_CHECK(gemm1_out.dim() == 2, "gemm1_out must have shape [E*padded_rows, 2I]");
+  TORCH_CHECK(topk_packed.dim() == 2, "topk_packed must have shape [T, top_k]");
+  TORCH_CHECK(expanded_idx_to_permuted_idx.sizes() == topk_packed.sizes(),
+              "expanded_idx_to_permuted_idx shape mismatch");
+  TORCH_CHECK(expert_padded_offsets.dim() == 1,
+              "expert_padded_offsets must have shape [E_local + 1]");
+  TORCH_CHECK(expert_padded_offsets.numel() >= 2,
+              "expert_padded_offsets must have at least two entries");
+  TORCH_CHECK(padded_rows > 0, "padded_rows must be positive");
+  TORCH_CHECK(intermediate_size > 0, "intermediate_size must be positive");
+  TORCH_CHECK((intermediate_size % 16) == 0, "intermediate_size must be divisible by 16");
+  TORCH_CHECK(gemm1_out.size(1) == 2 * intermediate_size,
+              "gemm1_out second dim must be 2I");
+  const int64_t local_num_experts = expert_padded_offsets.numel() - 1;
+  TORCH_CHECK(gemm1_out.size(0) == local_num_experts * padded_rows,
+              "gemm1_out first dim must be E_local*padded_rows");
+  TORCH_CHECK(topk_packed.size(1) > 0, "top_k must be positive");
+  TORCH_CHECK(topk_packed.size(1) <= 16, "top_k must be <= 16");
+  TORCH_CHECK(local_expert_offset >= 0, "local_expert_offset must be non-negative");
+  TORCH_CHECK(topk_packed.numel() <= std::numeric_limits<int32_t>::max(),
+              "expanded token count exceeds int32 range");
+  TORCH_CHECK(local_expert_offset <= std::numeric_limits<int32_t>::max(),
+              "local_expert_offset exceeds int32 range");
+  TORCH_CHECK(local_num_experts <= std::numeric_limits<int32_t>::max(),
+              "local_num_experts exceeds int32 range");
+  TORCH_CHECK(padded_rows <= std::numeric_limits<int32_t>::max(),
+              "padded_rows exceeds int32 range");
+
+  const int64_t scale_cols = intermediate_size / 16;
+  const int64_t row_blocks = (padded_rows + 127) / 128;
+  const int64_t groups_k = (scale_cols + 3) / 4;
+  const int64_t swizzled_bytes = row_blocks * groups_k * 512;
+  TORCH_CHECK(swizzled_bytes <= std::numeric_limits<int32_t>::max(),
+              "swizzled scale bytes per expert exceed int32 range");
+
+  auto packed_options = gemm1_out.options().dtype(torch::kUInt8);
+  auto scale_options = gemm1_out.options().dtype(torch::kFloat8_e4m3fn);
+  auto mid_packed =
+      torch::empty({local_num_experts, padded_rows, intermediate_size / 2}, packed_options);
+  auto mid_scale =
+      torch::empty({local_num_experts, padded_rows, scale_cols}, scale_options);
+  auto mid_scale_swizzled =
+      torch::empty({local_num_experts, swizzled_bytes}, scale_options);
+
+  swiglu_requant_from_bmm_metadata_cuda(
+      gemm1_out, topk_packed, expanded_idx_to_permuted_idx, expert_padded_offsets,
+      mid_packed, mid_scale, mid_scale_swizzled, local_expert_offset, padded_rows,
+      intermediate_size);
+  return {mid_packed, mid_scale, mid_scale_swizzled};
+}
+
 torch::Tensor final_scatter_from_bmm(torch::Tensor gemm2_out, torch::Tensor topk_packed,
                                      torch::Tensor expanded_idx_to_permuted_idx,
                                      torch::Tensor expert_padded_offsets,
@@ -531,6 +604,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Interleave linear NVFP4 block scales into FlashInfer/SM100 BMM layout");
   m.def("swiglu_requant_from_bmm", &swiglu_requant_from_bmm,
         "Apply prepared-row-aware SwiGLU to GEMM1 BMM output and requantize to NVFP4");
+  m.def("swiglu_requant_from_bmm_metadata", &swiglu_requant_from_bmm_metadata,
+        "Apply prepared-row-aware SwiGLU to valid routed GEMM1 BMM rows and requantize to NVFP4");
   m.def("final_scatter_from_bmm", &final_scatter_from_bmm,
         "Apply packed bf16 top-k weights and scatter GEMM2 BMM output to [T, H]");
   m.def("pack_hidden_bmm_swizzled_from_metadata", &pack_hidden_bmm_swizzled_from_metadata,

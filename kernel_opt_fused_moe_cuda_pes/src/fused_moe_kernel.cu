@@ -949,6 +949,8 @@ __global__ void quantize_dequant_mid_fp4_kernel(float* __restrict__ mid, int row
   }
 }
 
+__device__ __forceinline__ int unpack_packed_expert_idx(int32_t packed);
+
 __global__ void swiglu_requant_from_bmm_kernel(
     const __nv_bfloat16* __restrict__ gemm1_out,
     const int32_t* __restrict__ expert_counts,
@@ -1044,6 +1046,129 @@ __global__ void swiglu_requant_from_bmm_kernel(
   }
   mid_scale[scale_linear_offset] = scale_raw;
   mid_scale_swizzled[scale_swizzled_offset] = scale_raw;
+}
+
+__device__ __forceinline__ void swiglu_requant_block_from_prepared_row(
+    const __nv_bfloat16* __restrict__ gemm1_out,
+    uint8_t* __restrict__ mid_packed,
+    uint8_t* __restrict__ mid_scale,
+    uint8_t* __restrict__ mid_scale_swizzled,
+    int row_flat,
+    int row_in_expert,
+    int local_expert,
+    int scale_col,
+    int I,
+    int scale_cols,
+    int groups_k,
+    int swizzled_bytes_per_expert) {
+  const int packed_col = scale_col * 8;
+  uint8_t* packed_base =
+      mid_packed + (static_cast<int64_t>(row_flat) * (I / 2)) + packed_col;
+  const int64_t scale_linear_offset = static_cast<int64_t>(row_flat) * scale_cols + scale_col;
+  const int64_t scale_swizzled_offset =
+      static_cast<int64_t>(local_expert) * swizzled_bytes_per_expert +
+      nvfp4_swizzled_scale_offset(row_in_expert, scale_col, groups_k);
+
+  float values[16];
+  float amax = 0.0f;
+  const __nv_bfloat16* row = gemm1_out + static_cast<int64_t>(row_flat) * (2 * I);
+#pragma unroll
+  for (int j = 0; j < 16; ++j) {
+    const int logical_col = scale_col * 16 + j;
+    const int x1_row = prepared_gemm1_row(logical_col, I, true);
+    const int x2_row = prepared_gemm1_row(I + logical_col, I, true);
+    const float x1 = __bfloat162float(row[x1_row]);
+    const float x2 = __bfloat162float(row[x2_row]);
+    const float activated = silu(x2) * x1;
+    values[j] = activated;
+    if (isfinite(activated)) {
+      amax = fmaxf(amax, fabsf(activated));
+    }
+  }
+
+  if (amax == 0.0f) {
+#pragma unroll
+    for (int byte_idx = 0; byte_idx < 8; ++byte_idx) {
+      packed_base[byte_idx] = 0;
+    }
+    mid_scale[scale_linear_offset] = 0;
+    mid_scale_swizzled[scale_swizzled_offset] = 0;
+    return;
+  }
+
+  __nv_fp8_e4m3 sf_fp8(amax * (1.0f / 6.0f));
+  const uint8_t scale_raw = *reinterpret_cast<const uint8_t*>(&sf_fp8);
+  const float scale = static_cast<float>(sf_fp8);
+  if (scale == 0.0f || !isfinite(scale)) {
+#pragma unroll
+    for (int byte_idx = 0; byte_idx < 8; ++byte_idx) {
+      packed_base[byte_idx] = 0;
+    }
+    mid_scale[scale_linear_offset] = 0;
+    mid_scale_swizzled[scale_swizzled_offset] = 0;
+    return;
+  }
+
+  const float inv_scale = 1.0f / scale;
+#pragma unroll
+  for (int byte_idx = 0; byte_idx < 8; ++byte_idx) {
+    const int j0 = byte_idx * 2;
+    const int j1 = j0 + 1;
+    const uint32_t code0 =
+        isfinite(values[j0]) ? encode_fp4_e2m1_nearest(values[j0] * inv_scale) : 0u;
+    const uint32_t code1 =
+        isfinite(values[j1]) ? encode_fp4_e2m1_nearest(values[j1] * inv_scale) : 0u;
+    packed_base[byte_idx] = static_cast<uint8_t>(code0 | (code1 << 4));
+  }
+  mid_scale[scale_linear_offset] = scale_raw;
+  mid_scale_swizzled[scale_swizzled_offset] = scale_raw;
+}
+
+__global__ void swiglu_requant_from_bmm_metadata_kernel(
+    const __nv_bfloat16* __restrict__ gemm1_out,
+    const int32_t* __restrict__ topk_packed,
+    const int32_t* __restrict__ expanded_idx_to_permuted_idx,
+    const int32_t* __restrict__ expert_padded_offsets,
+    uint8_t* __restrict__ mid_packed,
+    uint8_t* __restrict__ mid_scale,
+    uint8_t* __restrict__ mid_scale_swizzled,
+    int total_slots,
+    int TOPK,
+    int local_expert_offset,
+    int local_num_experts,
+    int padded_rows,
+    int I,
+    int scale_cols,
+    int groups_k,
+    int swizzled_bytes_per_expert) {
+  const int64_t total_blocks = static_cast<int64_t>(total_slots) * scale_cols;
+  const int64_t block_idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (block_idx >= total_blocks) {
+    return;
+  }
+
+  const int scale_col = static_cast<int>(block_idx % scale_cols);
+  const int slot = static_cast<int>(block_idx / scale_cols);
+  const int permuted_idx = expanded_idx_to_permuted_idx[slot];
+  if (permuted_idx < 0) {
+    return;
+  }
+
+  const int expert = unpack_packed_expert_idx(topk_packed[slot]);
+  const int local_expert = expert - local_expert_offset;
+  if (local_expert < 0 || local_expert >= local_num_experts) {
+    return;
+  }
+
+  const int row_in_expert = permuted_idx - expert_padded_offsets[local_expert];
+  if (row_in_expert < 0 || row_in_expert >= padded_rows) {
+    return;
+  }
+
+  const int row_flat = local_expert * padded_rows + row_in_expert;
+  swiglu_requant_block_from_prepared_row(
+      gemm1_out, mid_packed, mid_scale, mid_scale_swizzled, row_flat, row_in_expert,
+      local_expert, scale_col, I, scale_cols, groups_k, swizzled_bytes_per_expert);
 }
 
 __global__ void count_local_slots_kernel(
@@ -1419,6 +1544,16 @@ __device__ __forceinline__ int32_t pack_bf16_score_idx(float score, int expert_i
   return static_cast<int32_t>((idx_bits << 16) | score_bits);
 }
 
+__device__ __forceinline__ int unpack_packed_expert_idx(int32_t packed) {
+  const uint32_t raw = static_cast<uint32_t>(packed);
+  return static_cast<int>(static_cast<int16_t>((raw >> 16) & 0xFFFFu));
+}
+
+__device__ __forceinline__ float unpack_packed_bf16_score(int32_t packed) {
+  const uint16_t bits = static_cast<uint16_t>(static_cast<uint32_t>(packed) & 0xFFFFu);
+  return __bfloat162float(__ushort_as_bfloat16(bits));
+}
+
 __global__ void routing_topk_softmax_type1_pack_bf16_kernel(
     const __nv_bfloat16* __restrict__ routing_logits,
     int32_t* __restrict__ topk_packed,
@@ -1519,16 +1654,6 @@ __global__ void routing_topk_softmax_type1_pack_f32_kernel(
   }
 }
 
-__device__ __forceinline__ int unpack_packed_expert_idx(int32_t packed) {
-  const uint32_t raw = static_cast<uint32_t>(packed);
-  return static_cast<int>(static_cast<int16_t>((raw >> 16) & 0xFFFFu));
-}
-
-__device__ __forceinline__ float unpack_packed_bf16_score(int32_t packed) {
-  const uint16_t bits = static_cast<uint16_t>(static_cast<uint32_t>(packed) & 0xFFFFu);
-  return __bfloat162float(__ushort_as_bfloat16(bits));
-}
-
 __global__ void final_scatter_from_bmm_kernel(
     const __nv_bfloat16* __restrict__ gemm2_out,
     const int32_t* __restrict__ topk_packed,
@@ -1543,7 +1668,7 @@ __global__ void final_scatter_from_bmm_kernel(
     int padded_rows,
     bool use_prepared_output_layout) {
   const int token = blockIdx.x;
-  const int src_h0 = (blockIdx.y * blockDim.x + threadIdx.x) * 2;
+  const int src_h0 = (blockIdx.y * blockDim.x + threadIdx.x) * 4;
   if (token >= T) {
     return;
   }
@@ -1577,10 +1702,17 @@ __global__ void final_scatter_from_bmm_kernel(
   }
 
   const int src_h1 = src_h0 + 1;
+  const int src_h2 = src_h0 + 2;
+  const int src_h3 = src_h0 + 3;
   const int dst_h0 = inverse_prepared_gemm2_row(src_h0, use_prepared_output_layout);
   const int dst_h1 = inverse_prepared_gemm2_row(src_h1, use_prepared_output_layout);
+  const int dst_h2 = inverse_prepared_gemm2_row(src_h2, use_prepared_output_layout);
+  const int dst_h3 = inverse_prepared_gemm2_row(src_h3, use_prepared_output_layout);
+  const bool full_quad = src_h3 < H;
   float acc0 = 0.0f;
   float acc1 = 0.0f;
+  float acc2 = 0.0f;
+  float acc3 = 0.0f;
 
 #pragma unroll
   for (int k = 0; k < 16; ++k) {
@@ -1592,18 +1724,46 @@ __global__ void final_scatter_from_bmm_kernel(
       continue;
     }
     const int64_t offset = static_cast<int64_t>(row) * H + src_h0;
-    const uint32_t packed = *reinterpret_cast<const uint32_t*>(gemm2_out + offset);
-    const float value0 =
-        __bfloat162float(__ushort_as_bfloat16(static_cast<uint16_t>(packed & 0xFFFFu)));
-    const float value1 =
-        __bfloat162float(__ushort_as_bfloat16(static_cast<uint16_t>(packed >> 16)));
+    uint64_t packed = 0;
+    if (full_quad) {
+      packed = *reinterpret_cast<const uint64_t*>(gemm2_out + offset);
+    } else {
+      packed = static_cast<uint64_t>(
+          *reinterpret_cast<const uint16_t*>(gemm2_out + offset));
+      if (src_h1 < H) {
+        packed |= static_cast<uint64_t>(
+                      *reinterpret_cast<const uint16_t*>(gemm2_out + offset + 1))
+                  << 16;
+      }
+      if (src_h2 < H) {
+        packed |= static_cast<uint64_t>(
+                      *reinterpret_cast<const uint16_t*>(gemm2_out + offset + 2))
+                  << 32;
+      }
+    }
+    const float value0 = __bfloat162float(
+        __ushort_as_bfloat16(static_cast<uint16_t>(packed & 0xFFFFull)));
+    const float value1 = __bfloat162float(
+        __ushort_as_bfloat16(static_cast<uint16_t>((packed >> 16) & 0xFFFFull)));
+    const float value2 = __bfloat162float(
+        __ushort_as_bfloat16(static_cast<uint16_t>((packed >> 32) & 0xFFFFull)));
+    const float value3 = __bfloat162float(
+        __ushort_as_bfloat16(static_cast<uint16_t>((packed >> 48) & 0xFFFFull)));
     acc0 = fmaf(weights[k], value0, acc0);
     acc1 = fmaf(weights[k], value1, acc1);
+    acc2 = fmaf(weights[k], value2, acc2);
+    acc3 = fmaf(weights[k], value3, acc3);
   }
 
   out[static_cast<int64_t>(token) * H + dst_h0] = __float2bfloat16(acc0);
   if (src_h1 < H) {
     out[static_cast<int64_t>(token) * H + dst_h1] = __float2bfloat16(acc1);
+  }
+  if (src_h2 < H) {
+    out[static_cast<int64_t>(token) * H + dst_h2] = __float2bfloat16(acc2);
+  }
+  if (src_h3 < H) {
+    out[static_cast<int64_t>(token) * H + dst_h3] = __float2bfloat16(acc3);
   }
 }
 
@@ -2099,6 +2259,48 @@ void swiglu_requant_from_bmm_cuda(torch::Tensor gemm1_out, torch::Tensor expert_
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
+void swiglu_requant_from_bmm_metadata_cuda(
+    torch::Tensor gemm1_out, torch::Tensor topk_packed,
+    torch::Tensor expanded_idx_to_permuted_idx, torch::Tensor expert_padded_offsets,
+    torch::Tensor mid_packed, torch::Tensor mid_scale, torch::Tensor mid_scale_swizzled,
+    int64_t local_expert_offset, int64_t padded_rows, int64_t intermediate_size) {
+  const int T = static_cast<int>(topk_packed.size(0));
+  const int TOPK = static_cast<int>(topk_packed.size(1));
+  const int total_slots = T * TOPK;
+  const int local_num_experts = static_cast<int>(expert_padded_offsets.numel() - 1);
+  const int I = static_cast<int>(intermediate_size);
+  const int scale_cols = I / 16;
+  const int groups_k = (scale_cols + 3) / 4;
+  const int swizzled_bytes_per_expert = static_cast<int>(mid_scale_swizzled.size(1));
+  const int64_t total_blocks = static_cast<int64_t>(total_slots) * scale_cols;
+  if (total_blocks == 0) {
+    return;
+  }
+
+  constexpr int block = 256;
+  const int grid = static_cast<int>((total_blocks + block - 1) / block);
+  const auto stream = at::cuda::getCurrentCUDAStream();
+  C10_CUDA_CHECK(cudaMemsetAsync(mid_packed.data_ptr(), 0,
+                                 mid_packed.numel() * mid_packed.element_size(),
+                                 stream.stream()));
+  C10_CUDA_CHECK(cudaMemsetAsync(mid_scale.data_ptr(), 0,
+                                 mid_scale.numel() * mid_scale.element_size(),
+                                 stream.stream()));
+  C10_CUDA_CHECK(cudaMemsetAsync(mid_scale_swizzled.data_ptr(), 0,
+                                 mid_scale_swizzled.numel() *
+                                     mid_scale_swizzled.element_size(),
+                                 stream.stream()));
+  swiglu_requant_from_bmm_metadata_kernel<<<grid, block, 0, stream>>>(
+      reinterpret_cast<const __nv_bfloat16*>(gemm1_out.data_ptr<at::BFloat16>()),
+      topk_packed.data_ptr<int32_t>(), expanded_idx_to_permuted_idx.data_ptr<int32_t>(),
+      expert_padded_offsets.data_ptr<int32_t>(), mid_packed.data_ptr<uint8_t>(),
+      reinterpret_cast<uint8_t*>(mid_scale.data_ptr()),
+      reinterpret_cast<uint8_t*>(mid_scale_swizzled.data_ptr()), total_slots, TOPK,
+      static_cast<int>(local_expert_offset), local_num_experts, static_cast<int>(padded_rows),
+      I, scale_cols, groups_k, swizzled_bytes_per_expert);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
 void final_scatter_from_bmm_cuda(torch::Tensor gemm2_out, torch::Tensor topk_packed,
                                  torch::Tensor expanded_idx_to_permuted_idx,
                                  torch::Tensor expert_padded_offsets,
@@ -2114,8 +2316,8 @@ void final_scatter_from_bmm_cuda(torch::Tensor gemm2_out, torch::Tensor topk_pac
   }
 
   constexpr int block = 128;
-  const int h_pairs = (H + 1) / 2;
-  const dim3 grid(T, (h_pairs + block - 1) / block, 1);
+  const int h_quads = (H + 3) / 4;
+  const dim3 grid(T, (h_quads + block - 1) / block, 1);
   const auto stream = at::cuda::getCurrentCUDAStream();
   final_scatter_from_bmm_kernel<<<grid, block, 0, stream>>>(
       reinterpret_cast<const __nv_bfloat16*>(gemm2_out.data_ptr<at::BFloat16>()),

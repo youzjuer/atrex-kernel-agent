@@ -250,12 +250,23 @@ def _run_task08_pipeline(case: dict, gemm1_fn, gemm2_fn, args: argparse.Namespac
         case["w13_scale_swizzled_u8"],
         case["affine_expert_offsets"],
     )
-    mid_q, mid_scale, mid_scale_swizzled = kernel.swiglu_requant_from_bmm(
-        gemm1_out,
-        case["expert_counts"],
-        padded_rows=int(args.mpad),
-        intermediate_size=int(case["intermediate_size"]),
-    )
+    if args.legacy_swiglu_requant:
+        mid_q, mid_scale, mid_scale_swizzled = kernel.swiglu_requant_from_bmm(
+            gemm1_out,
+            case["expert_counts"],
+            padded_rows=int(args.mpad),
+            intermediate_size=int(case["intermediate_size"]),
+        )
+    else:
+        mid_q, mid_scale, mid_scale_swizzled = kernel.swiglu_requant_from_bmm_metadata(
+            gemm1_out,
+            case["topk_packed"],
+            case["expanded"],
+            case["expert_padded_offsets"],
+            local_expert_offset=int(case["local_expert_offset"]),
+            padded_rows=int(args.mpad),
+            intermediate_size=int(case["intermediate_size"]),
+        )
     mid_q_flat = mid_q.reshape(int(case["local_num_experts"]) * int(args.mpad), -1)
     gemm2_out = gemm2_fn(
         mid_q_flat.contiguous(),
@@ -391,11 +402,23 @@ def run_probe(args: argparse.Namespace) -> dict:
                 args.rep,
             ),
             "swiglu_requant": _bench(
-                lambda: kernel.swiglu_requant_from_bmm(
-                    gemm1_out,
-                    case["expert_counts"],
-                    padded_rows=int(args.mpad),
-                    intermediate_size=int(case["intermediate_size"]),
+                lambda: (
+                    kernel.swiglu_requant_from_bmm(
+                        gemm1_out,
+                        case["expert_counts"],
+                        padded_rows=int(args.mpad),
+                        intermediate_size=int(case["intermediate_size"]),
+                    )
+                    if args.legacy_swiglu_requant
+                    else kernel.swiglu_requant_from_bmm_metadata(
+                        gemm1_out,
+                        case["topk_packed"],
+                        case["expanded"],
+                        case["expert_padded_offsets"],
+                        local_expert_offset=int(case["local_expert_offset"]),
+                        padded_rows=int(args.mpad),
+                        intermediate_size=int(case["intermediate_size"]),
+                    )
                 ),
                 args.warmup,
                 args.rep,
@@ -476,6 +499,7 @@ def run_probe(args: argparse.Namespace) -> dict:
             "gemm2_out": tuple(candidate["gemm2_out"].shape),
             "out": tuple(candidate["out"].shape),
         },
+        "swiglu_requant_path": "legacy_count_dense" if args.legacy_swiglu_requant else "metadata_valid_slots",
         "expert_counts": _count_summary(case["expert_counts"]),
         "checks": {
             "correctness": "PASS" if correctness_ok else "FAIL",
@@ -517,6 +541,7 @@ def main() -> int:
     parser.add_argument("--require-speedup", action="store_true")
     parser.add_argument("--compare-direct-layout", action="store_true")
     parser.add_argument("--no-prepared-output-layout", action="store_true")
+    parser.add_argument("--legacy-swiglu-requant", action="store_true")
     parser.add_argument("--verbose-build", action="store_true")
     parser.add_argument("--trace", action="store_true")
     parser.add_argument("--json-out")
