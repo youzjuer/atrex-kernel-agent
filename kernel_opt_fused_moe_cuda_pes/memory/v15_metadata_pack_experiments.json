@@ -1,0 +1,74 @@
+{
+  "version": "v15_metadata_pack_experiments",
+  "timestamp": "2026-07-01T22:56:11Z",
+  "branch": "dev_ycb",
+  "head_at_save": "9e2d32a Record routing warp checkpoint",
+  "goal": "Implement an in-repo CUDA kernel aligned with flashinfer.trtllm_fp4_block_scale_moe and faster than FlashInfer on the real TP=1 G11 packed-NVFP4 workload.",
+  "baseline_and_oracle": "flashinfer.trtllm_fp4_block_scale_moe",
+  "current_best_profile": {
+    "path": "kernel_opt_fused_moe_cuda_pes/profiles/task08_end_to_end_g11_bench_scatter_oct_metadata_swiglu.json",
+    "status": "PASS",
+    "target_status": "MISS",
+    "candidate_total_us": 2832.0000171661377,
+    "flashinfer_us": 1403.007984161377,
+    "speedup_vs_flashinfer": 0.49541242078285985
+  },
+  "experiments": [
+    {
+      "name": "atomic metadata rank assignment",
+      "source_status": "reverted",
+      "isolated_result": {
+        "chunk_metadata_us": 151.74399316310883,
+        "atomic_metadata_us": 139.48799669742584,
+        "counts_and_offsets_match_chunk": true
+      },
+      "conclusion": "Only about 12us metadata improvement and changes expert-internal row order, so it is not enough to justify the risk."
+    },
+    {
+      "name": "atomic metadata fused with hidden pack",
+      "source_status": "reverted",
+      "isolated_result": {
+        "chunk_metadata_plus_hidden_pack_us": 263.4879946708679,
+        "atomic_metadata_plus_hidden_pack_us": 259.39199328422546,
+        "atomic_fused_metadata_plus_hidden_pack_us": 216.38399362564087,
+        "valid_hidden_rows_match_reference_pack": true,
+        "valid_swizzled_scale_bytes_match_reference_pack": true
+      },
+      "correctness_profiles": [
+        "kernel_opt_fused_moe_cuda_pes/profiles/task08_end_to_end_g11_correctness_atomic_fused_pack.json",
+        "kernel_opt_fused_moe_cuda_pes/profiles/task08_end_to_end_g11_correctness_atomic_fused_pack_rerun1.json",
+        "kernel_opt_fused_moe_cuda_pes/profiles/task08_end_to_end_g11_correctness_atomic_fused_pack_zero_rerun1.json",
+        "kernel_opt_fused_moe_cuda_pes/profiles/task08_end_to_end_g11_correctness_atomic_fused_pack_zero_rerun2.json"
+      ],
+      "bench_profile": "kernel_opt_fused_moe_cuda_pes/profiles/task08_end_to_end_g11_bench_atomic_fused_pack.json",
+      "conclusion": "The fused copy itself matched valid rows, but end-to-end correctness was intermittent. Zeroing hidden padding reduced but did not eliminate failures. Do not use this path as the candidate default."
+    },
+    {
+      "name": "deterministic slot-per-block hidden pack with existing chunk metadata",
+      "source_status": "reverted",
+      "isolated_result": {
+        "previous_chunk_metadata_plus_hidden_pack_us": 263.4879946708679,
+        "slotpack_chunk_metadata_plus_hidden_pack_us": 254.4960081577301
+      },
+      "correctness_profile": "kernel_opt_fused_moe_cuda_pes/profiles/task08_end_to_end_g11_correctness_slotpack.json",
+      "bench_profile": "kernel_opt_fused_moe_cuda_pes/profiles/task08_end_to_end_g11_bench_slotpack.json",
+      "bench_result": {
+        "status": "PASS",
+        "target_status": "MISS",
+        "candidate_total_us": 2948.256015777588,
+        "flashinfer_us": 1374.6559619903564,
+        "speedup_vs_flashinfer": 0.46626071638076444
+      },
+      "conclusion": "Correct but not a useful default: the isolated pack improvement did not translate to end-to-end speed and the measured total regressed versus the current best."
+    }
+  ],
+  "worktree_policy": {
+    "source_code": "left at committed best state",
+    "reason": "All metadata/pack experiments were either unstable or slower end-to-end.",
+    "recommended_next_focus": [
+      "GEMM2 or GEMM1 wrapper/runtime work remains higher leverage than metadata/hidden-pack micro-optimizations.",
+      "Avoid atomic expert-internal row-order changes unless a full correctness-stability explanation is established.",
+      "If revisiting hidden pack, keep chunk metadata ordering and require end-to-end improvement, not only isolated pack timing."
+    ]
+  }
+}
