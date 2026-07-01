@@ -15,6 +15,10 @@ void routing_topk_softmax_type1_cuda(torch::Tensor routing_logits, torch::Tensor
                                      torch::Tensor topk_weights, int64_t top_k,
                                      double routed_scaling_factor);
 
+void routing_topk_softmax_type1_pack_cuda(torch::Tensor routing_logits,
+                                          torch::Tensor topk_packed, int64_t top_k,
+                                          double routed_scaling_factor);
+
 static void check_tensor(const torch::Tensor& tensor, const char* name) {
   TORCH_CHECK(tensor.is_cuda(), name, " must be a CUDA tensor");
   TORCH_CHECK(tensor.is_contiguous(), name, " must be contiguous");
@@ -138,9 +142,27 @@ torch::Tensor fused_moe_forward_logits_type1(
                            use_prepared_weight_layout);
 }
 
+torch::Tensor routing_pack_type1(torch::Tensor routing_logits, int64_t top_k,
+                                 double routed_scaling_factor) {
+  check_tensor(routing_logits, "routing_logits");
+  TORCH_CHECK(routing_logits.dim() == 2, "routing_logits must have shape [T, num_experts]");
+  TORCH_CHECK(routing_logits.scalar_type() == torch::kBFloat16 ||
+                  routing_logits.scalar_type() == torch::kFloat32,
+              "routing_logits must be bf16 or fp32");
+  TORCH_CHECK(top_k > 0 && top_k <= 16, "routing_pack_type1 requires 0 < top_k <= 16");
+
+  auto packed_options = routing_logits.options().dtype(torch::kInt32);
+  auto topk_packed = torch::empty({routing_logits.size(0), top_k}, packed_options);
+  routing_topk_softmax_type1_pack_cuda(routing_logits, topk_packed, top_k,
+                                       routed_scaling_factor);
+  return topk_packed;
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("forward", &fused_moe_forward,
         "FlashInfer-aligned FP4 block-scale MoE staged CUDA baseline");
   m.def("forward_logits_type1", &fused_moe_forward_logits_type1,
         "FlashInfer-aligned FP4 block-scale MoE with CUDA routing_method_type=1");
+  m.def("routing_pack_type1", &routing_pack_type1,
+        "Pack routing_method_type=1 TopK as TRT-LLM PackedScoreIdx<bf16>");
 }

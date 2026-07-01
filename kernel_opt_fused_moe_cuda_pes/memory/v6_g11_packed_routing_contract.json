@@ -1,0 +1,50 @@
+{
+  "version": "v6_g11_packed_routing_contract",
+  "masked": false,
+  "timestamp": "2026-07-02T01:09:30Z",
+  "operator": "flashinfer.trtllm_fp4_block_scale_moe",
+  "application_profile": "Qwen3_5-Plus_prefill_TP1_G11",
+  "input_contract": "packed_nvfp4_flashinfer",
+  "optimization": {
+    "action_category": "routing_contract_for_grouped_gemm",
+    "action_description": "Add a CUDA routing_method_type=1 packer that emits TRT-LLM PackedScoreIdx<bf16> as int32 [T, top_k], with low 16 bits holding the bf16 routing weight and high 16 bits holding the expert id.",
+    "expected_impact": "Provide the routing/permutation input contract needed by a custom TRT-LLM-style Blackwell FP4 grouped GEMM path, avoiding ambiguity in the packed precomputed-routing format.",
+    "risks_and_rollback": "This binding is not used by the default scalar candidate path. Roll back this memory entry and the routing_pack_type1 binding if the next grouped-GEMM implementation chooses a different routing metadata contract."
+  },
+  "correctness": {
+    "status": "PASS",
+    "evidence": [
+      "routing_pack_type1 bitwise matched a Python reproduction of the CUDA insertion-sort TopK and PackedScoreIdx<bf16> packing for both bf16 and fp32 logits.",
+      "CUDA routing_pack_type1 output fed into flashinfer.trtllm_fp4_block_scale_routed_moe exactly matched flashinfer.trtllm_fp4_block_scale_moe for G11 tokens=8: max_abs=0.0, max_rel=0.0.",
+      "Full G11 CUDA-packed routed FlashInfer probe exactly matched full FlashInfer in the same process: max_abs=0.0, max_rel=0.0.",
+      "Default candidate G11 tokens=8 correctness still passes after adding the binding: max_abs=0.00390625, max_rel=1.3259259462356567."
+    ],
+    "profile_jsons": [
+      "/tmp/atrex_g11_t8_after_pack_routing.json",
+      "/tmp/atrex_g11_t8_after_pack_routing_profile.json"
+    ]
+  },
+  "performance": {
+    "g11_full_cuda_routing_pack_us": 246.94399535655975,
+    "g11_full_flashinfer_routed_backend_with_cuda_pack_us": 1576.5440464019775,
+    "g11_full_cuda_pack_plus_flashinfer_routed_backend_us": 1370.4960346221924,
+    "g11_full_flashinfer_same_probe_us": 1435.3920221328735,
+    "default_candidate_g11_tokens8_after_change_us": 741.9840097427368,
+    "flashinfer_g11_tokens8_after_change_us": 425.85599422454834,
+    "default_candidate_g11_tokens8_speedup_vs_flashinfer": 0.5739422799316154,
+    "note": "The FlashInfer routed backend measurements are decomposition probes only and are not candidate performance. They show that full-G11 routing is not the dominant gap; the custom implementation still needs Blackwell FP4 tensor-core grouped GEMM/finalize."
+  },
+  "source_findings": {
+    "packed_score_idx_layout": "flashinfer/data/include/flashinfer/trtllm/fused_moe/RoutingKernel.h defines PackedScoreIdx<DataType> as { DataType score; int16_t idx; }, so int32 storage is low16=bf16 score and high16=expert id.",
+    "flashinfer_routed_api": "flashinfer.fused_moe.core.trtllm_fp4_block_scale_routed_moe accepts precomputed packed topk ids and routes them through the same TRT-LLM FP4 MoE backend."
+  },
+  "quality_gate": {
+    "result": "PARTIAL_PASS",
+    "failure_reason": "The packed routing contract is now implemented and verified, but the default candidate is still scalar stage1/stage2 and remains far slower than FlashInfer on the full TP1 G11 target."
+  },
+  "next_step": {
+    "action_category": "blackwell_fp4_grouped_gemm",
+    "description": "Use routing_pack_type1 metadata to drive a custom SM103 NVFP4 grouped GEMM stage that consumes FlashInfer prepared weights/scales and replaces the scalar stage1/stage2 kernels."
+  },
+  "git_commit_hash": "pending"
+}

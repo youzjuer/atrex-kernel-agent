@@ -156,6 +156,10 @@ available only as a no-op orchestration smoke fallback.
   - packed NVFP4 G11 path mirrors FlashInfer's intermediate FP4 quantize/dequantize behavior.
   - stage2 has a warp-per-output direct top-k finalize path for `gemm2_scale_vec == 16`; it avoids
     the previous expert-grouped atomic accumulation buffers and T-by-H completion counters.
+  - exposes `routing_pack_type1`, a CUDA routing_method_type=1 TopK packer that emits TRT-LLM
+    `PackedScoreIdx<bf16>` as `int32 [T, top_k]` (`low16=bf16 weight`, `high16=expert id`).
+    This is the input contract needed by TRT-LLM-style grouped GEMM routing/permutation; it is not
+    a FlashInfer delegation path in the default candidate.
 - `reference.py`: FlashInfer-aligned PyTorch oracle and deterministic input generator.
 - `test_kernel.py`: correctness/profile evaluator. Catalog packed-NVFP4 presets use real
   FlashInfer as the correctness oracle; performance target gating is checked only against real
@@ -168,6 +172,15 @@ Recent G11 packed-NVFP4 measurements on the real FlashInfer contract:
 | G11 tokens=8 after scale-cache + warp stage2 | 735.776 us | 411.296 us | PASS, `0.559x` |
 | G11 tokens=128 after scale-cache + warp stage2 | 9329.056 us | 841.664 us | PASS, `0.090x` |
 | G11 full catalog after CUDA routing fast path (`T=9500`) | 680466.064 us | 1636.416 us | PASS, `0.0024x` |
+
+Routing/GEMM decomposition evidence:
+
+| case | latency | note |
+|---|---:|---|
+| G11 full CUDA `routing_pack_type1` only (`T=9500`) | 246.944 us | emits TRT-LLM `PackedScoreIdx<bf16>` |
+| G11 full FlashInfer routed backend with CUDA-packed routing | 1576.544 us | FlashInfer backend only, not a candidate |
+| G11 full CUDA pack + FlashInfer routed backend | 1370.496 us | contract/decomposition probe, output exactly matched FlashInfer |
+| G11 full FlashInfer `trtllm_fp4_block_scale_moe` in same probe | 1435.392 us | same inputs, noisy short run |
 
 `ncu` on G11 tokens=8 attributes the current CUDA time mostly to scalar stage1 (`407.136 us`) and
 warp stage2 (`189.344 us`). The tokens=128 scaling confirms that scalar FP4 FMA is not a viable
