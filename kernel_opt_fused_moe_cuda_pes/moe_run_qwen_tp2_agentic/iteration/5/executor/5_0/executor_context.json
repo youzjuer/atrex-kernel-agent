@@ -1,0 +1,30 @@
+{
+  "workspace_path": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic",
+  "repo_root": "/home/youchunbo/code/atrex-kernel-agent",
+  "generation": 5,
+  "child": "5_0",
+  "strategy": {
+    "child": "5_0",
+    "parent_id": "06419529",
+    "action_category": "grouped_expert_scheduling",
+    "action_description": "Port the active-expert schedule to the current best parent without host synchronization: replace the current count_local_slots_kernel + build_expert_offsets_kernel + fill_grouped_slots_kernel metadata sequence with one small device-side active schedule that emits active_experts, active_offsets, active_counts, grouped_slots, token_counts, and active_expert_count. Keep the warp-sliced GEMM1 path and the current vectorized GEMM2 math unchanged. Launch GEMM2/finalize over max_active_experts = min(E_local, T * TOPK), guard blockIdx.y against active_expert_count[0], and avoid copying the active count to host.",
+    "evidence_chain": "Profile evidence: generation 5 auto baseline from the promoted source passes qwen_tp2 T=1 at 424.832 us with max_rel 2.384e-4, while the database best 06419529 was 544.480 us and stable retest was 550.720 us. Code evidence: 06419529 still builds expert_counts/expert_offsets/grouped_slots with three tiny metadata kernels, zeros multiple workspaces, then launches stage2 over all E_local=256 experts although T=1 and TOPK=10 can produce at most 10 active routed slots. Prior evidence: active-expert scheduling without the new warp-sliced GEMM1 was correctness-clean but slow, so the new test is applying that scheduling lever to the faster parent that already fixed GEMM1. Reference evidence: the local SM120 MoE data-prep notes prefer small-route single-CTA/device-side scheduling and invalid-tile predicates over host-sized launches. Inference: the current best likely pays avoidable launch/grid overhead in metadata and empty-expert stage2 blocks. Action: collapse metadata and prune GEMM2's expert dimension using only device-side guards.",
+    "expected_impact": "Should reduce metadata launch overhead and remove most empty expert blocks while preserving the fast GEMM1 dequant and current GEMM2 arithmetic, making the effect attributable to scheduling.",
+    "risks": "The active arrays must preserve duplicate top-k slots and local_expert_offset filtering exactly. Launching over a fixed upper bound still executes some empty y blocks, but avoids host sync. A scheduling-only change may be modest if GEMM1 remains dominant."
+  },
+  "parent_id": "06419529",
+  "parent_workspace": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/database/solutions/06419529",
+  "candidate_dir": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/iteration/5/executor/5_0",
+  "candidate_code": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/iteration/5/executor/5_0/kernel.py",
+  "candidate_src": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/iteration/5/executor/5_0/src",
+  "output_result_json": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/iteration/5/executor/5_0/executor_result.json",
+  "operator_surface": "flashinfer.trtllm_fp4_block_scale_moe",
+  "application_profile": "Qwen3_5-Plus_prefill_TP2",
+  "constraints": [
+    "Edit only files under candidate_dir.",
+    "Do not generate FlyDSL.",
+    "Preserve the FlashInfer-compatible run(...) signature.",
+    "Apply exactly one optimization category.",
+    "Do not run the evaluator; this runner evaluates after executor returns."
+  ]
+}

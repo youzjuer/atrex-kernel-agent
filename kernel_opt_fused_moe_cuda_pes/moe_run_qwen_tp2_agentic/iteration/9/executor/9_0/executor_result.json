@@ -1,0 +1,9 @@
+{
+  "child": "9_0",
+  "parent_id": "a09b7b69",
+  "candidate_code": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/iteration/9/executor/9_0/kernel.py",
+  "action_category": "single_token_stage2_bias_hoist_finalize_slim",
+  "action_description": "Moved GEMM2 bias addition into the single-token stage2 slot partial kernel and replaced the finalize kernel with a slimmer weighted reducer that no longer reads local_experts or gemm2_bias. GEMM1, local-slot compaction, FP4 dequant helpers, workspace shape, and multi-token fallback are unchanged.",
+  "self_check": "ok",
+  "history_path": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/iteration/9/executor/9_0/history.md"
+}

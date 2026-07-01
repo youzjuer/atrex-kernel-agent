@@ -1,0 +1,30 @@
+{
+  "workspace_path": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic",
+  "repo_root": "/home/youchunbo/code/atrex-kernel-agent",
+  "generation": 6,
+  "child": "6_1",
+  "strategy": {
+    "child": "6_1",
+    "parent_id": "06419529",
+    "action_category": "single_token_slot_scheduling",
+    "action_description": "Specialize only the T=1/TOPK<=10 scheduling path on the current fastest parent: replace the general E_local count/offset/fill metadata sequence with a tiny single-token local-slot compaction kernel that scans TOPK, emits local_slots, local_experts, token_count, and local_slot_count, then launch GEMM2 over the host-known TOPK upper bound with device guards. Keep the parent GEMM2 arithmetic and completion-count finalize logic unchanged so the isolated change is scheduling overhead and empty expert pruning.",
+    "evidence_chain": "The parent 06419529 still launches count_local_slots, build_expert_offsets, fill_grouped_slots, and then a stage2 grid over all E_local=256 experts, although the target run has T=1 and at most TOPK=10 routed slots. Generation 5's one-kernel active-expert schedule reduced empty expert launch width but used a serial scan over E_local and was slower; a TOPK-only single-token compaction is a narrower scheduling variant that avoids the E_local scan while preserving the parent reduction behavior.",
+    "expected_impact": "Cuts metadata work and prunes empty expert blocks for the exact qwen_tp2 tokens=1 profile without changing FP4 math. It should be faster if launch/grid overhead and empty-expert blocks are material at this small-token shape.",
+    "risks": "The scheduling-only lever may be too small relative to GEMM1. A single-token path must fall back cleanly for T!=1 and must not drop invalid/non-local slots that the parent expects to contribute zero."
+  },
+  "parent_id": "06419529",
+  "parent_workspace": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/database/solutions/06419529",
+  "candidate_dir": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/iteration/6/executor/6_1",
+  "candidate_code": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/iteration/6/executor/6_1/kernel.py",
+  "candidate_src": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/iteration/6/executor/6_1/src",
+  "output_result_json": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/iteration/6/executor/6_1/executor_result.json",
+  "operator_surface": "flashinfer.trtllm_fp4_block_scale_moe",
+  "application_profile": "Qwen3_5-Plus_prefill_TP2",
+  "constraints": [
+    "Edit only files under candidate_dir.",
+    "Do not generate FlyDSL.",
+    "Preserve the FlashInfer-compatible run(...) signature.",
+    "Apply exactly one optimization category.",
+    "Do not run the evaluator; this runner evaluates after executor returns."
+  ]
+}

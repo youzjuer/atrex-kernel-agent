@@ -262,6 +262,21 @@ def next_generation(run_dir: Path) -> int:
     return max(int(row["generation"]) for row in history) + 1
 
 
+def parent_record_from_solution(sol: dict[str, Any]) -> dict[str, Any]:
+    metadata = sol.get("metadata") or {}
+    optimization = metadata.get("optimization") or {}
+    return {
+        "solution_id": sol.get("solution_id"),
+        "score": sol.get("score"),
+        "island_id": sol.get("island_id"),
+        "generation": sol.get("generation"),
+        "code": sol.get("solution"),
+        "generate_plan": sol.get("generate_plan"),
+        "action_category": optimization.get("action_category", ""),
+        "summary": sol.get("summary", ""),
+    }
+
+
 def selected_parents(repo_root: Path, run_dir: Path, n: int) -> list[dict[str, Any]]:
     out = run_capture(
         [
@@ -276,7 +291,51 @@ def selected_parents(repo_root: Path, run_dir: Path, n: int) -> list[dict[str, A
         ],
         cwd=repo_root,
     )
-    return json.loads(out)
+    sampled = json.loads(out)
+    state_path = run_dir / "database" / "state.json"
+    if not state_path.exists():
+        return sampled
+
+    state = parse_json(state_path)
+    solutions = state.get("solutions") or {}
+    best_id = state.get("best_solution_id")
+    selected: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    if best_id and best_id in solutions:
+        selected.append(parent_record_from_solution(solutions[best_id]))
+        seen.add(best_id)
+        sampled_ids = [p.get("solution_id") for p in sampled]
+        if not sampled_ids or sampled_ids[0] != best_id:
+            print(f"[Atrex] parent set anchored at best solution: {best_id}", flush=True)
+
+    for parent in sampled:
+        sid = parent.get("solution_id")
+        if not sid or sid in seen:
+            continue
+        selected.append(parent)
+        seen.add(sid)
+
+    if len(selected) < n:
+        ranked_ids = [sid for sid in (state.get("elites") or []) if sid in solutions]
+        ranked_ids.extend(
+            sid
+            for sid in sorted(
+                solutions,
+                key=lambda x: float((solutions[x] or {}).get("score") or 0.0),
+                reverse=True,
+            )
+            if sid not in ranked_ids
+        )
+        for sid in ranked_ids:
+            if sid in seen:
+                continue
+            selected.append(parent_record_from_solution(solutions[sid]))
+            seen.add(sid)
+            if len(selected) >= n:
+                break
+
+    return selected[:n] if selected else sampled
 
 
 def solution_record(run_dir: Path, solution_id: str | None) -> dict[str, Any] | None:

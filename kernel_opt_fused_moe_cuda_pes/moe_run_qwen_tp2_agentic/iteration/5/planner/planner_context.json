@@ -1,0 +1,93 @@
+{
+  "workspace_path": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic",
+  "repo_root": "/home/youchunbo/code/atrex-kernel-agent",
+  "generation": 5,
+  "n_candidates": 3,
+  "parents": [
+    {
+      "solution_id": "06419529",
+      "score": 2.6427269430212332,
+      "island_id": 0,
+      "generation": 4,
+      "code": "database/solutions/06419529/kernel.py",
+      "generate_plan": "Apply a warp-sliced K-parallel FP4 dequant microkernel to GEMM1/gate-up only. Keep 98a890ad's grouped GEMM2/finalize path unchanged. For qwen_tp2 H=4096 and scale_vec=32, assign one warp or half-warp to a gate/up output pair, have lanes load disjoint 32- or 64-element packed FP4 K chunks with 128-bit loads, decode/apply scales, accumulate partial x1/x2 values, and warp-reduce to one mid[tk,i] store. This changes the FP4 dequant work partitioning, not scheduling or finalization.",
+      "action_category": "tiled_fp4_dequantization",
+      "summary": "",
+      "workspace": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/database/solutions/06419529",
+      "kernel_path": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/database/solutions/06419529/kernel.py",
+      "src_path": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/database/solutions/06419529/src",
+      "iteration_ref": "iteration/4/executor/4_1",
+      "optimization": {
+        "action_category": "tiled_fp4_dequantization",
+        "action_description": ""
+      }
+    },
+    {
+      "solution_id": "06419529",
+      "score": 2.6427269430212332,
+      "island_id": 0,
+      "generation": 4,
+      "code": "database/solutions/06419529/kernel.py",
+      "generate_plan": "Apply a warp-sliced K-parallel FP4 dequant microkernel to GEMM1/gate-up only. Keep 98a890ad's grouped GEMM2/finalize path unchanged. For qwen_tp2 H=4096 and scale_vec=32, assign one warp or half-warp to a gate/up output pair, have lanes load disjoint 32- or 64-element packed FP4 K chunks with 128-bit loads, decode/apply scales, accumulate partial x1/x2 values, and warp-reduce to one mid[tk,i] store. This changes the FP4 dequant work partitioning, not scheduling or finalization.",
+      "action_category": "tiled_fp4_dequantization",
+      "summary": "",
+      "workspace": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/database/solutions/06419529",
+      "kernel_path": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/database/solutions/06419529/kernel.py",
+      "src_path": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/database/solutions/06419529/src",
+      "iteration_ref": "iteration/4/executor/4_1",
+      "optimization": {
+        "action_category": "tiled_fp4_dequantization",
+        "action_description": ""
+      }
+    },
+    {
+      "solution_id": "d2b0e425",
+      "score": 1.0789423486384044,
+      "island_id": 0,
+      "generation": 3,
+      "code": "database/solutions/d2b0e425/kernel.py",
+      "generate_plan": "Retile GEMM2 dequantization across multiple hidden output columns, not just across K. Replace the one-thread-per-(topk slot, hidden column, split) helper with a GEMM2 microkernel where a CTA covers one routed slot, one split or scale-column range, and a small H tile such as 4 or 8 columns. Cooperatively load each 32-element mid K block once into shared memory or registers, vector-load packed FP4 weights and scales for the H tile, decode e2m1 nibbles for the tile, accumulate several hidden columns in registers, then write through the existing stage2 accumulation/finalize path. Keep routing, split_count policy, and output reduction semantics unchanged.",
+      "action_category": "tiled_fp4_dequantization",
+      "summary": "",
+      "workspace": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/database/solutions/d2b0e425",
+      "kernel_path": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/database/solutions/d2b0e425/kernel.py",
+      "src_path": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/database/solutions/d2b0e425/src",
+      "iteration_ref": "iteration/3/executor/3_1",
+      "optimization": {
+        "action_category": "tiled_fp4_dequantization",
+        "action_description": ""
+      }
+    }
+  ],
+  "previous_summary": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/iteration/4/summarizer/summary.md",
+  "profiles": {
+    "baseline": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/profiles/auto_baseline.json",
+    "directory": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/profiles"
+  },
+  "operator_surface": "flashinfer.trtllm_fp4_block_scale_moe",
+  "application_profile": "Qwen3_5-Plus_prefill_TP2",
+  "optimization_focus": [
+    "grouped expert scheduling",
+    "tiled FP4 dequantization",
+    "grouped GEMM"
+  ],
+  "framework": "CUDA C++ PyTorch extension",
+  "constraints": [
+    "Do not generate FlyDSL.",
+    "Preserve the FlashInfer-compatible run(...) signature.",
+    "Preserve Qwen3.5 Plus TP2 routing/top_k/local expert semantics.",
+    "Each strategy must target exactly one optimization category."
+  ],
+  "eval_args": {
+    "preset": "qwen_tp2",
+    "tokens": "1",
+    "hidden_size": null,
+    "intermediate_size": null,
+    "local_num_experts": 256,
+    "local_expert_offset": 0,
+    "warmup": 2,
+    "rep": 5
+  },
+  "output_plan_json": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/iteration/5/planner/plan.json",
+  "output_plan_md": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/iteration/5/planner/plan.md"
+}

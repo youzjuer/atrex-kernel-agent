@@ -1,0 +1,30 @@
+{
+  "workspace_path": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic",
+  "repo_root": "/home/youchunbo/code/atrex-kernel-agent",
+  "generation": 4,
+  "child": "4_2",
+  "strategy": {
+    "child": "4_2",
+    "parent_id": "0aa690ad",
+    "action_category": "grouped_gemm",
+    "action_description": "Preserve the grouped intermediate layout across both GEMMs. In 0aa690ad, stage1_grouped_activation_kernel currently scatters the SwiGLU result back to mid[original_topk_slot, i], after which GEMM2 returns to topk-slot order. Instead, write GEMM1 output as mid_grouped[grouped_idx, i] in expert-major order and make GEMM2 consume grouped_idx/expert_offsets directly, using c_map or a permuted_idx_to_expanded_idx-style mapping only in the final router-weighted scatter. Keep the same software FP4 helpers and routing semantics; the category under test is the grouped GEMM dataflow boundary.",
+    "evidence_chain": "Profile evidence: 0aa690ad converted b9545b81's metadata into a grouped GEMM1 producer but still passed slowly at 1723.200 us. Code evidence: the grouped stage1 writes mid back to original top-k slot order, then the unchanged stage2_grouped_down_kernel rereads topk_ids and processes (tk,h,split) rather than consuming the expert-major rows just produced. New reference evidence: FlashInfer FC1 grouped SwiGLU and grouped finalize references keep valid M rows in a flattened grouped layout, carry token_id_mapping/permuted_idx_to_expanded_idx metadata, and postpone invalid/padded-row predicates to the scheduler/epilogue. Inference: scattering the intermediate back to top-k order destroys the locality created by grouped GEMM1 and forces GEMM2 to rebuild route/expert context. Action: keep mid grouped until the final output scatter.",
+    "expected_impact": "Should remove one unnecessary layout round trip, let GEMM2 reuse the same expert-major row grouping as GEMM1, and align the CUDA candidate more closely with FlashInfer's grouped FC1 plus grouped finalize boundary. This is distinct from prior GEMM2-only grouped finalize and prior GEMM1-only grouped producer attempts.",
+    "risks": "This touches the contract between the two compute stages, so c_map/permuted mapping mistakes can silently swap top-k rows. Multiple routes for the same token still require correct router-weighted accumulation in final output. If GEMM2 remains scalar per hidden column, preserving layout may not overcome the added indexing unless the implementation avoids extra metadata kernels."
+  },
+  "parent_id": "0aa690ad",
+  "parent_workspace": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/database/solutions/0aa690ad",
+  "candidate_dir": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/iteration/4/executor/4_2",
+  "candidate_code": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/iteration/4/executor/4_2/kernel.py",
+  "candidate_src": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/iteration/4/executor/4_2/src",
+  "output_result_json": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/iteration/4/executor/4_2/executor_result.json",
+  "operator_surface": "flashinfer.trtllm_fp4_block_scale_moe",
+  "application_profile": "Qwen3_5-Plus_prefill_TP2",
+  "constraints": [
+    "Edit only files under candidate_dir.",
+    "Do not generate FlyDSL.",
+    "Preserve the FlashInfer-compatible run(...) signature.",
+    "Apply exactly one optimization category.",
+    "Do not run the evaluator; this runner evaluates after executor returns."
+  ]
+}

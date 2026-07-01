@@ -1,0 +1,132 @@
+{
+  "plan_path": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/iteration/7/planner/plan.md",
+  "strategies": [
+    {
+      "child": "7_0",
+      "parent_id": "6ebb0ad6",
+      "action_category": "grouped_expert_scheduling",
+      "action_description": "Front-load the T=1/TOPK<=10 local-slot compaction before GEMM1 and make both GEMM stages consume the same compact local slot arrays. For the fast path, build local_slots, local_experts, token_counts, and local_slot_count first, launch GEMM1 only over the host-known TOPK upper bound with device guards against slot_idx >= local_slot_count[0], and write mid_compact[slot_idx, i] instead of mid[topk_slot, i]. Then pass the same compact slot index to the existing single-token GEMM2 path. Keep GEMM1/GEMM2 arithmetic, FP4 decode helpers, router weights, and fallback paths unchanged; the isolated change is scheduling the local expert work once and reusing it across both GEMMs.",
+      "evidence_chain": "Profile evidence: generation 6 selected 6ebb0ad6 as best at 533.856 us, but the current auto baseline is still around 527.168 us for qwen_tp2 T=1. Code evidence in 6ebb0ad6 shows stage1_activation_warp_k_kernel launches over all T*TOPK*I outputs and checks local expert membership inside every warp, while compact_single_token_local_slots_kernel runs only after GEMM1 and therefore only prunes GEMM2. Shape evidence: local_num_experts=256 out of num_experts=512, TOPK=10, so the current GEMM1 launch can spend warp scheduling and topk_id checks on non-local slots that must contribute zero. New L1 evidence: the SM120 MoE data-prep reference outputs compact expert-major maps once for downstream grouped GEMMs, with a single-CTA small-topk path preferred at small topk_length. Inference: the fastest parent has the right compact schedule, but it is used one stage too late. Action: move the schedule boundary before GEMM1 and reuse the compact rows through GEMM2.",
+      "expected_impact": "Should reduce useless GEMM1 warp work for non-local top-k routes, remove repeated topk_id/local-range checks from the stage1 hot loop, and make the intermediate layout match the compact single-token GEMM2 path. The gain is shape-dependent: largest when only a subset of TOPK routes are local, neutral when all 10 slots are local.",
+      "risks": "If most routed experts are local, the schedule movement may only add one earlier metadata dependency and little speedup. Row mapping mistakes can swap top-k slots, especially because topk_weights must still index the original slot. Keep the parent all-topk GEMM1 path as fallback for T!=1, TOPK>10, or any mismatch."
+    },
+    {
+      "child": "7_1",
+      "parent_id": "83d98be7",
+      "action_category": "tiled_fp4_dequantization",
+      "action_description": "Replace the GEMM2 serial per-thread I-loop with a qwen_tp2-specialized warp-sliced K/I dequant dot. For each active local slot and hidden column, assign one warp to the output, let lanes own disjoint 32-element scale blocks of I=1024, load mid activations and packed FP4 weights with the existing vectorized/cache-policy helpers, accumulate lane-local FP32 partials, then warp-reduce to the same finalize path used by the parent. Keep scheduling, GEMM1, router weighting, and the parent two-column/fallback code unchanged; the category under test is GEMM2 tiled FP4 dequant work partitioning.",
+      "evidence_chain": "Profile evidence: 83d98be7 passed at 566.304 us, slower than 6ebb0ad6 but correctness-clean. Code evidence in 83d98be7 shows GEMM2 added adjacent-H two-column reuse, yet each participating thread still walks all gemm2_scale_cols for I=1024 serially inside accumulate_fp4_pair_scaled_i_tiles_gemm2. Prior lineage evidence: GEMM1 warp-sliced K dequant in 06419529 was the first large stable improvement, whereas prior GEMM2 H-tiling and two-column attempts did not split K across lanes. New L1 evidence: the local SM120 NVFP4 split-K/GEMV reports identify small-M long-K work as a parallelism problem, use K-splitting when the serial dot under-fills or has long instruction chains, and require alignment predicates; the vectorized-loads card recommends many lanes per row/dot with 128-bit or wider FP4 loads and cache-policy separation. Inference: GEMM2 still has a serial software-FP4 dequant chain per output. Action: apply the successful warp-sliced K idea to GEMM2 instead of adding more H-column reuse.",
+      "expected_impact": "Should shorten the per-thread dequant/FMA chain in GEMM2, improve instruction-level and memory-level parallelism across I scale blocks, and preserve the parent finalization semantics. It is most likely to help when GEMM2 remains visible after GEMM1 warp-slicing.",
+      "risks": "One warp per output increases warp count and shuffle overhead, and may be slower if launch occupancy rather than serial K latency is the limit. Restrict the fast path to I_scale_vec==32 and I_scale_cols==32, keep the parent serial/two-column path as fallback, and watch register pressure from per-lane accumulators."
+    },
+    {
+      "child": "7_2",
+      "parent_id": "6ebb0ad6",
+      "action_category": "grouped_gemm_compact_atomic_free_finalize",
+      "action_description": "Combine the fastest single-token compact schedule with an atomic-free grouped GEMM2 finalize. Keep 6ebb0ad6's GEMM1 and compact local_slots/local_experts path, but change the T=1 GEMM2 kernel to write FP32 slot partials into a compact fixed [TOPK, H] workspace indexed by local slot. Launch a small finalize kernel over H that loops only local_slot_count slots, applies topk_weights and gemm2_bias with the parent semantics, casts directly to bf16, and writes zero when no local slot exists. Do not use the E_local expert_counts/expert_offsets path in this child.",
+      "evidence_chain": "Profile evidence: 6ebb0ad6 is the best selected parent at 533.856 us, while sibling 33cb5680 proved an atomic-free partial/finalize idea correctness-clean at 554.112 us but kept the older grouped expert metadata path. Code evidence in 6ebb0ad6 shows the fast T=1 GEMM2 path is compact over TOPK but still uses atomicAdd, __threadfence, completion_counts, out_accum memset, completion_counts memset, and out memset for every active slot/hidden output when expected>1. New L1 evidence: the SM120 split-K GEMV recipe uses a two-phase FP32 partial workspace plus deterministic reduce when extra decomposition is needed, and warns to gate by shape and keep workspace stable; FlashInfer-style grouped finalize keeps router weighting in the epilogue. Inference: the prior atomic-free reducer was structurally sound but paid unnecessary E_local scheduling overhead. Action: reapply only the atomic-free finalize boundary on top of the compact TOPK schedule from 6ebb0ad6.",
+      "expected_impact": "Can remove per-output atomics, threadfence, completion-count synchronization, and large zero-initialization traffic from the fastest T=1 path while keeping slot-level GEMM2 parallelism. Expected gain is modest but plausible if completion synchronization is still on the critical path.",
+      "risks": "Adds one finalize launch and a [TOPK,H] FP32 workspace, and may lose if GEMM1 dominates or if atomics are hidden behind GEMM2 work. Correctness must preserve duplicate top-k slots, exact local_expert_offset filtering, and gemm2_bias contribution per local route."
+    }
+  ],
+  "evidence_summary": "The current profile evidence is CUDA-event evaluator output rather than NCU: qwen_tp2 T=1 passes at 527.168 us in profiles/auto_baseline.json; selected parents pass at 533.856 us (6ebb0ad6), 566.304 us (83d98be7), and 1381.920 us (b1433778). FlashInfer comparison remains BLOCKED because the local flashinfer.trtllm_fp4_block_scale_moe worker crashes/errors. Useful arithmetic for T=1,H=4096,I=1024,TOPK=10 is about 251.66 MFLOP, so the best current paths are still below about 0.5 TFLOP/s of useful software-FP4 MoE work. Dominant code evidence: GEMM1 is warp-sliced but still launched over all TOPK before local-slot compaction; GEMM2 still contains serial FP4 dequant loops and atomic completion/finalize synchronization. The strategies therefore target scheduling before GEMM1, K-parallel GEMM2 dequant, and compact atomic-free grouped GEMM2 finalize.",
+  "search_sources": [
+    {
+      "source": "workspace README.md",
+      "layer": "input",
+      "query": "operator contract and qwen_tp2 shape",
+      "finding": "FlashInfer-compatible run signature; T=1 eval uses H=4096, I=1024, E_global=512, TOPK=10, E_local=256.",
+      "new": "No",
+      "actionability": "Defines shape predicates and local expert semantics for all children."
+    },
+    {
+      "source": "profiles/auto_baseline.json and iteration/6 evidence",
+      "layer": "input",
+      "query": "current latency and target status",
+      "finding": "Current profile passes at 527.168 us; generation 6 children pass at 533.856, 554.112, and 566.304 us; FlashInfer target remains BLOCKED.",
+      "new": "Yes",
+      "actionability": "Shows current bottleneck is internal CUDA path quality, not a comparable FlashInfer latency target."
+    },
+    {
+      "source": "database/state.json and evolution_db lineage",
+      "layer": "input",
+      "query": "already tried lineage actions",
+      "finding": "Best lineage already includes GEMM2 grouped finalize, GEMM2 dequant retile, GEMM1 warp-sliced dequant, and single-token scheduling; siblings tried active scheduling, topk direct reducer, atomic-free reduce, and two-column GEMM2.",
+      "new": "No",
+      "actionability": "Constrains novelty: avoid repeating active-expert pruning, GEMM1 warp-slice, two-column GEMM2, and old atomic-free reducer unchanged."
+    },
+    {
+      "source": "database/solutions/6ebb0ad6/src/fused_moe_kernel.cu",
+      "layer": "input",
+      "query": "fastest parent implementation",
+      "finding": "Stage1 warp-sliced GEMM1 still runs before compact_single_token_local_slots_kernel; T=1 GEMM2 is compact over TOPK but still uses atomicAdd, threadfence, completion_counts, and out_accum.",
+      "new": "Yes",
+      "actionability": "Directly supports 7_0 and 7_2."
+    },
+    {
+      "source": "database/solutions/83d98be7/src/fused_moe_kernel.cu",
+      "layer": "input",
+      "query": "GEMM2 dequant implementation",
+      "finding": "Two-column GEMM2 retile reuses each mid load across adjacent H rows but still leaves each thread with a serial loop over I scale blocks.",
+      "new": "Yes",
+      "actionability": "Directly supports 7_1."
+    },
+    {
+      "source": "gpu-wiki/docs/kernel-opt/nvidia/cutedsl/sm120/sm120-moe-data-prep.md",
+      "layer": "L1",
+      "query": "small topk MoE data prep",
+      "finding": "Single-CTA small-topk data prep is preferred for small topk_length; the recipe builds compact maps once for downstream grouped GEMMs and avoids heavyweight sort/CUB paths.",
+      "new": "Yes",
+      "actionability": "Supports front-loading compact local-slot scheduling before GEMM1."
+    },
+    {
+      "source": "gpu-wiki/docs/ref-docs/nvidia/cutedsl/sm120/sm120-moe-data-prep-optimization.md",
+      "layer": "L1",
+      "query": "MoE data prep retained and regressed patterns",
+      "finding": "V7 contention-free offsets and V9 bank replication were retained; warp aggregation, CUB sort, and warp-specialized histogram regressed in a multi-bottleneck regime.",
+      "new": "Yes",
+      "actionability": "Supports simple compact scheduling and warns against sort-heavy scheduling changes."
+    },
+    {
+      "source": "gpu-wiki/docs/ref-docs/nvidia/cuda/sm120/sm120-nvfp4-split-k-gemv-bf16-optimization.md",
+      "layer": "L1",
+      "query": "NVFP4 small-M long-K decomposition",
+      "finding": "Split-K helps small-M long-K GEMV when output CTA count or serial K work under-fills the GPU; two-phase FP32 partial plus reduce is the stable first implementation, gated by alignment.",
+      "new": "Yes",
+      "actionability": "Supports GEMM2 K-parallel dequant and shape-gated partial/finalize ideas."
+    },
+    {
+      "source": "gpu-wiki/docs/kernel-opt/nvidia/common/blackwell/techniques/vectorized-loads.md",
+      "layer": "L1",
+      "query": "software FP4 dequant load policy",
+      "finding": "Sub-byte FP4 kernels benefit from wide 128/256-bit loads, cache-policy separation, and many lanes per GEMV row/dot.",
+      "new": "No",
+      "actionability": "Supports 7_1's warp-sliced GEMM2 dequant loading pattern."
+    },
+    {
+      "source": "gpu-wiki/docs/kernel-opt/nvidia/common/blackwell/kernels/grouped-gemm.md and fused-moe.md",
+      "layer": "L1",
+      "query": "FlashInfer-aligned grouped MoE dataflow",
+      "finding": "MoE grouped GEMM uses compact per-expert rows with router-weighted combine/finalize at the grouped epilogue boundary; fused MoE reduces intermediate and finalization roundtrips.",
+      "new": "No",
+      "actionability": "Supports 7_2's compact grouped GEMM2 finalize boundary."
+    },
+    {
+      "source": "reference-projects/README.md and reference-projects/{flashinfer,DeepGEMM,cutlass,aiter}",
+      "layer": "L2",
+      "query": "upstream project source",
+      "finding": "Reference project directories exist but are not populated in this checkout, so no additional local upstream code was available beyond gpu-wiki extracted reference kernels.",
+      "new": "Yes",
+      "actionability": "No direct action; explains why L1 extracted references are the usable local source."
+    },
+    {
+      "source": "public web",
+      "layer": "L3",
+      "query": "not used",
+      "finding": "No public-web search was needed because local workspace, database, profiles, gpu-wiki, and extracted reference kernels supplied enough new evidence.",
+      "new": "No",
+      "actionability": "Keeps plan tied to reproducible local evidence."
+    }
+  ],
+  "exhaustion": false
+}

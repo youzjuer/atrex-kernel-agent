@@ -1,0 +1,33 @@
+{
+  "tool_used": "torch.cuda.Event",
+  "strategy": {
+    "child": "5_0",
+    "parent_id": "06419529",
+    "action_category": "grouped_expert_scheduling",
+    "action_description": "Port the active-expert schedule to the current best parent without host synchronization: replace the current count_local_slots_kernel + build_expert_offsets_kernel + fill_grouped_slots_kernel metadata sequence with one small device-side active schedule that emits active_experts, active_offsets, active_counts, grouped_slots, token_counts, and active_expert_count. Keep the warp-sliced GEMM1 path and the current vectorized GEMM2 math unchanged. Launch GEMM2/finalize over max_active_experts = min(E_local, T * TOPK), guard blockIdx.y against active_expert_count[0], and avoid copying the active count to host.",
+    "evidence_chain": "Profile evidence: generation 5 auto baseline from the promoted source passes qwen_tp2 T=1 at 424.832 us with max_rel 2.384e-4, while the database best 06419529 was 544.480 us and stable retest was 550.720 us. Code evidence: 06419529 still builds expert_counts/expert_offsets/grouped_slots with three tiny metadata kernels, zeros multiple workspaces, then launches stage2 over all E_local=256 experts although T=1 and TOPK=10 can produce at most 10 active routed slots. Prior evidence: active-expert scheduling without the new warp-sliced GEMM1 was correctness-clean but slow, so the new test is applying that scheduling lever to the faster parent that already fixed GEMM1. Reference evidence: the local SM120 MoE data-prep notes prefer small-route single-CTA/device-side scheduling and invalid-tile predicates over host-sized launches. Inference: the current best likely pays avoidable launch/grid overhead in metadata and empty-expert stage2 blocks. Action: collapse metadata and prune GEMM2's expert dimension using only device-side guards.",
+    "expected_impact": "Should reduce metadata launch overhead and remove most empty expert blocks while preserving the fast GEMM1 dequant and current GEMM2 arithmetic, making the effect attributable to scheduling.",
+    "risks": "The active arrays must preserve duplicate top-k slots and local_expert_offset filtering exactly. Launching over a fixed upper bound still executes some empty y blocks, but avoids host sync. A scheduling-only change may be modest if GEMM1 remains dominant."
+  },
+  "executor_result": {
+    "child": "5_0",
+    "parent_id": "06419529",
+    "candidate_code": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/iteration/5/executor/5_0/kernel.py",
+    "action_category": "grouped_expert_scheduling",
+    "action_description": "Replaced the parent three-kernel metadata path with one device-side active-expert schedule that builds active_experts, active_offsets, compact active_counts, grouped_slots, token_counts, and active_expert_count. GEMM2/finalize now launches over min(E_local, T * TOPK) and guards blockIdx.y against active_expert_count[0] before reading active expert metadata, with no host active-count copy or synchronization. The existing warp-sliced GEMM1 path and vectorized GEMM2 arithmetic were kept unchanged.",
+    "self_check": "ok",
+    "history_path": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/iteration/5/executor/5_0/history.md"
+  },
+  "status": "PASS",
+  "latency_us": 543.8399910926819,
+  "max_rel": 0.00023841856454964727,
+  "flashinfer_us": null,
+  "target_status": "BLOCKED",
+  "target_speedup_vs_flashinfer": null,
+  "flashinfer": {
+    "status": "ERROR",
+    "error": "worker exited with code -11; stdout=''; stderr=', void>, tvm::ffi::TensorView, tvm::ffi::TensorView, tvm::ffi::Optional<tvm::ffi::TensorView, void>, tvm::ffi::Optional<tvm::ffi::TensorView, void>, tvm::ffi::Optional<tvm::ffi::TensorView, void>, tvm::ffi::Optional<tvm::ffi::TensorView, void>, long, long, tvm::ffi::Optional<long, void>, tvm::ffi::Optional<long, void>, long, long, long, tvm::ffi::Optional<double, void>, long, bool, bool, long, tvm::ffi::TensorView, tvm::ffi::Array<long, void>, bool, tvm::ffi::Optional<tvm::ffi::TensorView, void>)\\n  File \"<unknown>\", line 0, in __tvm_ffi_trtllm_fp4_block_scale_moe\\n  File \"<unknown>\", line 0, in PyObject_Call\\n  File \"<unknown>\", line 0, in _PyEval_EvalFrameDefault\\n  File \"<unknown>\", line 0, in PyEval_EvalCode\\n  File \"<unknown>\", line 0, in _PyRun_SimpleFileObject\\n  File \"<unknown>\", line 0, in _PyRun_AnyFileObject\\n  File \"<unknown>\", line 0, in Py_RunMain\\n  File \"<unknown>\", line 0, in Py_BytesMain\\n  File \"<unknown>\", line 0, in _start\\n  File \"<unknown>\", line 0, in 0xffffffffffffffff\\n\\n'",
+    "rows": []
+  },
+  "result_file": "iteration/5/executor/5_0/result.json"
+}

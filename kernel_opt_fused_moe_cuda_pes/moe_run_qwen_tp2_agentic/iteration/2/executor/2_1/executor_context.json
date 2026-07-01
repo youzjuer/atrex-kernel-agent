@@ -1,0 +1,30 @@
+{
+  "workspace_path": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic",
+  "repo_root": "/home/youchunbo/code/atrex-kernel-agent",
+  "generation": 2,
+  "child": "2_1",
+  "strategy": {
+    "child": "2_1",
+    "parent_id": "3c90a4b6",
+    "action_category": "tiled_fp4_dequantization",
+    "action_description": "Retile only the GEMM2/down-projection FP4 dequant path inside the grouped parent. Keep the expert grouping/finalize logic unchanged, but replace accumulate_fp4_scaled_tile for GEMM2 with an I-tile microkernel: use aligned 128-bit or 256-bit packed FP4 weight loads, vectorized scale loads, PTX byte extraction or branchless nibble decode, and cache-policy separation where streamed weights use L1::no_allocate while the reused mid tile is kept hot or staged for several hidden columns.",
+    "evidence_chain": "Profile evidence: the prior tiled_fp4_dequantization child optimized GEMM1 only and regressed to 1897.984 us, while the current selected grouped_gemm parent still calls the scalar accumulate_fp4_scaled_tile in GEMM2. Code evidence: GEMM2 rereads each mid row across H=4096 output columns and loops over I/32 scale blocks with LUT nibble decode per output column. New reference evidence: gpu-wiki cache-policy and NVFP4 GEMV guidance identify wide vector loads plus L1::no_allocate/evict_last separation as the bandwidth-first lever for FP4 software decode; FlashInfer fp4_common.py uses COPY_BITS=128 and ld_global_v4_u32; the compute-capability table marks CC 8.9 as BF16/FP8 capable but not native FP4 tensor-core capable. Inference: on L20D/CC 8.9, GEMM2 must get faster through software dequant load/decode efficiency, not native FP4 MMA. Action: apply the dequant tiling to GEMM2, not GEMM1.",
+    "expected_impact": "Should reduce GEMM2 instruction count, weight-load transactions, and mid rereads without adding new scheduling behavior. It targets the largest still-scalar loop in the grouped parent and avoids repeating generation 1's GEMM1-only shared-memory experiment.",
+    "risks": "Inline PTX cache qualifiers and vector widths are fragile across alignment and architecture. Register pressure can erase the gain if too many hidden columns are accumulated per thread group. Keep scalar fallback for unaligned rows/tails and gate any native FP4 conversion behind a compile-time architecture check because CC 8.9 should not assume FP4 tensor cores."
+  },
+  "parent_id": "3c90a4b6",
+  "parent_workspace": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/database/solutions/3c90a4b6",
+  "candidate_dir": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/iteration/2/executor/2_1",
+  "candidate_code": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/iteration/2/executor/2_1/kernel.py",
+  "candidate_src": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/iteration/2/executor/2_1/src",
+  "output_result_json": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/iteration/2/executor/2_1/executor_result.json",
+  "operator_surface": "flashinfer.trtllm_fp4_block_scale_moe",
+  "application_profile": "Qwen3_5-Plus_prefill_TP2",
+  "constraints": [
+    "Edit only files under candidate_dir.",
+    "Do not generate FlyDSL.",
+    "Preserve the FlashInfer-compatible run(...) signature.",
+    "Apply exactly one optimization category.",
+    "Do not run the evaluator; this runner evaluates after executor returns."
+  ]
+}

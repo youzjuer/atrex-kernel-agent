@@ -1,0 +1,67 @@
+{
+  "solution_id": "3adfb052",
+  "parent_id": "3c90a4b6",
+  "generate_plan": "Replace the parent grouped-down scheduler's E_local-wide launch with an active-expert schedule for the small Qwen TP2 route set. Build a compact active_experts array, active_offsets/counts, grouped_slots, and token_counts from the <= T*top_k local slots in one small CUDA metadata kernel, then launch the grouped GEMM2/finalize work over active_expert_count instead of all 256 local experts. Keep the parent GEMM1 and grouped-down arithmetic unchanged so the only category under test is schedule/grid pruning.",
+  "island_id": 0,
+  "iteration": 2,
+  "generation": 2,
+  "timestamp": 1782833474.0815728,
+  "sample_cnt": 0,
+  "sample_weight": 0.0,
+  "score": 1.0281233185577225,
+  "evaluation": "PASS; latency_us=1399.5519876480103; strategy=grouped_expert_scheduling",
+  "summary": "",
+  "solution": "database/solutions/3adfb052/kernel.py",
+  "metadata": {
+    "lang": "cuda",
+    "code_sha256": "73a4354d6aea3091974c48a20eb0c185096b9d85abec6050050b833eb06f2765",
+    "correctness": {
+      "rel_err": 0.00011920928227482364,
+      "status": "PASS"
+    },
+    "performance": {
+      "latency_us": 1399.5519876480103,
+      "tflops": null,
+      "bandwidth_gbps": null
+    },
+    "optimization": {
+      "action_category": "grouped_expert_scheduling",
+      "action_description": ""
+    },
+    "iteration_ref": "iteration/2/executor/2_0",
+    "profile_evidence": {
+      "tool_used": "torch.cuda.Event",
+      "strategy": {
+        "child": "2_0",
+        "parent_id": "3c90a4b6",
+        "action_category": "grouped_expert_scheduling",
+        "action_description": "Replace the parent grouped-down scheduler's E_local-wide launch with an active-expert schedule for the small Qwen TP2 route set. Build a compact active_experts array, active_offsets/counts, grouped_slots, and token_counts from the <= T*top_k local slots in one small CUDA metadata kernel, then launch the grouped GEMM2/finalize work over active_expert_count instead of all 256 local experts. Keep the parent GEMM1 and grouped-down arithmetic unchanged so the only category under test is schedule/grid pruning.",
+        "evidence_chain": "Profile evidence: generation 1 grouped_gemm parent 3c90a4b6 passes but is slower than the baseline, 1504.352 us vs 1438.912 us. Code evidence: its stage2_grouped_down_finalize_kernel launches grid_stage2 over (ceil(H/32), E_local) = 128*256 = 32768 blocks for qwen_tp2 T=1, while at most top_k=10 experts are active, so the useful upper bound is 1280 hidden-column/expert blocks before duplicate/non-local filtering. New reference evidence: the SM120 MoE data-prep record says small topk_length should use a single-CTA path and avoid CUB/sort, and its V7/V9 design keeps scatter rank calculation in smem/per-CTA offsets. Inference: the parent regressed because grouped work is scheduled across empty experts. Action: compact active experts first and use active_expert_count as the stage2 y-grid.",
+        "expected_impact": "Should remove most zero-expert block launches and the E_local scan cost in the current grouped parent while preserving its fused finalize boundary. On T=1/top_k=10, the theoretical stage2 expert-grid reduction is up to 25.6x before accounting for metadata overhead, so this is the most direct way to make the grouped parent competitive with the baseline.",
+        "risks": "A separate metadata kernel can still dominate at topk_length=10 if it is overbuilt. Keep the active list fixed-size or single-CTA, avoid sort/CUB, preserve duplicate-route and non-local expert semantics, and fall back to the parent E_local grid if active_expert_count validation fails."
+      },
+      "executor_result": {
+        "child": "2_0",
+        "parent_id": "3c90a4b6",
+        "candidate_code": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/iteration/2/executor/2_0/kernel.py",
+        "action_category": "grouped_expert_scheduling",
+        "action_description": "Replaced the parent stage-2 E_local-wide grouped-down schedule with a compact active-expert schedule. A single small CUDA metadata kernel now builds active_experts, compact active_offsets/active_counts, grouped_slots, token_counts, and active_expert_count from valid local T*top_k slots; the grouped GEMM2/finalize kernel launches over active_expert_count while preserving the parent GEMM1 and GEMM2 arithmetic. The parent full-E_local metadata path remains only as a validation fallback.",
+        "self_check": "ok",
+        "history_path": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/iteration/2/executor/2_0/history.md"
+      },
+      "status": "PASS",
+      "latency_us": 1399.5519876480103,
+      "max_rel": 0.00011920928227482364,
+      "flashinfer_us": null,
+      "target_status": "BLOCKED",
+      "target_speedup_vs_flashinfer": null,
+      "flashinfer": {
+        "status": "ERROR",
+        "error": "worker exited with code -11; stdout=''; stderr=', void>, tvm::ffi::TensorView, tvm::ffi::TensorView, tvm::ffi::Optional<tvm::ffi::TensorView, void>, tvm::ffi::Optional<tvm::ffi::TensorView, void>, tvm::ffi::Optional<tvm::ffi::TensorView, void>, tvm::ffi::Optional<tvm::ffi::TensorView, void>, long, long, tvm::ffi::Optional<long, void>, tvm::ffi::Optional<long, void>, long, long, long, tvm::ffi::Optional<double, void>, long, bool, bool, long, tvm::ffi::TensorView, tvm::ffi::Array<long, void>, bool, tvm::ffi::Optional<tvm::ffi::TensorView, void>)\\n  File \"<unknown>\", line 0, in __tvm_ffi_trtllm_fp4_block_scale_moe\\n  File \"<unknown>\", line 0, in PyObject_Call\\n  File \"<unknown>\", line 0, in _PyEval_EvalFrameDefault\\n  File \"<unknown>\", line 0, in PyEval_EvalCode\\n  File \"<unknown>\", line 0, in _PyRun_SimpleFileObject\\n  File \"<unknown>\", line 0, in _PyRun_AnyFileObject\\n  File \"<unknown>\", line 0, in Py_RunMain\\n  File \"<unknown>\", line 0, in Py_BytesMain\\n  File \"<unknown>\", line 0, in _start\\n  File \"<unknown>\", line 0, in 0xffffffffffffffff\\n\\n'",
+        "rows": []
+      },
+      "result_file": "iteration/2/executor/2_0/result.json"
+    },
+    "MAP_Elite_feature": "2-2-3"
+  }
+}

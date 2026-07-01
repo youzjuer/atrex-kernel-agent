@@ -1,0 +1,34 @@
+{
+  "solution_id": "637a30a6",
+  "parent_id": "7b67f03d",
+  "generate_plan": "Remove the single-token compact metadata launch by having stage2 index original top-k slots directly and finalize over fixed TOPK partials.",
+  "island_id": 0,
+  "iteration": 13,
+  "generation": 13,
+  "timestamp": 1782899021.909473,
+  "sample_cnt": 0,
+  "sample_weight": 0.0,
+  "score": 10.23117163024143,
+  "evaluation": "PASS; latency_us=140.6400054693222; strategy=single_token_fixed_topk_no_compact",
+  "summary": "",
+  "solution": "database/solutions/637a30a6/kernel.py",
+  "metadata": {
+    "lang": "cuda",
+    "code_sha256": "8479c0c6574f25a5ca4384c0881a72fbcbc1a980e63ccf5ea2bbea61656a2582",
+    "correctness": {
+      "rel_err": 0.00023841856454964727,
+      "status": "PASS"
+    },
+    "performance": {
+      "latency_us": 140.6400054693222,
+      "tflops": null,
+      "bandwidth_gbps": null
+    },
+    "optimization": {
+      "action_category": "single_token_fixed_topk_no_compact",
+      "action_description": ""
+    },
+    "iteration_ref": "iteration/13/executor/13_2",
+    "MAP_Elite_feature": "3-3-3"
+  }
+}

@@ -1,0 +1,34 @@
+{
+  "solution_id": "9a2330ad",
+  "parent_id": "64441d10",
+  "generate_plan": "Parallelize the Qwen TP2 single-token CUDA routing kernel with a 512-thread shared-memory block for max and softmax denominator reductions while preserving the fast top-k/fallback surface.",
+  "island_id": 0,
+  "iteration": 12,
+  "generation": 12,
+  "timestamp": 1782896811.1581843,
+  "sample_cnt": 0,
+  "sample_weight": 0.0,
+  "score": 10.299129450206134,
+  "evaluation": "PASS; latency_us=139.71200585365295; strategy=parallel_single_token_cuda_routing_topk",
+  "summary": "",
+  "solution": "database/solutions/9a2330ad/kernel.py",
+  "metadata": {
+    "lang": "cuda",
+    "code_sha256": "8479c0c6574f25a5ca4384c0881a72fbcbc1a980e63ccf5ea2bbea61656a2582",
+    "correctness": {
+      "rel_err": 0.00023841856454964727,
+      "status": "PASS"
+    },
+    "performance": {
+      "latency_us": 139.71200585365295,
+      "tflops": null,
+      "bandwidth_gbps": null
+    },
+    "optimization": {
+      "action_category": "parallel_single_token_cuda_routing_topk",
+      "action_description": ""
+    },
+    "iteration_ref": "iteration/12/executor/12_2",
+    "MAP_Elite_feature": "3-3-3"
+  }
+}

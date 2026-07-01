@@ -1,0 +1,34 @@
+{
+  "solution_id": "f8670af8",
+  "parent_id": "84634c40",
+  "generate_plan": "Tune the single-token stage2 partial launch geometry by decreasing the block from 32 to 16 threads as a scheduling counterpoint to larger-block variants.",
+  "island_id": 0,
+  "iteration": 11,
+  "generation": 11,
+  "timestamp": 1782895204.4151633,
+  "sample_cnt": 0,
+  "sample_weight": 0.0,
+  "score": 2.7411608944421544,
+  "evaluation": "PASS; latency_us=524.9279737472534; strategy=single_token_stage2_block16",
+  "summary": "",
+  "solution": "database/solutions/f8670af8/kernel.py",
+  "metadata": {
+    "lang": "cuda",
+    "code_sha256": "73a4354d6aea3091974c48a20eb0c185096b9d85abec6050050b833eb06f2765",
+    "correctness": {
+      "rel_err": 0.00023841856454964727,
+      "status": "PASS"
+    },
+    "performance": {
+      "latency_us": 524.9279737472534,
+      "tflops": null,
+      "bandwidth_gbps": null
+    },
+    "optimization": {
+      "action_category": "single_token_stage2_block16",
+      "action_description": ""
+    },
+    "iteration_ref": "iteration/11/executor/11_2",
+    "MAP_Elite_feature": "2-2-3"
+  }
+}

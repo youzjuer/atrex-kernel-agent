@@ -1,0 +1,30 @@
+{
+  "workspace_path": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic",
+  "repo_root": "/home/youchunbo/code/atrex-kernel-agent",
+  "generation": 8,
+  "child": "8_1",
+  "strategy": {
+    "child": "8_1",
+    "parent_id": "a09b7b69",
+    "action_category": "tiled_fp4_dequantization_byte_pair_lut",
+    "action_description": "Replace only the software FP4 decode micro-tile used by the aligned scale_vec==32 fast paths. Keep the current 128-bit packed FP4 and scale loads, but decode packed bytes through a byte-pair E2M1 lookup or PTX byte-unpack helper so each byte yields two FP4 float values without eight repeated branchless nibble-decode sequences per uint32. Apply the helper inside the GEMM1 pair block32 path and the GEMM2 block32 path; leave scheduling, launch structure, router weighting, partial workspace, and finalize unchanged. Keep the current branchless scalar helper as fallback for unaligned or non-block32 shapes.",
+    "evidence_chain": "Profile evidence: a09b7b69 is fastest but still only reaches about 509.568 us on the qwen_tp2 T=1 software-FP4 path. Code evidence shows accumulate_fp4_pair_block32_gemm1 and accumulate_fp4_block32_gemm2 already use vectorized 128-bit loads, yet each 32-value block still calls decode_fp4_e2m1_branchless for every nibble, creating long integer shift/mask/bit-construction chains in both GEMMs. Prior lineage already tried GEMM1 warp-sliced K, adjacent-H GEMM2 tiling, and GEMM2 warp-sliced K/I; those changed work partitioning, not the byte-level decode primitive. New L1 evidence from gpu-wiki's NVFP4 GEMV and vectorized-load cards says wide FP4 loads only pay off when unpack overhead is also reduced, and calls out PTX byte decomposition / packed decode as a major lever for software FP4 GEMV-like kernels. Inference: after vectorized loads, per-nibble software decode remains a local bottleneck. Action: retile the dequant primitive at byte-pair granularity while preserving the existing dot-loop ownership.",
+    "expected_impact": "Should reduce integer instruction count and dependency depth inside both GEMM1 and GEMM2 block32 dequant loops, improving instruction throughput without changing memory traffic or scheduling. It can benefit both projections because the same E2M1 packed-byte pattern is used in gate/up and down weights.",
+    "risks": "A constant-memory byte-pair LUT can serialize if warp lanes access many different bytes, and PTX byte-unpack code is more fragile across architectures. The fallback must remain exact, and the candidate should keep the existing branchless path if the LUT/register pressure hurts occupancy."
+  },
+  "parent_id": "a09b7b69",
+  "parent_workspace": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/database/solutions/a09b7b69",
+  "candidate_dir": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/iteration/8/executor/8_1",
+  "candidate_code": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/iteration/8/executor/8_1/kernel.py",
+  "candidate_src": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/iteration/8/executor/8_1/src",
+  "output_result_json": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/iteration/8/executor/8_1/executor_result.json",
+  "operator_surface": "flashinfer.trtllm_fp4_block_scale_moe",
+  "application_profile": "Qwen3_5-Plus_prefill_TP2",
+  "constraints": [
+    "Edit only files under candidate_dir.",
+    "Do not generate FlyDSL.",
+    "Preserve the FlashInfer-compatible run(...) signature.",
+    "Apply exactly one optimization category.",
+    "Do not run the evaluator; this runner evaluates after executor returns."
+  ]
+}

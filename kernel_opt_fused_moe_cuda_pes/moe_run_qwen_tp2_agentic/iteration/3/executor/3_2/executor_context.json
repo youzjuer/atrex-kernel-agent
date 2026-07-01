@@ -1,0 +1,30 @@
+{
+  "workspace_path": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic",
+  "repo_root": "/home/youchunbo/code/atrex-kernel-agent",
+  "generation": 3,
+  "child": "3_2",
+  "strategy": {
+    "child": "3_2",
+    "parent_id": "b9545b81",
+    "action_category": "grouped_gemm",
+    "action_description": "Use the scheduling parent b9545b81 as the base for a GEMM1 grouped gate/up producer. Consume its existing expert-major metadata rather than creating new scheduling: topk_slots or c_map identifies grouped rows, a_map maps grouped row to source token, and tile_idx_to_expert_idx/problem sizes select local expert weights. Replace scalar stage1_activation_kernel with a grouped gate/up GEMM tile over K=H and N=2*I, compute paired gate/up accumulators for each grouped row, apply the SwiGLU epilogue, and scatter the resulting mid activation back to mid[original_topk_slot, i] so the parent GEMM2 path remains unchanged.",
+    "evidence_chain": "Profile evidence: b9545b81 passed correctness but slowed to 3136.896 us because it built FlashInfer-style metadata and left the staged compute path as the active fallback consumer. Code evidence: b9545b81 allocates and fills topk_slots, expert_counts, expert_offsets, a_map, c_map, tile_idx_to_expert_idx, and problem_sizes, but stage1_activation_kernel still indexes original topk_ids and performs scalar gate/up dots per (topk slot, I). New reference evidence: FlashInfer blockscaled_contiguous_gather_grouped_gemm_swiglu_fusion.py is explicitly a grouped FC1 kernel using token_id_mapping and tile_idx_to_expert_idx, fusing gate/up and SwiGLU in the epilogue; its CUDA-graph padding model treats invalid tiles with predicates. Inference: the scheduling parent is slow because its metadata is unused overhead, but it is the right substrate for a GEMM1 grouped-GEMM child. Action: make the first projection consume the existing expert-major schedule and keep GEMM2 unchanged for attribution.",
+    "expected_impact": "GEMM1 is about two thirds of the arithmetic in the current qwen_tp2 T=1 path, so replacing the scalar gate/up producer with an expert-major grouped tile can attack a larger compute share than the previous GEMM2-only grouped-GEMM attempts. It also converts b9545b81's unused metadata cost into useful work and aligns the child with FlashInfer's grouped SwiGLU boundary.",
+    "risks": "On L20D/CC 8.9, do not assume native FP4 tensor cores; this should be a software-FP4 tiled CUDA GEMM unless architecture checks prove otherwise. T=1 gives very small per-expert M, so the grouped tile must avoid an E_local-wide grid and must write mid in the original top-k slot order to keep GEMM2 correctness unchanged."
+  },
+  "parent_id": "b9545b81",
+  "parent_workspace": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/database/solutions/b9545b81",
+  "candidate_dir": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/iteration/3/executor/3_2",
+  "candidate_code": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/iteration/3/executor/3_2/kernel.py",
+  "candidate_src": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/iteration/3/executor/3_2/src",
+  "output_result_json": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/iteration/3/executor/3_2/executor_result.json",
+  "operator_surface": "flashinfer.trtllm_fp4_block_scale_moe",
+  "application_profile": "Qwen3_5-Plus_prefill_TP2",
+  "constraints": [
+    "Edit only files under candidate_dir.",
+    "Do not generate FlyDSL.",
+    "Preserve the FlashInfer-compatible run(...) signature.",
+    "Apply exactly one optimization category.",
+    "Do not run the evaluator; this runner evaluates after executor returns."
+  ]
+}

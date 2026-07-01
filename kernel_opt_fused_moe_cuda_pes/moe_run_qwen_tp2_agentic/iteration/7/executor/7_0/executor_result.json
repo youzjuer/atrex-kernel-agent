@@ -1,0 +1,9 @@
+{
+  "child": "7_0",
+  "parent_id": "6ebb0ad6",
+  "candidate_code": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/iteration/7/executor/7_0/kernel.py",
+  "action_category": "grouped_expert_scheduling",
+  "action_description": "Front-loaded the T=1/TOPK<=10 local-slot compaction before GEMM1, added compact single-token GEMM1 kernels that write mid[slot_idx, i], and made the existing single-token GEMM2 path read the same compact slot rows while preserving original top-k weight indexing. Fallback paths and FP4 arithmetic were left unchanged.",
+  "self_check": "ok",
+  "history_path": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/iteration/7/executor/7_0/history.md"
+}

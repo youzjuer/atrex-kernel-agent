@@ -1,0 +1,144 @@
+{
+  "plan_path": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/iteration/2/planner/plan.md",
+  "strategies": [
+    {
+      "child": "2_0",
+      "parent_id": "3c90a4b6",
+      "action_category": "grouped_expert_scheduling",
+      "action_description": "Replace the parent grouped-down scheduler's E_local-wide launch with an active-expert schedule for the small Qwen TP2 route set. Build a compact active_experts array, active_offsets/counts, grouped_slots, and token_counts from the <= T*top_k local slots in one small CUDA metadata kernel, then launch the grouped GEMM2/finalize work over active_expert_count instead of all 256 local experts. Keep the parent GEMM1 and grouped-down arithmetic unchanged so the only category under test is schedule/grid pruning.",
+      "evidence_chain": "Profile evidence: generation 1 grouped_gemm parent 3c90a4b6 passes but is slower than the baseline, 1504.352 us vs 1438.912 us. Code evidence: its stage2_grouped_down_finalize_kernel launches grid_stage2 over (ceil(H/32), E_local) = 128*256 = 32768 blocks for qwen_tp2 T=1, while at most top_k=10 experts are active, so the useful upper bound is 1280 hidden-column/expert blocks before duplicate/non-local filtering. New reference evidence: the SM120 MoE data-prep record says small topk_length should use a single-CTA path and avoid CUB/sort, and its V7/V9 design keeps scatter rank calculation in smem/per-CTA offsets. Inference: the parent regressed because grouped work is scheduled across empty experts. Action: compact active experts first and use active_expert_count as the stage2 y-grid.",
+      "expected_impact": "Should remove most zero-expert block launches and the E_local scan cost in the current grouped parent while preserving its fused finalize boundary. On T=1/top_k=10, the theoretical stage2 expert-grid reduction is up to 25.6x before accounting for metadata overhead, so this is the most direct way to make the grouped parent competitive with the baseline.",
+      "risks": "A separate metadata kernel can still dominate at topk_length=10 if it is overbuilt. Keep the active list fixed-size or single-CTA, avoid sort/CUB, preserve duplicate-route and non-local expert semantics, and fall back to the parent E_local grid if active_expert_count validation fails."
+    },
+    {
+      "child": "2_1",
+      "parent_id": "3c90a4b6",
+      "action_category": "tiled_fp4_dequantization",
+      "action_description": "Retile only the GEMM2/down-projection FP4 dequant path inside the grouped parent. Keep the expert grouping/finalize logic unchanged, but replace accumulate_fp4_scaled_tile for GEMM2 with an I-tile microkernel: use aligned 128-bit or 256-bit packed FP4 weight loads, vectorized scale loads, PTX byte extraction or branchless nibble decode, and cache-policy separation where streamed weights use L1::no_allocate while the reused mid tile is kept hot or staged for several hidden columns.",
+      "evidence_chain": "Profile evidence: the prior tiled_fp4_dequantization child optimized GEMM1 only and regressed to 1897.984 us, while the current selected grouped_gemm parent still calls the scalar accumulate_fp4_scaled_tile in GEMM2. Code evidence: GEMM2 rereads each mid row across H=4096 output columns and loops over I/32 scale blocks with LUT nibble decode per output column. New reference evidence: gpu-wiki cache-policy and NVFP4 GEMV guidance identify wide vector loads plus L1::no_allocate/evict_last separation as the bandwidth-first lever for FP4 software decode; FlashInfer fp4_common.py uses COPY_BITS=128 and ld_global_v4_u32; the compute-capability table marks CC 8.9 as BF16/FP8 capable but not native FP4 tensor-core capable. Inference: on L20D/CC 8.9, GEMM2 must get faster through software dequant load/decode efficiency, not native FP4 MMA. Action: apply the dequant tiling to GEMM2, not GEMM1.",
+      "expected_impact": "Should reduce GEMM2 instruction count, weight-load transactions, and mid rereads without adding new scheduling behavior. It targets the largest still-scalar loop in the grouped parent and avoids repeating generation 1's GEMM1-only shared-memory experiment.",
+      "risks": "Inline PTX cache qualifiers and vector widths are fragile across alignment and architecture. Register pressure can erase the gain if too many hidden columns are accumulated per thread group. Keep scalar fallback for unaligned rows/tails and gate any native FP4 conversion behind a compile-time architecture check because CC 8.9 should not assume FP4 tensor cores."
+    },
+    {
+      "child": "2_2",
+      "parent_id": "7ea9f8ad",
+      "action_category": "grouped_gemm",
+      "action_description": "Rewrite the baseline GEMM2/down-projection as a topk-slot grouped split-K GEMM with deterministic reduction. Phase 1 computes FP32 partials for each active routed slot, hidden-column tile, and K split into a workspace instead of atomicAdd into out_accum. Phase 2 reduces split partials and top-k contributions for each token/hidden column, applies topk_weights and bias/final bf16 cast, and removes the separate out_accum memset plus finalize kernel. Keep GEMM1/stage1 unchanged for attribution.",
+      "evidence_chain": "Profile evidence: the baseline is still the best selected parent at 1438.912 us, while generation 1's expert-major grouped GEMM2/finalize rewrite slowed to 1504.352 us. Code evidence: baseline stage2_grouped_down_kernel uses split_count up to 4 and atomicAdd for every (topk slot, hidden column, split), then finalize_output_kernel casts the memset-backed fp32 accumulation buffer. New reference evidence: the SM120 NVFP4 split-K GEMV record treats split-K as a parallelism fix only when output CTAs under-fill the GPU and recommends a two-stage FP32 partial plus reduce route before considering atomics; the decode GEMM production lessons warn to gate split-K by shape and workspace stability. Inference: baseline already exposes K parallelism, but pays atomics and a finalize launch; generation 1's E_local expert-major grid overcorrected. Action: keep the active top-k slot granularity, replace atomics with split-K workspace/reduce, and avoid E_local-wide expert scheduling.",
+      "expected_impact": "Should preserve the baseline's useful split-K parallelism while removing atomic contention, cudaMemset of out_accum, and the standalone finalize pass. It is a grouped GEMM boundary distinct from the prior expert-major finalize attempt and should be easier to validate because stage1 and routing order remain unchanged.",
+      "risks": "The partial workspace adds memory traffic and allocation pressure; for T=1 the reduction kernel may cost more than atomics. Preallocate workspace through torch tensors inside the extension path, choose split_count only when I alignment and work count justify it, and keep the baseline atomic stage2 as rollback for small or misaligned shapes."
+    }
+  ],
+  "evidence_summary": "Current evaluator evidence is CUDA-event profile data, not an NCU summary: qwen_tp2 T=1 baseline 7ea9f8ad passes at 1438.912 us, generation-1 grouped_gemm 3c90a4b6 passes at 1504.352 us, tiled_fp4_dequantization at 1897.984 us, and grouped_expert_scheduling at 3136.896 us; FlashInfer comparison remains blocked by a worker segfault. The approximate qwen_tp2 T=1 GEMM work is 251.66 MFLOP, so the baseline reaches only about 0.175 TFLOPS before software FP4 decode and memory traffic overheads. The dominant new bottleneck is structural: 3c90a4b6 fuses GEMM2 finalize but schedules stage2 over all 256 local experts, creating up to 32768 expert/hidden blocks when top_k=10 allows at most 1280 active expert/hidden blocks. The remaining baseline and grouped-parent compute still use scalar software FP4 dequant loops; gpu-wiki marks CC 8.9 as lacking FP4 tensor-core support, so the safe direction is active-expert scheduling, GEMM2 software-dequant tiling, and a different split-K grouped GEMM2 boundary.",
+  "search_sources": [
+    {
+      "source": "workspace README.md",
+      "layer": "workspace",
+      "novelty": "used",
+      "finding": "FlashInfer-compatible FP4 MoE contract with qwen_tp2 shape T=1, H=4096, I=1024, E_local=256, top_k=10."
+    },
+    {
+      "source": "profiles/auto_baseline.json",
+      "layer": "workspace",
+      "novelty": "used",
+      "finding": "Baseline PASS at 1438.912 us and max_rel 1.192e-4; FlashInfer target blocked by worker segfault."
+    },
+    {
+      "source": "iteration/1/summarizer/summary.md",
+      "layer": "workspace",
+      "novelty": "used",
+      "finding": "Generation 1 tried grouped_expert_scheduling, tiled_fp4_dequantization, and grouped_gemm; all passed but none beat the baseline."
+    },
+    {
+      "source": "tools/evolution_db.py lineage and database/state.json",
+      "layer": "workspace",
+      "novelty": "used",
+      "finding": "Selected lineage for 3c90a4b6 is grouped_gemm <- baseline; previous generation plans are treated as already tried."
+    },
+    {
+      "source": "database/solutions/3c90a4b6/src/fused_moe_kernel.cu",
+      "layer": "workspace",
+      "novelty": "new",
+      "finding": "Grouped parent builds per-expert metadata but launches GEMM2 over all E_local=256 experts; for qwen_tp2 T=1 only <= top_k=10 experts can be active."
+    },
+    {
+      "source": "iteration/1/executor/1_2/result.json",
+      "layer": "workspace",
+      "novelty": "new",
+      "finding": "The fused grouped GEMM2/finalize parent regressed to 1504.352 us despite passing correctness."
+    },
+    {
+      "source": "gpu-wiki/docs/kernel-opt/nvidia/common/nvidia-compute-capabilities.md",
+      "layer": "L1",
+      "novelty": "used",
+      "finding": "CC 8.9 has BF16/FP8 tensor core support but FP4 tensor core support only appears for CC 10.x in the local table."
+    },
+    {
+      "source": "gpu-wiki/docs/kernel-opt/nvidia/cutedsl/sm120/sm120-moe-data-prep.md",
+      "layer": "L1",
+      "novelty": "used-new-application",
+      "finding": "Small topk_length should use a single-CTA data-prep path; avoid CUB/radix sort and hot global atomics."
+    },
+    {
+      "source": "gpu-wiki/docs/ref-docs/nvidia/cutedsl/sm120/sm120-moe-data-prep-optimization.md",
+      "layer": "L1",
+      "novelty": "new",
+      "finding": "V7 contention-free scatter uses per-CTA base offsets; V9 bank-replicated histogram improves scheduler slack but sort and warp-specialized anti-patterns regress."
+    },
+    {
+      "source": "gpu-wiki/reference-kernels/nvidia/blackwell-geforce/cutedsl/moe_data_prep/fused_moe_data_v9.py",
+      "layer": "L1",
+      "novelty": "new",
+      "finding": "Concrete single-CTA and V7/V9 metadata kernels provide expert_offsets, a_map, c_map, and problem sizes without heavy sorting."
+    },
+    {
+      "source": "gpu-wiki/docs/kernel-opt/nvidia/common/blackwell/techniques/cache-policy.md",
+      "layer": "L1",
+      "novelty": "new",
+      "finding": "PTX cache qualifiers separate streamed matrix/weight loads from reused vector/tile loads in memory-bound kernels."
+    },
+    {
+      "source": "gpu-wiki/docs/kernel-opt/nvidia/common/blackwell/techniques/vectorized-loads.md",
+      "layer": "L1",
+      "novelty": "used-new-application",
+      "finding": "FP4 kernels benefit from 128/256-bit vectorized loads and byte-unpack style decode to avoid narrow-load instruction overhead."
+    },
+    {
+      "source": "gpu-wiki/reference-kernels/nvidia/blackwell/cutedsl/flashinfer/fp4_common.py",
+      "layer": "L1",
+      "novelty": "used",
+      "finding": "FlashInfer FP4 helpers define SF_VEC_SIZE=16, COPY_BITS=128, and ld_global_v4_u32 patterns."
+    },
+    {
+      "source": "gpu-wiki/docs/ref-docs/nvidia/cuda/sm120/sm120-nvfp4-split-k-gemv-bf16-optimization.md",
+      "layer": "L1",
+      "novelty": "new",
+      "finding": "Split-K should be applied as a shape-gated parallelism fix; the documented first implementation writes FP32 partial workspace and reduces in a second kernel."
+    },
+    {
+      "source": "gpu-wiki/docs/ref-docs/nvidia/cuda/sm120/sm120-nvfp4-decode-gemm-production-lessons.md",
+      "layer": "L1",
+      "novelty": "new",
+      "finding": "Split-K dispatch should be gated by M/N/K shape, K/S alignment, stable workspace lifetime, and graph-compatible evidence."
+    },
+    {
+      "source": "gpu-wiki/docs/kernel-opt/nvidia/common/blackwell/kernels/grouped-gemm.md",
+      "layer": "L1",
+      "novelty": "new",
+      "finding": "MoE grouped GEMM batches multiple small expert problems with fixed N/K and variable M; static tile schedules are appropriate when group sizes are known."
+    },
+    {
+      "source": "gpu-wiki/reference-kernels/nvidia/blackwell/cutedsl/flashinfer/blockscaled_contiguous_grouped_gemm_finalize_fusion.py",
+      "layer": "L1",
+      "novelty": "used",
+      "finding": "FlashInfer grouped finalize fuses router scaling and scatter/finalize into the grouped GEMM epilogue."
+    },
+    {
+      "source": "reference-projects/flashinfer, DeepGEMM, aiter",
+      "layer": "L2",
+      "novelty": "checked",
+      "finding": "Local submodule directories are present but expose no relevant checked-out files in this workspace; gpu-wiki extracted references are the usable local sources."
+    }
+  ],
+  "exhaustion": false
+}

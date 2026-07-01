@@ -1,0 +1,69 @@
+{
+  "generation": 0,
+  "timestamp": 1782819376.541418,
+  "baseline": {
+    "solution_id": "7ea9f8ad",
+    "latency_us": 1438.912034034729
+  },
+  "best_solution_id": "7ea9f8ad",
+  "best_score": 1.0,
+  "population_size_current": 1,
+  "elites": [
+    "7ea9f8ad"
+  ],
+  "islands_state": [
+    {
+      "island_id": 0,
+      "members": [
+        "7ea9f8ad"
+      ],
+      "best_solution_id": "7ea9f8ad",
+      "feature_map": {
+        "2-0-2": "7ea9f8ad"
+      }
+    },
+    {
+      "island_id": 1,
+      "members": [],
+      "best_solution_id": null,
+      "feature_map": {}
+    },
+    {
+      "island_id": 2,
+      "members": [],
+      "best_solution_id": null,
+      "feature_map": {}
+    }
+  ],
+  "feature_stats": {
+    "complexity": {
+      "min": 5154.0,
+      "max": 5154.0,
+      "values": [
+        5154.0
+      ]
+    },
+    "score": {
+      "min": 1.0,
+      "max": 1.0,
+      "values": [
+        1.0
+      ]
+    }
+  },
+  "migration": {
+    "last_migration_generation": 0
+  },
+  "history": [
+    {
+      "generation": 0,
+      "best_score": 1.0,
+      "best_solution_id": "7ea9f8ad"
+    }
+  ],
+  "convergence": {
+    "no_improve_streak": 0,
+    "stopped": false,
+    "stop_reason": null
+  }
+}

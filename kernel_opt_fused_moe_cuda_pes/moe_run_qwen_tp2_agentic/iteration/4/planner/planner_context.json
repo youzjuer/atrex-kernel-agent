@@ -1,0 +1,93 @@
+{
+  "workspace_path": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic",
+  "repo_root": "/home/youchunbo/code/atrex-kernel-agent",
+  "generation": 4,
+  "n_candidates": 3,
+  "parents": [
+    {
+      "solution_id": "98a890ad",
+      "score": 0.8457501968202149,
+      "island_id": 0,
+      "generation": 2,
+      "code": "database/solutions/98a890ad/kernel.py",
+      "generate_plan": "Retile only the GEMM2/down-projection FP4 dequant path inside the grouped parent. Keep the expert grouping/finalize logic unchanged, but replace accumulate_fp4_scaled_tile for GEMM2 with an I-tile microkernel: use aligned 128-bit or 256-bit packed FP4 weight loads, vectorized scale loads, PTX byte extraction or branchless nibble decode, and cache-policy separation where streamed weights use L1::no_allocate while the reused mid tile is kept hot or staged for several hidden columns.",
+      "action_category": "tiled_fp4_dequantization",
+      "summary": "",
+      "workspace": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/database/solutions/98a890ad",
+      "kernel_path": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/database/solutions/98a890ad/kernel.py",
+      "src_path": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/database/solutions/98a890ad/src",
+      "iteration_ref": "iteration/2/executor/2_1",
+      "optimization": {
+        "action_category": "tiled_fp4_dequantization",
+        "action_description": ""
+      }
+    },
+    {
+      "solution_id": "0aa690ad",
+      "score": 0.8350232500318743,
+      "island_id": 0,
+      "generation": 3,
+      "code": "database/solutions/0aa690ad/kernel.py",
+      "generate_plan": "Use the scheduling parent b9545b81 as the base for a GEMM1 grouped gate/up producer. Consume its existing expert-major metadata rather than creating new scheduling: topk_slots or c_map identifies grouped rows, a_map maps grouped row to source token, and tile_idx_to_expert_idx/problem sizes select local expert weights. Replace scalar stage1_activation_kernel with a grouped gate/up GEMM tile over K=H and N=2*I, compute paired gate/up accumulators for each grouped row, apply the SwiGLU epilogue, and scatter the resulting mid activation back to mid[original_topk_slot, i] so the parent GEMM2 path remains unchanged.",
+      "action_category": "grouped_gemm",
+      "summary": "",
+      "workspace": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/database/solutions/0aa690ad",
+      "kernel_path": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/database/solutions/0aa690ad/kernel.py",
+      "src_path": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/database/solutions/0aa690ad/src",
+      "iteration_ref": "iteration/3/executor/3_2",
+      "optimization": {
+        "action_category": "grouped_gemm",
+        "action_description": ""
+      }
+    },
+    {
+      "solution_id": "b9545b81",
+      "score": 0.4587057021325756,
+      "island_id": 0,
+      "generation": 1,
+      "code": "database/solutions/b9545b81/kernel.py",
+      "generate_plan": "Add a CUDA scheduling/data-prep path that converts the flattened top-k slots into expert-major metadata: int32 topk slots, per-local-expert counts/prefix offsets, a_map from grouped row to source token, c_map inverse mapping, and tile_idx_to_expert_idx/problem sizes for later grouped kernels. For generation 1, keep this as a standalone scheduling change: use a single-CTA path for the current small topk_length, skip non-local experts early, avoid CUB/radix sort, and keep the baseline staged compute path as the rollback/fallback consumer.",
+      "action_category": "grouped_expert_scheduling",
+      "summary": "",
+      "workspace": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/database/solutions/b9545b81",
+      "kernel_path": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/database/solutions/b9545b81/kernel.py",
+      "src_path": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/database/solutions/b9545b81/src",
+      "iteration_ref": "iteration/1/executor/1_0",
+      "optimization": {
+        "action_category": "grouped_expert_scheduling",
+        "action_description": ""
+      }
+    }
+  ],
+  "previous_summary": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/iteration/3/summarizer/summary.md",
+  "profiles": {
+    "baseline": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/profiles/auto_baseline.json",
+    "directory": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/profiles"
+  },
+  "operator_surface": "flashinfer.trtllm_fp4_block_scale_moe",
+  "application_profile": "Qwen3_5-Plus_prefill_TP2",
+  "optimization_focus": [
+    "grouped expert scheduling",
+    "tiled FP4 dequantization",
+    "grouped GEMM"
+  ],
+  "framework": "CUDA C++ PyTorch extension",
+  "constraints": [
+    "Do not generate FlyDSL.",
+    "Preserve the FlashInfer-compatible run(...) signature.",
+    "Preserve Qwen3.5 Plus TP2 routing/top_k/local expert semantics.",
+    "Each strategy must target exactly one optimization category."
+  ],
+  "eval_args": {
+    "preset": "qwen_tp2",
+    "tokens": "1",
+    "hidden_size": null,
+    "intermediate_size": null,
+    "local_num_experts": 256,
+    "local_expert_offset": 0,
+    "warmup": 2,
+    "rep": 5
+  },
+  "output_plan_json": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/iteration/4/planner/plan.json",
+  "output_plan_md": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/iteration/4/planner/plan.md"
+}

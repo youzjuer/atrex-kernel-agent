@@ -1,0 +1,34 @@
+{
+  "solution_id": "55ae4ee7",
+  "parent_id": "9a2330ad",
+  "generate_plan": "Remove the max reduction in the Qwen TP2 fast routing path and use direct exp/logit denominator reduction for the small observed routing-logit range.",
+  "island_id": 0,
+  "iteration": 13,
+  "generation": 13,
+  "timestamp": 1782897388.3118744,
+  "sample_cnt": 0,
+  "sample_weight": 0.0,
+  "score": 10.25684364911911,
+  "evaluation": "PASS; latency_us=140.28799533843994; strategy=routing_direct_exp_no_max",
+  "summary": "",
+  "solution": "database/solutions/55ae4ee7/kernel.py",
+  "metadata": {
+    "lang": "cuda",
+    "code_sha256": "8479c0c6574f25a5ca4384c0881a72fbcbc1a980e63ccf5ea2bbea61656a2582",
+    "correctness": {
+      "rel_err": 0.00023841856454964727,
+      "status": "PASS"
+    },
+    "performance": {
+      "latency_us": 140.28799533843994,
+      "tflops": null,
+      "bandwidth_gbps": null
+    },
+    "optimization": {
+      "action_category": "routing_direct_exp_no_max",
+      "action_description": ""
+    },
+    "iteration_ref": "iteration/13/executor/13_0",
+    "MAP_Elite_feature": "3-3-3"
+  }
+}

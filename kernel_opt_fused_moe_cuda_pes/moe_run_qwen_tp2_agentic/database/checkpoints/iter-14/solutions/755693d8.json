@@ -1,0 +1,67 @@
+{
+  "solution_id": "755693d8",
+  "parent_id": "a09b7b69",
+  "generate_plan": "On the current best atomic-free parent, hoist the T=1/TOPK<=10 local-expert classification before GEMM1 into a fixed TOPK metadata table instead of repeatedly reading topk_ids inside every GEMM1 warp. Add a tiny prep kernel that fills slot_to_local_expert[TOPK] with the local expert id or -1 and optionally a local_slot_count for diagnostics. Make GEMM1, GEMM2 partials, and finalize consume slot_to_local_expert by original top-k slot, keeping mid indexed as mid[topk_slot, i] and preserving a09b7b69's atomic-free [TOPK,H] partial/finalize structure. Do not compact/remap rows in this child; the isolated category is scheduling metadata hoisting and reuse.",
+  "island_id": 0,
+  "iteration": 8,
+  "generation": 8,
+  "timestamp": 1782889915.5283034,
+  "sample_cnt": 0,
+  "sample_weight": 0.0,
+  "score": 2.813540271630115,
+  "evaluation": "PASS; latency_us=511.4240050315857; strategy=grouped_expert_scheduling_fixed_topk_metadata",
+  "summary": "",
+  "solution": "database/solutions/755693d8/kernel.py",
+  "metadata": {
+    "lang": "cuda",
+    "code_sha256": "73a4354d6aea3091974c48a20eb0c185096b9d85abec6050050b833eb06f2765",
+    "correctness": {
+      "rel_err": 0.00023841856454964727,
+      "status": "PASS"
+    },
+    "performance": {
+      "latency_us": 511.4240050315857,
+      "tflops": null,
+      "bandwidth_gbps": null
+    },
+    "optimization": {
+      "action_category": "grouped_expert_scheduling_fixed_topk_metadata",
+      "action_description": ""
+    },
+    "iteration_ref": "iteration/8/executor/8_0",
+    "profile_evidence": {
+      "tool_used": "torch.cuda.Event",
+      "strategy": {
+        "child": "8_0",
+        "parent_id": "a09b7b69",
+        "action_category": "grouped_expert_scheduling_fixed_topk_metadata",
+        "action_description": "On the current best atomic-free parent, hoist the T=1/TOPK<=10 local-expert classification before GEMM1 into a fixed TOPK metadata table instead of repeatedly reading topk_ids inside every GEMM1 warp. Add a tiny prep kernel that fills slot_to_local_expert[TOPK] with the local expert id or -1 and optionally a local_slot_count for diagnostics. Make GEMM1, GEMM2 partials, and finalize consume slot_to_local_expert by original top-k slot, keeping mid indexed as mid[topk_slot, i] and preserving a09b7b69's atomic-free [TOPK,H] partial/finalize structure. Do not compact/remap rows in this child; the isolated category is scheduling metadata hoisting and reuse.",
+        "evidence_chain": "Profile evidence: generation 7 selected a09b7b69 as best at 509.568 us for qwen_tp2 T=1, while 66e4700d's compact-first scheduling passed at 518.848 us and 859dab14's direct topk reducer passed at 1.791 score but was slower. Code evidence in a09b7b69 shows stage1_activation_warp_k_kernel still loads topk_ids and performs global/local expert range checks for every TOPK*I warp before local-slot metadata is built; the later compact_single_token_local_slots_kernel only benefits GEMM2. Prior lineage already tried full row compaction before GEMM1 in 66e4700d, so this plan uses a different fixed-slot metadata shape that avoids compact row remapping while still removing repeated topk classification. New L1 evidence from the SM120 MoE data-prep reference favors simple single-CTA small-topk metadata built once for downstream grouped GEMMs and warns against heavyweight sort/warp-aggregation paths. Inference: a09b7b69 has the best finalize path but still pays redundant routing metadata work in GEMM1. Action: build the local expert table once and reuse it across both GEMMs without changing math or finalization.",
+        "expected_impact": "Should cut repeated int64 topk_id loads and local_expert_offset/range checks from the GEMM1 hot path, reduce per-block indirection in GEMM2/finalize, and keep the best parent output path intact. Expected impact is modest but low-risk because TOPK is fixed at 10 and the metadata is tiny.",
+        "risks": "The saved work may be small if software FP4 dot products dominate. A fixed TOPK table still launches non-local slot work that returns early, so it may underperform true compaction when few routes are local. Correctness risk is mainly top-k slot indexing: topk_weights and gemm2_bias must continue to use the original slot/expert semantics."
+      },
+      "executor_result": {
+        "child": "8_0",
+        "parent_id": "a09b7b69",
+        "candidate_code": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/iteration/8/executor/8_0/kernel.py",
+        "action_category": "grouped_expert_scheduling_fixed_topk_metadata",
+        "action_description": "Implemented fixed TOPK slot_to_local_expert metadata for T=1/TOPK<=10 before GEMM1; fixed-slot GEMM1 consumes it, and the single-token GEMM2 partial/finalize path stays indexed by the original top-k slot instead of compacted local-slot rows. The general multi-token grouped path is unchanged.",
+        "self_check": "ok",
+        "history_path": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/iteration/8/executor/8_0/history.md"
+      },
+      "status": "PASS",
+      "latency_us": 511.4240050315857,
+      "max_rel": 0.00023841856454964727,
+      "flashinfer_us": null,
+      "target_status": "BLOCKED",
+      "target_speedup_vs_flashinfer": null,
+      "flashinfer": {
+        "status": "ERROR",
+        "error": "worker exited with code -11; stdout=''; stderr=', void>, tvm::ffi::TensorView, tvm::ffi::TensorView, tvm::ffi::Optional<tvm::ffi::TensorView, void>, tvm::ffi::Optional<tvm::ffi::TensorView, void>, tvm::ffi::Optional<tvm::ffi::TensorView, void>, tvm::ffi::Optional<tvm::ffi::TensorView, void>, long, long, tvm::ffi::Optional<long, void>, tvm::ffi::Optional<long, void>, long, long, long, tvm::ffi::Optional<double, void>, long, bool, bool, long, tvm::ffi::TensorView, tvm::ffi::Array<long, void>, bool, tvm::ffi::Optional<tvm::ffi::TensorView, void>)\\n  File \"<unknown>\", line 0, in __tvm_ffi_trtllm_fp4_block_scale_moe\\n  File \"<unknown>\", line 0, in PyObject_Call\\n  File \"<unknown>\", line 0, in _PyEval_EvalFrameDefault\\n  File \"<unknown>\", line 0, in PyEval_EvalCode\\n  File \"<unknown>\", line 0, in _PyRun_SimpleFileObject\\n  File \"<unknown>\", line 0, in _PyRun_AnyFileObject\\n  File \"<unknown>\", line 0, in Py_RunMain\\n  File \"<unknown>\", line 0, in Py_BytesMain\\n  File \"<unknown>\", line 0, in _start\\n  File \"<unknown>\", line 0, in 0xffffffffffffffff\\n\\n'",
+        "rows": []
+      },
+      "result_file": "iteration/8/executor/8_0/result.json"
+    },
+    "MAP_Elite_feature": "2-2-3"
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "child": "4_1",
+  "parent_id": "98a890ad",
+  "candidate_code": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/iteration/4/executor/4_1/kernel.py",
+  "action_category": "tiled_fp4_dequantization",
+  "action_description": "Applied a GEMM1-only warp-sliced FP4 dequantization path for scale_vec==32: one warp computes each gate/up intermediate output pair, lanes process disjoint 32-element K blocks with 128-bit packed FP4 loads, reduce x1/x2 partials in-warp, and store one mid value. The parent scalar stage1 remains as fallback and the grouped GEMM2/finalize path is unchanged.",
+  "self_check": "ok",
+  "history_path": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/iteration/4/executor/4_1/history.md"
+}

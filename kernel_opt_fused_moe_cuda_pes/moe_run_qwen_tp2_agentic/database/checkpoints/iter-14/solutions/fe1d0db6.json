@@ -1,0 +1,34 @@
+{
+  "solution_id": "fe1d0db6",
+  "parent_id": "7b67f03d",
+  "generate_plan": "Retune stage1 warp-per-output launch from 256 to 128 threads per block while preserving the current best routing and stage2 paths.",
+  "island_id": 0,
+  "iteration": 14,
+  "generation": 14,
+  "timestamp": 1782899087.0767922,
+  "sample_cnt": 0,
+  "sample_weight": 0.0,
+  "score": 10.423273825689392,
+  "evaluation": "PASS; latency_us=138.047993183136; strategy=stage1_warp_block128",
+  "summary": "",
+  "solution": "database/solutions/fe1d0db6/kernel.py",
+  "metadata": {
+    "lang": "cuda",
+    "code_sha256": "8479c0c6574f25a5ca4384c0881a72fbcbc1a980e63ccf5ea2bbea61656a2582",
+    "correctness": {
+      "rel_err": 0.00023841856454964727,
+      "status": "PASS"
+    },
+    "performance": {
+      "latency_us": 138.047993183136,
+      "tflops": null,
+      "bandwidth_gbps": null
+    },
+    "optimization": {
+      "action_category": "stage1_warp_block128",
+      "action_description": ""
+    },
+    "iteration_ref": "iteration/14/executor/14_1",
+    "MAP_Elite_feature": "3-3-3"
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "child": "10_0",
+  "parent_id": "84634c40",
+  "candidate_code": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/iteration/10/executor/10_0/kernel.py",
+  "action_category": "single_token_finalize_block512",
+  "action_description": "Changed only the slim single-token finalize kernel block size from 256 to 512 threads on top of 84634c40. All arithmetic, scheduling metadata, dequant helpers, workspace shape, and fallback paths are unchanged.",
+  "self_check": "ok",
+  "history_path": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/iteration/10/executor/10_0/history.md"
+}

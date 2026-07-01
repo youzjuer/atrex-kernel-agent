@@ -1,0 +1,115 @@
+{
+  "generation": 2,
+  "timestamp": 1782834389.577263,
+  "baseline": {
+    "solution_id": "7ea9f8ad",
+    "latency_us": 1438.912034034729
+  },
+  "best_solution_id": "1ad6f96e",
+  "best_score": 1.0334873714805215,
+  "population_size_current": 7,
+  "elites": [
+    "1ad6f96e",
+    "3adfb052",
+    "7ea9f8ad",
+    "3c90a4b6",
+    "98a890ad",
+    "eb78820c",
+    "b9545b81"
+  ],
+  "islands_state": [
+    {
+      "island_id": 0,
+      "members": [
+        "7ea9f8ad",
+        "b9545b81",
+        "98a890ad",
+        "1ad6f96e"
+      ],
+      "best_solution_id": "1ad6f96e",
+      "feature_map": {
+        "2-0-2": "7ea9f8ad",
+        "2-2-0": "b9545b81",
+        "2-2-2": "98a890ad",
+        "2-2-3": "1ad6f96e"
+      }
+    },
+    {
+      "island_id": 1,
+      "members": [],
+      "best_solution_id": null,
+      "feature_map": {}
+    },
+    {
+      "island_id": 2,
+      "members": [],
+      "best_solution_id": null,
+      "feature_map": {}
+    }
+  ],
+  "feature_stats": {
+    "complexity": {
+      "min": 5154.0,
+      "max": 5154.0,
+      "values": [
+        5154.0,
+        5154.0,
+        5154.0,
+        5154.0,
+        5154.0,
+        5154.0,
+        5154.0
+      ]
+    },
+    "score": {
+      "min": 0.4587057021325756,
+      "max": 1.0334873714805215,
+      "values": [
+        1.0,
+        0.4587057021325756,
+        0.7581265242022017,
+        0.9564995821122985,
+        1.0281233185577225,
+        0.8457501968202149,
+        1.0334873714805215
+      ]
+    },
+    "diversity": {
+      "min": 0.0,
+      "max": 0.0,
+      "values": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ]
+    }
+  },
+  "migration": {
+    "last_migration_generation": 0
+  },
+  "history": [
+    {
+      "generation": 0,
+      "best_score": 1.0,
+      "best_solution_id": "7ea9f8ad"
+    },
+    {
+      "generation": 1,
+      "best_score": 1.0,
+      "best_solution_id": "7ea9f8ad"
+    },
+    {
+      "generation": 2,
+      "best_score": 1.0334873714805215,
+      "best_solution_id": "1ad6f96e"
+    }
+  ],
+  "convergence": {
+    "no_improve_streak": 0,
+    "stopped": false,
+    "stop_reason": null
+  }
+}

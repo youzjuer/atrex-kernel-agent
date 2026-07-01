@@ -1,0 +1,185 @@
+{
+  "generation": 6,
+  "timestamp": 1782883811.327136,
+  "baseline": {
+    "solution_id": "7ea9f8ad",
+    "latency_us": 1438.912034034729
+  },
+  "best_solution_id": "6ebb0ad6",
+  "best_score": 2.695318779400749,
+  "population_size_current": 19,
+  "elites": [
+    "6ebb0ad6",
+    "cccdb6c3",
+    "06419529",
+    "4479039f",
+    "33cb5680",
+    "83d98be7",
+    "859dab14",
+    "eb33a536",
+    "d2b0e425",
+    "b1433778",
+    "1ad6f96e",
+    "3adfb052",
+    "b64c4514",
+    "7ea9f8ad",
+    "3c90a4b6",
+    "98a890ad",
+    "0aa690ad",
+    "eb78820c",
+    "b9545b81"
+  ],
+  "islands_state": [
+    {
+      "island_id": 0,
+      "members": [
+        "7ea9f8ad",
+        "b9545b81",
+        "b1433778",
+        "859dab14",
+        "6ebb0ad6"
+      ],
+      "best_solution_id": "6ebb0ad6",
+      "feature_map": {
+        "2-0-2": "7ea9f8ad",
+        "2-2-0": "b9545b81",
+        "2-2-2": "859dab14",
+        "2-2-3": "6ebb0ad6",
+        "2-2-1": "b1433778"
+      }
+    },
+    {
+      "island_id": 1,
+      "members": [],
+      "best_solution_id": null,
+      "feature_map": {}
+    },
+    {
+      "island_id": 2,
+      "members": [],
+      "best_solution_id": null,
+      "feature_map": {}
+    }
+  ],
+  "feature_stats": {
+    "complexity": {
+      "min": 5154.0,
+      "max": 5154.0,
+      "values": [
+        5154.0,
+        5154.0,
+        5154.0,
+        5154.0,
+        5154.0,
+        5154.0,
+        5154.0,
+        5154.0,
+        5154.0,
+        5154.0,
+        5154.0,
+        5154.0,
+        5154.0,
+        5154.0,
+        5154.0,
+        5154.0,
+        5154.0,
+        5154.0,
+        5154.0
+      ]
+    },
+    "score": {
+      "min": 0.4587057021325756,
+      "max": 2.695318779400749,
+      "values": [
+        1.0,
+        0.4587057021325756,
+        0.7581265242022017,
+        0.9564995821122985,
+        1.0281233185577225,
+        0.8457501968202149,
+        1.0334873714805215,
+        1.0042433665522246,
+        1.0789423486384044,
+        0.8350232500318743,
+        1.1077280069012352,
+        2.6427269430212332,
+        1.0412412113641842,
+        2.645837116802813,
+        2.623147935557388,
+        1.7906894442810501,
+        2.5967890778174954,
+        2.695318779400749,
+        2.540882569791301
+      ]
+    },
+    "diversity": {
+      "min": 0.0,
+      "max": 0.0,
+      "values": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ]
+    }
+  },
+  "migration": {
+    "last_migration_generation": 0
+  },
+  "history": [
+    {
+      "generation": 0,
+      "best_score": 1.0,
+      "best_solution_id": "7ea9f8ad"
+    },
+    {
+      "generation": 1,
+      "best_score": 1.0,
+      "best_solution_id": "7ea9f8ad"
+    },
+    {
+      "generation": 2,
+      "best_score": 1.0334873714805215,
+      "best_solution_id": "1ad6f96e"
+    },
+    {
+      "generation": 3,
+      "best_score": 1.0789423486384044,
+      "best_solution_id": "d2b0e425"
+    },
+    {
+      "generation": 4,
+      "best_score": 2.6427269430212332,
+      "best_solution_id": "06419529"
+    },
+    {
+      "generation": 5,
+      "best_score": 2.645837116802813,
+      "best_solution_id": "cccdb6c3"
+    },
+    {
+      "generation": 6,
+      "best_score": 2.695318779400749,
+      "best_solution_id": "6ebb0ad6"
+    }
+  ],
+  "convergence": {
+    "no_improve_streak": 0,
+    "stopped": false,
+    "stop_reason": null
+  }
+}

@@ -1,0 +1,34 @@
+{
+  "solution_id": "2f1ecc94",
+  "parent_id": "84634c40",
+  "generate_plan": "Tune the single-token stage2 partial launch geometry by increasing the block from 32 to 128 threads while preserving the 9_0 bias-hoisted partial and slim finalize design.",
+  "island_id": 0,
+  "iteration": 11,
+  "generation": 11,
+  "timestamp": 1782895179.1186721,
+  "sample_cnt": 0,
+  "sample_weight": 0.0,
+  "score": 2.852086768591924,
+  "evaluation": "PASS; latency_us=504.5120120048523; strategy=single_token_stage2_block128",
+  "summary": "",
+  "solution": "database/solutions/2f1ecc94/kernel.py",
+  "metadata": {
+    "lang": "cuda",
+    "code_sha256": "73a4354d6aea3091974c48a20eb0c185096b9d85abec6050050b833eb06f2765",
+    "correctness": {
+      "rel_err": 0.00023841856454964727,
+      "status": "PASS"
+    },
+    "performance": {
+      "latency_us": 504.5120120048523,
+      "tflops": null,
+      "bandwidth_gbps": null
+    },
+    "optimization": {
+      "action_category": "single_token_stage2_block128",
+      "action_description": ""
+    },
+    "iteration_ref": "iteration/11/executor/11_1",
+    "MAP_Elite_feature": "2-2-3"
+  }
+}

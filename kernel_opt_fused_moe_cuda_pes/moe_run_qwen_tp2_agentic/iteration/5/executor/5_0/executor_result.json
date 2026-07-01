@@ -1,0 +1,9 @@
+{
+  "child": "5_0",
+  "parent_id": "06419529",
+  "candidate_code": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/iteration/5/executor/5_0/kernel.py",
+  "action_category": "grouped_expert_scheduling",
+  "action_description": "Replaced the parent three-kernel metadata path with one device-side active-expert schedule that builds active_experts, active_offsets, compact active_counts, grouped_slots, token_counts, and active_expert_count. GEMM2/finalize now launches over min(E_local, T * TOPK) and guards blockIdx.y against active_expert_count[0] before reading active expert metadata, with no host active-count copy or synchronization. The existing warp-sliced GEMM1 path and vectorized GEMM2 arithmetic were kept unchanged.",
+  "self_check": "ok",
+  "history_path": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/iteration/5/executor/5_0/history.md"
+}

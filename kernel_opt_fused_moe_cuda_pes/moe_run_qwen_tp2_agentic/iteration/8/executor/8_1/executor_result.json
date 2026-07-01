@@ -1,0 +1,9 @@
+{
+  "child": "8_1",
+  "parent_id": "a09b7b69",
+  "candidate_code": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/iteration/8/executor/8_1/kernel.py",
+  "action_category": "tiled_fp4_dequantization_byte_pair_lut",
+  "action_description": "Added a byte-pair E2M1 decode LUT and used it only in the aligned scale_vec==32 GEMM1/GEMM2 block32 fast-path micro-tiles, replacing repeated per-nibble branchless decode calls while preserving scheduling, launches, router weighting, partial workspace, finalize, vectorized loads, and scalar fallback paths.",
+  "self_check": "ok",
+  "history_path": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/iteration/8/executor/8_1/history.md"
+}

@@ -1,0 +1,30 @@
+{
+  "workspace_path": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic",
+  "repo_root": "/home/youchunbo/code/atrex-kernel-agent",
+  "generation": 2,
+  "child": "2_0",
+  "strategy": {
+    "child": "2_0",
+    "parent_id": "3c90a4b6",
+    "action_category": "grouped_expert_scheduling",
+    "action_description": "Replace the parent grouped-down scheduler's E_local-wide launch with an active-expert schedule for the small Qwen TP2 route set. Build a compact active_experts array, active_offsets/counts, grouped_slots, and token_counts from the <= T*top_k local slots in one small CUDA metadata kernel, then launch the grouped GEMM2/finalize work over active_expert_count instead of all 256 local experts. Keep the parent GEMM1 and grouped-down arithmetic unchanged so the only category under test is schedule/grid pruning.",
+    "evidence_chain": "Profile evidence: generation 1 grouped_gemm parent 3c90a4b6 passes but is slower than the baseline, 1504.352 us vs 1438.912 us. Code evidence: its stage2_grouped_down_finalize_kernel launches grid_stage2 over (ceil(H/32), E_local) = 128*256 = 32768 blocks for qwen_tp2 T=1, while at most top_k=10 experts are active, so the useful upper bound is 1280 hidden-column/expert blocks before duplicate/non-local filtering. New reference evidence: the SM120 MoE data-prep record says small topk_length should use a single-CTA path and avoid CUB/sort, and its V7/V9 design keeps scatter rank calculation in smem/per-CTA offsets. Inference: the parent regressed because grouped work is scheduled across empty experts. Action: compact active experts first and use active_expert_count as the stage2 y-grid.",
+    "expected_impact": "Should remove most zero-expert block launches and the E_local scan cost in the current grouped parent while preserving its fused finalize boundary. On T=1/top_k=10, the theoretical stage2 expert-grid reduction is up to 25.6x before accounting for metadata overhead, so this is the most direct way to make the grouped parent competitive with the baseline.",
+    "risks": "A separate metadata kernel can still dominate at topk_length=10 if it is overbuilt. Keep the active list fixed-size or single-CTA, avoid sort/CUB, preserve duplicate-route and non-local expert semantics, and fall back to the parent E_local grid if active_expert_count validation fails."
+  },
+  "parent_id": "3c90a4b6",
+  "parent_workspace": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/database/solutions/3c90a4b6",
+  "candidate_dir": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/iteration/2/executor/2_0",
+  "candidate_code": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/iteration/2/executor/2_0/kernel.py",
+  "candidate_src": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/iteration/2/executor/2_0/src",
+  "output_result_json": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/iteration/2/executor/2_0/executor_result.json",
+  "operator_surface": "flashinfer.trtllm_fp4_block_scale_moe",
+  "application_profile": "Qwen3_5-Plus_prefill_TP2",
+  "constraints": [
+    "Edit only files under candidate_dir.",
+    "Do not generate FlyDSL.",
+    "Preserve the FlashInfer-compatible run(...) signature.",
+    "Apply exactly one optimization category.",
+    "Do not run the evaluator; this runner evaluates after executor returns."
+  ]
+}

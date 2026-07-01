@@ -1,0 +1,93 @@
+{
+  "workspace_path": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic",
+  "repo_root": "/home/youchunbo/code/atrex-kernel-agent",
+  "generation": 3,
+  "n_candidates": 3,
+  "parents": [
+    {
+      "solution_id": "7ea9f8ad",
+      "score": 1.0,
+      "island_id": 0,
+      "generation": 0,
+      "code": "database/solutions/7ea9f8ad/kernel.py",
+      "generate_plan": "baseline seed",
+      "action_category": "baseline",
+      "summary": "",
+      "workspace": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/database/solutions/7ea9f8ad",
+      "kernel_path": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/database/solutions/7ea9f8ad/kernel.py",
+      "src_path": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/database/solutions/7ea9f8ad/src",
+      "iteration_ref": null,
+      "optimization": {
+        "action_category": "baseline",
+        "action_description": "seed"
+      }
+    },
+    {
+      "solution_id": "1ad6f96e",
+      "score": 1.0334873714805215,
+      "island_id": 0,
+      "generation": 2,
+      "code": "database/solutions/1ad6f96e/kernel.py",
+      "generate_plan": "Rewrite the baseline GEMM2/down-projection as a topk-slot grouped split-K GEMM with deterministic reduction. Phase 1 computes FP32 partials for each active routed slot, hidden-column tile, and K split into a workspace instead of atomicAdd into out_accum. Phase 2 reduces split partials and top-k contributions for each token/hidden column, applies topk_weights and bias/final bf16 cast, and removes the separate out_accum memset plus finalize kernel. Keep GEMM1/stage1 unchanged for attribution.",
+      "action_category": "grouped_gemm",
+      "summary": "",
+      "workspace": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/database/solutions/1ad6f96e",
+      "kernel_path": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/database/solutions/1ad6f96e/kernel.py",
+      "src_path": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/database/solutions/1ad6f96e/src",
+      "iteration_ref": "iteration/2/executor/2_2",
+      "optimization": {
+        "action_category": "grouped_gemm",
+        "action_description": ""
+      }
+    },
+    {
+      "solution_id": "3c90a4b6",
+      "score": 0.9564995821122985,
+      "island_id": 0,
+      "generation": 1,
+      "code": "database/solutions/3c90a4b6/kernel.py",
+      "generate_plan": "Rewrite the down-projection path as an expert-major grouped GEMM/finalize kernel: each work tile computes a block of output hidden columns for one expert group from the mid activation rows, applies the router weight in the epilogue, and accumulates/scatters to the final token output. Use the existing topk_ids/topk_weights as inputs for generation 1, but structure the kernel around per-expert problem sizes so it can consume the scheduling metadata from child 1_0 in later iterations. Target GEMM2 first because the parent currently uses split_count plus atomicAdd into out_accum and then launches a separate finalize kernel.",
+      "action_category": "grouped_gemm",
+      "summary": "",
+      "workspace": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/database/solutions/3c90a4b6",
+      "kernel_path": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/database/solutions/3c90a4b6/kernel.py",
+      "src_path": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/database/solutions/3c90a4b6/src",
+      "iteration_ref": "iteration/1/executor/1_2",
+      "optimization": {
+        "action_category": "grouped_gemm",
+        "action_description": ""
+      }
+    }
+  ],
+  "previous_summary": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/iteration/2/summarizer/summary.md",
+  "profiles": {
+    "baseline": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/profiles/auto_baseline.json",
+    "directory": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/profiles"
+  },
+  "operator_surface": "flashinfer.trtllm_fp4_block_scale_moe",
+  "application_profile": "Qwen3_5-Plus_prefill_TP2",
+  "optimization_focus": [
+    "grouped expert scheduling",
+    "tiled FP4 dequantization",
+    "grouped GEMM"
+  ],
+  "framework": "CUDA C++ PyTorch extension",
+  "constraints": [
+    "Do not generate FlyDSL.",
+    "Preserve the FlashInfer-compatible run(...) signature.",
+    "Preserve Qwen3.5 Plus TP2 routing/top_k/local expert semantics.",
+    "Each strategy must target exactly one optimization category."
+  ],
+  "eval_args": {
+    "preset": "qwen_tp2",
+    "tokens": "1",
+    "hidden_size": null,
+    "intermediate_size": null,
+    "local_num_experts": 256,
+    "local_expert_offset": 0,
+    "warmup": 0,
+    "rep": 1
+  },
+  "output_plan_json": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/iteration/3/planner/plan.json",
+  "output_plan_md": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/iteration/3/planner/plan.md"
+}

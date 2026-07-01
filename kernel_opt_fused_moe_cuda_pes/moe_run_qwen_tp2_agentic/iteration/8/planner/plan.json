@@ -1,0 +1,140 @@
+{
+  "plan_path": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/iteration/8/planner/plan.md",
+  "strategies": [
+    {
+      "child": "8_0",
+      "parent_id": "a09b7b69",
+      "action_category": "grouped_expert_scheduling_fixed_topk_metadata",
+      "action_description": "On the current best atomic-free parent, hoist the T=1/TOPK<=10 local-expert classification before GEMM1 into a fixed TOPK metadata table instead of repeatedly reading topk_ids inside every GEMM1 warp. Add a tiny prep kernel that fills slot_to_local_expert[TOPK] with the local expert id or -1 and optionally a local_slot_count for diagnostics. Make GEMM1, GEMM2 partials, and finalize consume slot_to_local_expert by original top-k slot, keeping mid indexed as mid[topk_slot, i] and preserving a09b7b69's atomic-free [TOPK,H] partial/finalize structure. Do not compact/remap rows in this child; the isolated category is scheduling metadata hoisting and reuse.",
+      "evidence_chain": "Profile evidence: generation 7 selected a09b7b69 as best at 509.568 us for qwen_tp2 T=1, while 66e4700d's compact-first scheduling passed at 518.848 us and 859dab14's direct topk reducer passed at 1.791 score but was slower. Code evidence in a09b7b69 shows stage1_activation_warp_k_kernel still loads topk_ids and performs global/local expert range checks for every TOPK*I warp before local-slot metadata is built; the later compact_single_token_local_slots_kernel only benefits GEMM2. Prior lineage already tried full row compaction before GEMM1 in 66e4700d, so this plan uses a different fixed-slot metadata shape that avoids compact row remapping while still removing repeated topk classification. New L1 evidence from the SM120 MoE data-prep reference favors simple single-CTA small-topk metadata built once for downstream grouped GEMMs and warns against heavyweight sort/warp-aggregation paths. Inference: a09b7b69 has the best finalize path but still pays redundant routing metadata work in GEMM1. Action: build the local expert table once and reuse it across both GEMMs without changing math or finalization.",
+      "expected_impact": "Should cut repeated int64 topk_id loads and local_expert_offset/range checks from the GEMM1 hot path, reduce per-block indirection in GEMM2/finalize, and keep the best parent output path intact. Expected impact is modest but low-risk because TOPK is fixed at 10 and the metadata is tiny.",
+      "risks": "The saved work may be small if software FP4 dot products dominate. A fixed TOPK table still launches non-local slot work that returns early, so it may underperform true compaction when few routes are local. Correctness risk is mainly top-k slot indexing: topk_weights and gemm2_bias must continue to use the original slot/expert semantics."
+    },
+    {
+      "child": "8_1",
+      "parent_id": "a09b7b69",
+      "action_category": "tiled_fp4_dequantization_byte_pair_lut",
+      "action_description": "Replace only the software FP4 decode micro-tile used by the aligned scale_vec==32 fast paths. Keep the current 128-bit packed FP4 and scale loads, but decode packed bytes through a byte-pair E2M1 lookup or PTX byte-unpack helper so each byte yields two FP4 float values without eight repeated branchless nibble-decode sequences per uint32. Apply the helper inside the GEMM1 pair block32 path and the GEMM2 block32 path; leave scheduling, launch structure, router weighting, partial workspace, and finalize unchanged. Keep the current branchless scalar helper as fallback for unaligned or non-block32 shapes.",
+      "evidence_chain": "Profile evidence: a09b7b69 is fastest but still only reaches about 509.568 us on the qwen_tp2 T=1 software-FP4 path. Code evidence shows accumulate_fp4_pair_block32_gemm1 and accumulate_fp4_block32_gemm2 already use vectorized 128-bit loads, yet each 32-value block still calls decode_fp4_e2m1_branchless for every nibble, creating long integer shift/mask/bit-construction chains in both GEMMs. Prior lineage already tried GEMM1 warp-sliced K, adjacent-H GEMM2 tiling, and GEMM2 warp-sliced K/I; those changed work partitioning, not the byte-level decode primitive. New L1 evidence from gpu-wiki's NVFP4 GEMV and vectorized-load cards says wide FP4 loads only pay off when unpack overhead is also reduced, and calls out PTX byte decomposition / packed decode as a major lever for software FP4 GEMV-like kernels. Inference: after vectorized loads, per-nibble software decode remains a local bottleneck. Action: retile the dequant primitive at byte-pair granularity while preserving the existing dot-loop ownership.",
+      "expected_impact": "Should reduce integer instruction count and dependency depth inside both GEMM1 and GEMM2 block32 dequant loops, improving instruction throughput without changing memory traffic or scheduling. It can benefit both projections because the same E2M1 packed-byte pattern is used in gate/up and down weights.",
+      "risks": "A constant-memory byte-pair LUT can serialize if warp lanes access many different bytes, and PTX byte-unpack code is more fragile across architectures. The fallback must remain exact, and the candidate should keep the existing branchless path if the LUT/register pressure hurts occupancy."
+    },
+    {
+      "child": "8_2",
+      "parent_id": "a09b7b69",
+      "action_category": "grouped_gemm_cta_local_finalize",
+      "action_description": "Replace a09b7b69's two-kernel T=1 GEMM2 partial-plus-finalize boundary with a single CTA-local grouped GEMM2 reducer. Use a CTA tile such as H_TILE x TOPK where threadIdx.y owns a local slot and threadIdx.x owns an H column; valid slot threads compute the existing serial GEMM2 dot with the unchanged FP4 dequant helper, store weighted FP32 partials in shared memory, then one lane group reduces the slot dimension, applies gemm2_bias/topk_weights with current semantics, and writes bf16 output. This preserves slot-level parallelism unlike the older serial direct reducer, but eliminates the [TOPK,H] global partial workspace and the separate finalize launch.",
+      "evidence_chain": "Profile evidence: a09b7b69's atomic-free partial/finalize path is current best at 509.568 us, but it still launches stage2_single_token_slots_down_partials_kernel and finalize_single_token_slots_kernel and writes/reads a [TOPK,H] FP32 workspace. Code evidence in 859dab14 shows the older single-kernel topk reducer removed the workspace but serialized all local slots inside one thread per H and was not competitive; code evidence in a09b7b69 shows slot partials keep slot work parallel but pay global traffic plus launch overhead. New L1 evidence from FlashInfer blockscaled grouped GEMM finalize references keeps router scaling/finalize in the grouped GEMM epilogue, while the grouped-GEMM card identifies epilogue combine as the natural boundary for MoE. Inference: the missing variant is a CTA-local slot reduction that fuses finalize while preserving per-slot parallelism. Action: test only the grouped GEMM epilogue boundary, leaving dequant and scheduling unchanged.",
+      "expected_impact": "Should remove one kernel launch and the global [TOPK,H] partial write/read from the best parent while avoiding the serial-slot downside of 859dab14. The benefit should show when finalize launch and workspace traffic remain visible after atomics were removed.",
+      "risks": "Using one CTA per H tile can reduce global block count versus the current per-slot grid, and shared-memory reduction may cost more than the saved launch/workspace traffic. Bias and router-weight accumulation order must match the reference tolerance, duplicate top-k slots must remain valid, and the parent two-kernel path should stay as fallback if occupancy drops."
+    }
+  ],
+  "evidence_summary": "Current evidence is CUDA-event evaluator output rather than NCU. Generation 7 selected a09b7b69 as best at 509.568 us for qwen_tp2 T=1,H=4096,I=1024,TOPK=10,E_local=256; 66e4700d passed at 518.848 us, 859dab14 remains a correctness-clean older grouped reducer parent, and FlashInfer comparison is still blocked by worker crash/GEMM errors. Code inspection localizes three remaining surfaces in the best parent: GEMM1 still repeats topk/local expert classification before any reusable schedule metadata exists, both GEMMs still spend many instructions on per-nibble software FP4 decode after vectorized loads, and GEMM2 atomic-free finalize still writes and rereads a [TOPK,H] FP32 partial workspace through a second launch. The three strategies isolate scheduling metadata, byte-level dequant, and grouped GEMM epilogue/finalize respectively.",
+  "search_sources": [
+    {
+      "source": "workspace README.md",
+      "layer": "input",
+      "query": "FlashInfer operator contract and qwen_tp2 shape",
+      "finding": "The target API is flashinfer.trtllm_fp4_block_scale_moe with T=1 full qwen_tp2 metadata: H=4096, I=1024, TOPK=10, E_global=512, E_local=256, routing_method_type=0.",
+      "new": "No",
+      "actionability": "Defines shape predicates, routing semantics, and fallback constraints."
+    },
+    {
+      "source": "profiles/auto_baseline.json, profiles/promoted_4_1_result.json, iteration/7 executor results",
+      "layer": "input",
+      "query": "current latency and target status",
+      "finding": "a09b7b69 is best at 509.568 us; 66e4700d passes at 518.848 us; 7_1 warp-sliced GEMM2 dequant regressed to 570.144 us; local FlashInfer comparison remains blocked by crash or GEMM error.",
+      "new": "Yes",
+      "actionability": "Optimizes the local CUDA path and avoids repeating the regressed 7_1 work partitioning."
+    },
+    {
+      "source": "evolution_db.py lineage and database/state.json",
+      "layer": "input",
+      "query": "already-tried lineage and sibling plans",
+      "finding": "Active lineages already include grouped GEMM, two tiled FP4 dequant attempts, single-token slot scheduling, compact-first scheduling, direct topk reducer, and atomic-free partial/finalize.",
+      "new": "No",
+      "actionability": "Constrains novelty: use fixed-slot metadata rather than compact row remap, byte-level dequant rather than another K/H repartition, and CTA-local epilogue reduce rather than serial direct or two-kernel partial/finalize."
+    },
+    {
+      "source": "database/solutions/a09b7b69/src/fused_moe_kernel.cu",
+      "layer": "input",
+      "query": "current best parent implementation",
+      "finding": "The best parent keeps GEMM1 over TOPK before scheduling metadata, uses branchless per-nibble E2M1 decode in vectorized block32 helpers, and uses [TOPK,H] slot_partials plus a separate finalize kernel for T=1 GEMM2.",
+      "new": "Yes",
+      "actionability": "Directly supports all three child strategies."
+    },
+    {
+      "source": "database/solutions/66e4700d/src/fused_moe_kernel.cu and iteration/7/executor/7_0/history.md",
+      "layer": "input",
+      "query": "compact-first scheduling sibling",
+      "finding": "Front-loaded compact rows passed and improved over its parent, but it changed row layout and is now a sibling rather than part of a09b7b69.",
+      "new": "Yes",
+      "actionability": "Supports a different scheduling mutation on the best parent without repeating the exact compact-row plan."
+    },
+    {
+      "source": "database/solutions/859dab14/src/fused_moe_kernel.cu",
+      "layer": "input",
+      "query": "direct topk grouped GEMM2 reducer",
+      "finding": "The older direct reducer fuses GEMM2 and finalize but loops all local slots serially inside one H thread, losing slot-level parallelism.",
+      "new": "Yes",
+      "actionability": "Motivates a CTA-local slot-parallel reducer instead of repeating the serial direct reducer."
+    },
+    {
+      "source": "gpu-wiki/docs/kernel-opt/nvidia/cutedsl/sm120/sm120-moe-data-prep.md",
+      "layer": "L1",
+      "query": "small topk MoE scheduling",
+      "finding": "For small topk routing, the retained recipe is simple single-CTA metadata built once, while sort-heavy and warp-aggregated alternatives regressed.",
+      "new": "Yes",
+      "actionability": "Supports fixed TOPK local-expert metadata hoisted before GEMM1."
+    },
+    {
+      "source": "gpu-wiki/docs/kernel-opt/nvidia/common/blackwell/kernels/nvfp4-gemv.md and techniques/vectorized-loads.md",
+      "layer": "L1",
+      "query": "FP4 software decode and vectorized loads",
+      "finding": "NVFP4 GEMV references emphasize wide FP4 loads plus reduced byte/nibble unpack overhead; wide loads alone just move the bottleneck to unpack/decode.",
+      "new": "Yes",
+      "actionability": "Supports byte-pair FP4 decode retile instead of another GEMM2 work-partition attempt."
+    },
+    {
+      "source": "gpu-wiki/docs/kernel-opt/nvidia/common/blackwell/techniques/cache-policy.md",
+      "layer": "L1",
+      "query": "streaming versus reused data load policy",
+      "finding": "Cache-policy differentiation is useful when streams have clear reuse patterns; current parent already uses no_allocate for FP4 weights and evict_last for reused activations.",
+      "new": "No",
+      "actionability": "Confirms the next dequant step should target unpack/decode, not another cache qualifier change."
+    },
+    {
+      "source": "gpu-wiki/reference-kernels/nvidia/blackwell/cutedsl/flashinfer/blockscaled_contiguous_grouped_gemm_finalize_fusion.py",
+      "layer": "L1",
+      "query": "FlashInfer grouped GEMM finalize boundary",
+      "finding": "FlashInfer's grouped finalize reference maps permuted rows back to token/topk, loads router scale in the epilogue, and applies router scaling at the grouped GEMM finalize boundary.",
+      "new": "Yes",
+      "actionability": "Supports fusing slot reduction/finalize into the GEMM2 epilogue boundary."
+    },
+    {
+      "source": "gpu-wiki/reference-kernels/nvidia/blackwell/cutedsl/flashinfer/blockscaled_contiguous_gather_grouped_gemm_swiglu_fusion.py",
+      "layer": "L1",
+      "query": "FlashInfer grouped GEMM gather/SwiGLU boundary",
+      "finding": "The FC1 reference uses token_id_mapping/tile_idx_to_expert_idx metadata and processes only valid tiles through a persistent scheduler.",
+      "new": "Yes",
+      "actionability": "Supports hoisting reusable scheduling metadata for the gate/up stage."
+    },
+    {
+      "source": "reference-projects/README.md",
+      "layer": "L2",
+      "query": "upstream local projects",
+      "finding": "The reference-projects checkout only provides the submodule manifest in this workspace; no populated upstream source tree was available to inspect.",
+      "new": "Yes",
+      "actionability": "Explains why the plan relies on gpu-wiki extracted reference kernels rather than external submodule code."
+    },
+    {
+      "source": "public web",
+      "layer": "L3",
+      "query": "not used",
+      "finding": "Local workspace, database, profiles, gpu-wiki, and extracted reference kernels supplied enough new evidence.",
+      "new": "No",
+      "actionability": "Keeps the plan reproducible for the automatic PES run."
+    }
+  ],
+  "exhaustion": false
+}

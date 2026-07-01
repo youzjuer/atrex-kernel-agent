@@ -1,0 +1,30 @@
+{
+  "workspace_path": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic",
+  "repo_root": "/home/youchunbo/code/atrex-kernel-agent",
+  "generation": 1,
+  "child": "1_1",
+  "strategy": {
+    "child": "1_1",
+    "parent_id": "7ea9f8ad",
+    "action_category": "tiled_fp4_dequantization",
+    "action_description": "Retile the software FP4 dequant inner loops around K-blocks instead of per-output scalar rows. Stage a reusable hidden or mid K tile per CTA, load packed FP4 weights and block scales in vector chunks, decode e2m1 nibbles for multiple output columns per thread group, and accumulate a small output tile before writing. Keep the staged algorithm shape unchanged, but replace accumulate_fp4_pair_scaled_tile/accumulate_fp4_scaled_tile with a tiled/vectorized dequant path for one projection first, preferably GEMM1 where the same hidden row is reread for every intermediate column.",
+    "evidence_chain": "Code evidence: accumulate_fp4_pair_scaled_tile and accumulate_fp4_scaled_tile walk every scale block, load packed bytes/u32 words, decode each nibble through kE2M1Lut, and reread hidden or mid values for every output row. For qwen_tp2 T=1, GEMM1 rereads the same 4096-element hidden row across 10*1024 gate/up dots, and GEMM2 rereads each 1024-element mid row across 4096 output columns. Reference evidence: FlashInfer fp4_common.py defines COPY_BITS=128 and ld_global_v4_u32 for FP4 kernels; the vectorized-loads card says sub-byte FP4 kernels benefit from 128/256-bit loads and cache policy separation; the SM120 NVFP4 persistent GEMM report shows vectorized scale reads and scale-factor prefetch were material improvements. Inference: current latency is dominated by scalar software dequant plus redundant A-tile rereads, not math throughput. Action: tile and vectorize FP4 dequant while preserving numeric semantics.",
+    "expected_impact": "Should reduce instruction overhead from byte/nibble decode, increase coalescing, and reuse hidden/mid K tiles across several output columns. This is the most local compute-path change and can improve the current scalar baseline without requiring a full grouped GEMM rewrite.",
+    "risks": "Alignment is easy to get wrong because packed FP4 rows are H/2 or I/2 bytes and scale vectors are H/32 or I/32. Too much tiling can raise register pressure or shared-memory usage. Validate against the existing max_abs/max_rel thresholds and keep the old scalar helper available for odd shapes or failed alignment predicates."
+  },
+  "parent_id": "7ea9f8ad",
+  "parent_workspace": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/database/solutions/7ea9f8ad",
+  "candidate_dir": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/iteration/1/executor/1_1",
+  "candidate_code": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/iteration/1/executor/1_1/kernel.py",
+  "candidate_src": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/iteration/1/executor/1_1/src",
+  "output_result_json": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/iteration/1/executor/1_1/executor_result.json",
+  "operator_surface": "flashinfer.trtllm_fp4_block_scale_moe",
+  "application_profile": "Qwen3_5-Plus_prefill_TP2",
+  "constraints": [
+    "Edit only files under candidate_dir.",
+    "Do not generate FlyDSL.",
+    "Preserve the FlashInfer-compatible run(...) signature.",
+    "Apply exactly one optimization category.",
+    "Do not run the evaluator; this runner evaluates after executor returns."
+  ]
+}

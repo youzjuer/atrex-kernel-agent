@@ -1,0 +1,30 @@
+{
+  "workspace_path": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic",
+  "repo_root": "/home/youchunbo/code/atrex-kernel-agent",
+  "generation": 8,
+  "child": "8_2",
+  "strategy": {
+    "child": "8_2",
+    "parent_id": "a09b7b69",
+    "action_category": "grouped_gemm_cta_local_finalize",
+    "action_description": "Replace a09b7b69's two-kernel T=1 GEMM2 partial-plus-finalize boundary with a single CTA-local grouped GEMM2 reducer. Use a CTA tile such as H_TILE x TOPK where threadIdx.y owns a local slot and threadIdx.x owns an H column; valid slot threads compute the existing serial GEMM2 dot with the unchanged FP4 dequant helper, store weighted FP32 partials in shared memory, then one lane group reduces the slot dimension, applies gemm2_bias/topk_weights with current semantics, and writes bf16 output. This preserves slot-level parallelism unlike the older serial direct reducer, but eliminates the [TOPK,H] global partial workspace and the separate finalize launch.",
+    "evidence_chain": "Profile evidence: a09b7b69's atomic-free partial/finalize path is current best at 509.568 us, but it still launches stage2_single_token_slots_down_partials_kernel and finalize_single_token_slots_kernel and writes/reads a [TOPK,H] FP32 workspace. Code evidence in 859dab14 shows the older single-kernel topk reducer removed the workspace but serialized all local slots inside one thread per H and was not competitive; code evidence in a09b7b69 shows slot partials keep slot work parallel but pay global traffic plus launch overhead. New L1 evidence from FlashInfer blockscaled grouped GEMM finalize references keeps router scaling/finalize in the grouped GEMM epilogue, while the grouped-GEMM card identifies epilogue combine as the natural boundary for MoE. Inference: the missing variant is a CTA-local slot reduction that fuses finalize while preserving per-slot parallelism. Action: test only the grouped GEMM epilogue boundary, leaving dequant and scheduling unchanged.",
+    "expected_impact": "Should remove one kernel launch and the global [TOPK,H] partial write/read from the best parent while avoiding the serial-slot downside of 859dab14. The benefit should show when finalize launch and workspace traffic remain visible after atomics were removed.",
+    "risks": "Using one CTA per H tile can reduce global block count versus the current per-slot grid, and shared-memory reduction may cost more than the saved launch/workspace traffic. Bias and router-weight accumulation order must match the reference tolerance, duplicate top-k slots must remain valid, and the parent two-kernel path should stay as fallback if occupancy drops."
+  },
+  "parent_id": "a09b7b69",
+  "parent_workspace": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/database/solutions/a09b7b69",
+  "candidate_dir": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/iteration/8/executor/8_2",
+  "candidate_code": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/iteration/8/executor/8_2/kernel.py",
+  "candidate_src": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/iteration/8/executor/8_2/src",
+  "output_result_json": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/iteration/8/executor/8_2/executor_result.json",
+  "operator_surface": "flashinfer.trtllm_fp4_block_scale_moe",
+  "application_profile": "Qwen3_5-Plus_prefill_TP2",
+  "constraints": [
+    "Edit only files under candidate_dir.",
+    "Do not generate FlyDSL.",
+    "Preserve the FlashInfer-compatible run(...) signature.",
+    "Apply exactly one optimization category.",
+    "Do not run the evaluator; this runner evaluates after executor returns."
+  ]
+}

@@ -1,0 +1,67 @@
+{
+  "solution_id": "b9545b81",
+  "parent_id": "7ea9f8ad",
+  "generate_plan": "Add a CUDA scheduling/data-prep path that converts the flattened top-k slots into expert-major metadata: int32 topk slots, per-local-expert counts/prefix offsets, a_map from grouped row to source token, c_map inverse mapping, and tile_idx_to_expert_idx/problem sizes for later grouped kernels. For generation 1, keep this as a standalone scheduling change: use a single-CTA path for the current small topk_length, skip non-local experts early, avoid CUB/radix sort, and keep the baseline staged compute path as the rollback/fallback consumer.",
+  "island_id": 0,
+  "iteration": 1,
+  "generation": 1,
+  "timestamp": 1782820415.4368823,
+  "sample_cnt": 3,
+  "sample_weight": 0.0,
+  "score": 0.4587057021325756,
+  "evaluation": "PASS; latency_us=3136.8958950042725; strategy=grouped_expert_scheduling",
+  "summary": "",
+  "solution": "database/solutions/b9545b81/kernel.py",
+  "metadata": {
+    "lang": "cuda",
+    "code_sha256": "73a4354d6aea3091974c48a20eb0c185096b9d85abec6050050b833eb06f2765",
+    "correctness": {
+      "rel_err": 0.00011920928227482364,
+      "status": "PASS"
+    },
+    "performance": {
+      "latency_us": 3136.8958950042725,
+      "tflops": null,
+      "bandwidth_gbps": null
+    },
+    "optimization": {
+      "action_category": "grouped_expert_scheduling",
+      "action_description": ""
+    },
+    "iteration_ref": "iteration/1/executor/1_0",
+    "profile_evidence": {
+      "tool_used": "torch.cuda.Event",
+      "strategy": {
+        "child": "1_0",
+        "parent_id": "7ea9f8ad",
+        "action_category": "grouped_expert_scheduling",
+        "action_description": "Add a CUDA scheduling/data-prep path that converts the flattened top-k slots into expert-major metadata: int32 topk slots, per-local-expert counts/prefix offsets, a_map from grouped row to source token, c_map inverse mapping, and tile_idx_to_expert_idx/problem sizes for later grouped kernels. For generation 1, keep this as a standalone scheduling change: use a single-CTA path for the current small topk_length, skip non-local experts early, avoid CUB/radix sort, and keep the baseline staged compute path as the rollback/fallback consumer.",
+        "evidence_chain": "Profile evidence: baseline qwen_tp2 T=1 passes at 1438.912 us. Code evidence: fused_moe_kernel.cu launches stage1 over (T*TOPK,I), stage2 over (T*TOPK,H,split), and each element repeatedly decodes global_expert_raw and local range checks. Reference evidence: the SM120 MoE data-prep recipe builds expert_offsets/problem_sizes/a_map/c_map from topk_ids, uses single-CTA for topk_length <= 32768, and documents that CUB radix sort regressed while per-CTA offsets avoid hot global atomics. Inference: the baseline has no FlashInfer-style grouped expert metadata, so grouped GEMM children cannot get contiguous per-expert work. Action: build the missing expert-major schedule first, with a small-token fast path.",
+        "expected_impact": "Creates the structural precondition for grouped GEMM and removes repeated per-output expert decoding from later kernels. On larger prefill token counts it should reduce launch-side and scatter overhead; on the current T=1 run the impact may be modest, but it should improve MAP-Elites diversity and make downstream compute rewrites simpler.",
+        "risks": "For T=1/top_k=10, scheduling overhead can dominate if implemented as multiple kernels. Keep a single-CTA fast path and fall back to the parent staged kernels if the generated metadata mismatches the reference. Preserve Qwen TP2 local_expert_offset/local_num_experts semantics and avoid changing routing probabilities."
+      },
+      "executor_result": {
+        "child": "1_0",
+        "parent_id": "7ea9f8ad",
+        "candidate_code": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/iteration/1/executor/1_0/kernel.py",
+        "action_category": "grouped_expert_scheduling",
+        "action_description": "Added a single-CTA CUDA data-prep path that builds int32 expert-major top-k slots, local expert counts/prefix offsets, a_map, c_map, tile_idx_to_expert_idx, and gate/up problem_sizes_mnkl for small topk_length while leaving the parent staged compute kernels as the active fallback consumer.",
+        "self_check": "ok",
+        "history_path": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/iteration/1/executor/1_0/history.md"
+      },
+      "status": "PASS",
+      "latency_us": 3136.8958950042725,
+      "max_rel": 0.00011920928227482364,
+      "flashinfer_us": null,
+      "target_status": "BLOCKED",
+      "target_speedup_vs_flashinfer": null,
+      "flashinfer": {
+        "status": "ERROR",
+        "error": "worker exited with code -11; stdout=''; stderr=', void>, tvm::ffi::TensorView, tvm::ffi::TensorView, tvm::ffi::Optional<tvm::ffi::TensorView, void>, tvm::ffi::Optional<tvm::ffi::TensorView, void>, tvm::ffi::Optional<tvm::ffi::TensorView, void>, tvm::ffi::Optional<tvm::ffi::TensorView, void>, long, long, tvm::ffi::Optional<long, void>, tvm::ffi::Optional<long, void>, long, long, long, tvm::ffi::Optional<double, void>, long, bool, bool, long, tvm::ffi::TensorView, tvm::ffi::Array<long, void>, bool, tvm::ffi::Optional<tvm::ffi::TensorView, void>)\\n  File \"<unknown>\", line 0, in __tvm_ffi_trtllm_fp4_block_scale_moe\\n  File \"<unknown>\", line 0, in PyObject_Call\\n  File \"<unknown>\", line 0, in _PyEval_EvalFrameDefault\\n  File \"<unknown>\", line 0, in PyEval_EvalCode\\n  File \"<unknown>\", line 0, in _PyRun_SimpleFileObject\\n  File \"<unknown>\", line 0, in _PyRun_AnyFileObject\\n  File \"<unknown>\", line 0, in Py_RunMain\\n  File \"<unknown>\", line 0, in Py_BytesMain\\n  File \"<unknown>\", line 0, in _start\\n  File \"<unknown>\", line 0, in 0xffffffffffffffff\\n\\n'",
+        "rows": []
+      },
+      "result_file": "iteration/1/executor/1_0/result.json"
+    },
+    "MAP_Elite_feature": "2-2-0"
+  }
+}

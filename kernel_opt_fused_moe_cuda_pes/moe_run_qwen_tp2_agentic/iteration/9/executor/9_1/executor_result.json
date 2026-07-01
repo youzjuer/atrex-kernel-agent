@@ -1,0 +1,9 @@
+{
+  "child": "9_1",
+  "parent_id": "84634c40",
+  "candidate_code": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/iteration/9/executor/9_1/kernel.py",
+  "action_category": "single_token_stage2_weighted_partials",
+  "action_description": "Moved topk weight multiplication into the single-token stage2 slot partial kernel on top of 9_0, so finalize only sums already-weighted FP32 slot partials. GEMM1, local-slot compaction, FP4 dequant helpers, workspace shape, and multi-token fallback are unchanged.",
+  "self_check": "ok",
+  "history_path": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/iteration/9/executor/9_1/history.md"
+}

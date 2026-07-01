@@ -1,0 +1,41 @@
+{
+  "plan_path": "iteration/6/planner/plan.md",
+  "strategies": [
+    {
+      "child": "6_0",
+      "parent_id": "06419529",
+      "action_category": "grouped_gemm_atomic_free_reduce",
+      "action_description": "On the current fastest promoted parent, replace only GEMM2/finalize accumulation for the T=1 qwen_tp2 path with an atomic-free two-phase reducer: stage2 keeps the existing grouped expert schedule and vectorized FP4 GEMM2 math, but writes one FP32 partial per active expert slot and hidden column into a compact [max_active_experts, H] workspace; a small finalize kernel then reduces the active slots for token 0 with topk_weights, applies GEMM2 bias exactly once per local slot contribution as in the parent, casts to bf16, and writes zero when no local slot exists. Keep GEMM1 and metadata scheduling unchanged.",
+      "evidence_chain": "Generation 6 baseline from the promoted source is correctness-clean at about 520 us, while generation 5 active scheduling and tiled-dequant candidates were slower. Code evidence in 06419529 shows stage2 performs atomicAdd, __threadfence, completion-count atomic, completion_counts memset, out_accum memset, and out memset for every active routed slot and hidden column. Qwen3_5-Plus_prefill_TP2 with tokens=1 and TOPK=10 has only a small number of local routed slots, so a compact partial workspace can preserve slot-level parallelism while removing per-output completion synchronization. This is a new combination on the fastest parent, distinct from earlier scalar-parent split/reduce experiments.",
+      "expected_impact": "Removes the highest-cost per-H synchronization path in GEMM2 while keeping the current warp-sliced GEMM1 and vectorized GEMM2 inner loop, so a modest latency reduction is plausible if completion atomics are on the critical path.",
+      "risks": "Adds one finalize launch and a partial workspace. If GEMM1 dominates or the atomic path is already hidden by GEMM2 work, it may be neutral or slower. Correctness must preserve duplicate top-k slots, local_expert_offset filtering, and bias contribution semantics."
+    },
+    {
+      "child": "6_1",
+      "parent_id": "06419529",
+      "action_category": "single_token_slot_scheduling",
+      "action_description": "Specialize only the T=1/TOPK<=10 scheduling path on the current fastest parent: replace the general E_local count/offset/fill metadata sequence with a tiny single-token local-slot compaction kernel that scans TOPK, emits local_slots, local_experts, token_count, and local_slot_count, then launch GEMM2 over the host-known TOPK upper bound with device guards. Keep the parent GEMM2 arithmetic and completion-count finalize logic unchanged so the isolated change is scheduling overhead and empty expert pruning.",
+      "evidence_chain": "The parent 06419529 still launches count_local_slots, build_expert_offsets, fill_grouped_slots, and then a stage2 grid over all E_local=256 experts, although the target run has T=1 and at most TOPK=10 routed slots. Generation 5's one-kernel active-expert schedule reduced empty expert launch width but used a serial scan over E_local and was slower; a TOPK-only single-token compaction is a narrower scheduling variant that avoids the E_local scan while preserving the parent reduction behavior.",
+      "expected_impact": "Cuts metadata work and prunes empty expert blocks for the exact qwen_tp2 tokens=1 profile without changing FP4 math. It should be faster if launch/grid overhead and empty-expert blocks are material at this small-token shape.",
+      "risks": "The scheduling-only lever may be too small relative to GEMM1. A single-token path must fall back cleanly for T!=1 and must not drop invalid/non-local slots that the parent expects to contribute zero."
+    },
+    {
+      "child": "6_2",
+      "parent_id": "06419529",
+      "action_category": "tiled_fp4_dequantization",
+      "action_description": "Retile only the GEMM2 FP4 dequant inner loop so each stage2 thread computes a small adjacent hidden-column microtile, preferably two H columns, for the same active expert slot. Load each mid activation block once, load the two packed FP4 weight rows and scale rows with the existing cache-policy helpers, maintain two FP32 accumulators, and write/reduce the two outputs independently through the parent finalize path. Keep scheduling, GEMM1, and T/top-k semantics unchanged.",
+      "evidence_chain": "The current GEMM2 helper reloads the same mid row for every hidden column h, while H=4096 and I=1024 make mid activation bandwidth/cache reuse important. Prior tiled-dequant attempts focused on GEMM1 shared-hidden tiling and slowed down; this is a different GEMM2 output-column microtile that reuses activations across adjacent output rows without changing the grouped schedule. The existing helper already vectorizes FP4 weights and scales, so the new lever is activation reuse versus register pressure.",
+      "expected_impact": "May reduce repeated mid activation loads in GEMM2 and improve arithmetic intensity for the down projection, while preserving the proven warp-sliced GEMM1 path.",
+      "risks": "Two-column accumulation increases registers and may reduce occupancy. Adjacent H rows have separate FP4 weights/scales, so the implementation must avoid assuming contiguous scale layout beyond the documented [expert, H, scale_col] row-major shape."
+    }
+  ],
+  "evidence_summary": "Promoted source/06419529 is the fastest validated parent at about 520 us for qwen_tp2 tokens=1. Generation 5 grouped scheduling, GEMM1 shared tiling, and direct grouped GEMM variants were correctness-clean but slower, so gen6 should use narrower changes: remove GEMM2 completion synchronization, specialize single-token scheduling without E_local scans, or retile GEMM2 activation reuse.",
+  "search_sources": [
+    "iteration/5/summarizer/summary.md (used: gen5 failures and baseline evidence)",
+    "database/solutions/06419529/src/fused_moe_kernel.cu (used: fastest parent source)",
+    "database/solutions/cccdb6c3/src/fused_moe_kernel.cu (used: active-expert schedule evidence)",
+    "database/solutions/859dab14/src/fused_moe_kernel.cu (used: single-token direct path evidence)",
+    "database/checkpoints/iter-5/best_solution.json (used: best DB result and target blockage)"
+  ],
+  "exhaustion": false
+}

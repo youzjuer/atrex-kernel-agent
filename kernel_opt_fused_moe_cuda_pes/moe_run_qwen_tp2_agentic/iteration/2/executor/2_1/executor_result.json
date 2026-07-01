@@ -1,0 +1,9 @@
+{
+  "child": "2_1",
+  "parent_id": "3c90a4b6",
+  "candidate_code": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/iteration/2/executor/2_1/kernel.py",
+  "action_category": "tiled_fp4_dequantization",
+  "action_description": "Retiled only the GEMM2/down-projection FP4 dequant path: added an aligned I-tile microkernel for 32-element FP4 scale blocks using 128-bit streamed packed-weight loads, vectorized scale loads, branchless E2M1 nibble decode, and evict-last vector loads for the reused mid tile, with scalar fallback for unaligned or non-32 scale-vector cases. Expert grouping, GEMM1, and finalize logic are unchanged.",
+  "self_check": "ok",
+  "history_path": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/iteration/2/executor/2_1/history.md"
+}

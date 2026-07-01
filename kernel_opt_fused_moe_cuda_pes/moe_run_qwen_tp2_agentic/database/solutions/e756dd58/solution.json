@@ -1,0 +1,34 @@
+{
+  "solution_id": "e756dd58",
+  "parent_id": "7b67f03d",
+  "generate_plan": "Use warp-shuffle reductions in the 256-thread fast routing kernel to reduce synchronization cost while preserving stable max-subtracted softmax.",
+  "island_id": 0,
+  "iteration": 14,
+  "generation": 14,
+  "timestamp": 1782899066.5675652,
+  "sample_cnt": 0,
+  "sample_weight": 0.0,
+  "score": 10.351289342563232,
+  "evaluation": "PASS; latency_us=139.00800049304962; strategy=routing_warp_shuffle_reduction",
+  "summary": "",
+  "solution": "database/solutions/e756dd58/kernel.py",
+  "metadata": {
+    "lang": "cuda",
+    "code_sha256": "8479c0c6574f25a5ca4384c0881a72fbcbc1a980e63ccf5ea2bbea61656a2582",
+    "correctness": {
+      "rel_err": 0.00023841856454964727,
+      "status": "PASS"
+    },
+    "performance": {
+      "latency_us": 139.00800049304962,
+      "tflops": null,
+      "bandwidth_gbps": null
+    },
+    "optimization": {
+      "action_category": "routing_warp_shuffle_reduction",
+      "action_description": ""
+    },
+    "iteration_ref": "iteration/14/executor/14_0",
+    "MAP_Elite_feature": "3-3-3"
+  }
+}

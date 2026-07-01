@@ -1,0 +1,9 @@
+{
+  "child": "2_0",
+  "parent_id": "3c90a4b6",
+  "candidate_code": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/iteration/2/executor/2_0/kernel.py",
+  "action_category": "grouped_expert_scheduling",
+  "action_description": "Replaced the parent stage-2 E_local-wide grouped-down schedule with a compact active-expert schedule. A single small CUDA metadata kernel now builds active_experts, compact active_offsets/active_counts, grouped_slots, token_counts, and active_expert_count from valid local T*top_k slots; the grouped GEMM2/finalize kernel launches over active_expert_count while preserving the parent GEMM1 and GEMM2 arithmetic. The parent full-E_local metadata path remains only as a validation fallback.",
+  "self_check": "ok",
+  "history_path": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/iteration/2/executor/2_0/history.md"
+}

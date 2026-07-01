@@ -1,0 +1,138 @@
+{
+  "plan_path": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/iteration/4/planner/plan.md",
+  "strategies": [
+    {
+      "child": "4_0",
+      "parent_id": "0aa690ad",
+      "action_category": "grouped_expert_scheduling",
+      "action_description": "Keep 0aa690ad's grouped GEMM1 arithmetic unchanged, but extend the single-CTA schedule to emit a direct row_to_expert array and grouped_rows count for every valid grouped row. Replace stage1_grouped_activation_kernel's per-row scan over tile_idx_to_expert_idx/problem_sizes with one row_to_expert[grouped_idx] load, and keep topk_slots/a_map/c_map semantics unchanged. Do not add host synchronization or new sorting; this is only metadata shape and metadata consumption cleanup.",
+      "evidence_chain": "Profile evidence: generation 3 stable retest did not promote any child; current source baseline was 1055.200 us while 3_1 retested at 1114.016 us, so low-overhead changes are preferred. Parent evidence: 0aa690ad passed but was slow at 1723.200 us. Code evidence: in 0aa690ad, stage1_grouped_activation_kernel recovers the local expert by scanning up to E_local=256 tile_idx_to_expert_idx/problem_sizes entries for every grouped row in every N tile, even though build_grouped_expert_schedule_kernel already knows the expert when it fills topk_slots and a_map. New reference evidence: FlashInfer grouped GEMM references pass tile_idx_to_expert_idx as a direct scheduler/tile mapping and use validity predicates rather than rediscovering the expert inside each consumer tile. Inference: the grouped GEMM1 parent pays avoidable scheduler-consumer indirection before doing the same scalar FP4 math. Action: emit and consume row_to_expert directly.",
+      "expected_impact": "Should remove an O(E_local) lookup from the grouped stage1 hot path and reduce the cost of using FlashInfer-style metadata at T=1/top_k=10 without changing routing, GEMM1 math, GEMM2, or final reduction. It targets a clear overhead in the grouped parent rather than adding another metadata phase.",
+      "risks": "The row_to_expert array must preserve duplicate top-k slots and non-local filtering exactly. If grouped_rows is stored on device only, kernels must still launch with the host-known total_routes upper bound and predicate invalid rows. A scheduling-only child may have a small absolute gain if arithmetic remains dominant."
+    },
+    {
+      "child": "4_1",
+      "parent_id": "98a890ad",
+      "action_category": "tiled_fp4_dequantization",
+      "action_description": "Apply a warp-sliced K-parallel FP4 dequant microkernel to GEMM1/gate-up only. Keep 98a890ad's grouped GEMM2/finalize path unchanged. For qwen_tp2 H=4096 and scale_vec=32, assign one warp or half-warp to a gate/up output pair, have lanes load disjoint 32- or 64-element packed FP4 K chunks with 128-bit loads, decode/apply scales, accumulate partial x1/x2 values, and warp-reduce to one mid[tk,i] store. This changes the FP4 dequant work partitioning, not scheduling or finalization.",
+      "evidence_chain": "Profile evidence: 98a890ad's GEMM2 dequant retile passed but remained slow at 1701.344 us, while generation 1's GEMM1 shared-hidden retile also regressed at 1897.984 us; both retained substantial per-output sequential K work. Code evidence: 98a890ad still uses the scalar stage1_activation_kernel, where each thread computes a full H=4096 dot for one intermediate column pair with LUT nibble decode and repeated hidden loads. New reference evidence: gpu-wiki NVFP4 GEMV guidance maps many lanes to one row/dot, uses 128/256-bit FP4 loads, PTX byte decomposition, cache-policy differentiation, and warp/shared reductions to avoid one long K loop per thread; the Hopper hardware table allows high occupancy but no local evidence supports native FP4 tensor cores on this platform. Inference: for T=1/top_k=10, GEMM1 behaves like many tiny software-FP4 GEMVs, so parallelizing K within a dot is a different dequant lever from prior shared-hidden or H-tiled GEMM2 attempts. Action: warp-slice GEMM1 K dequant and reduce within the warp.",
+      "expected_impact": "Should increase parallelism in the dominant GEMM1 work, reduce per-thread instruction chains, and make packed FP4 loads more coalesced while leaving the parent grouped down path intact for attribution. It addresses a stage not improved by 98a890ad's GEMM2-only dequantization.",
+      "risks": "Warp reductions and two accumulators per output pair can raise register pressure or add shuffle overhead. The first version should specialize only scale_vec==32/H multiple-of-32 qwen_tp2 shapes and fall back to the scalar stage1 path for other shapes. Numerical order changes should remain within the existing bf16 tolerance but need correctness checks."
+    },
+    {
+      "child": "4_2",
+      "parent_id": "0aa690ad",
+      "action_category": "grouped_gemm",
+      "action_description": "Preserve the grouped intermediate layout across both GEMMs. In 0aa690ad, stage1_grouped_activation_kernel currently scatters the SwiGLU result back to mid[original_topk_slot, i], after which GEMM2 returns to topk-slot order. Instead, write GEMM1 output as mid_grouped[grouped_idx, i] in expert-major order and make GEMM2 consume grouped_idx/expert_offsets directly, using c_map or a permuted_idx_to_expanded_idx-style mapping only in the final router-weighted scatter. Keep the same software FP4 helpers and routing semantics; the category under test is the grouped GEMM dataflow boundary.",
+      "evidence_chain": "Profile evidence: 0aa690ad converted b9545b81's metadata into a grouped GEMM1 producer but still passed slowly at 1723.200 us. Code evidence: the grouped stage1 writes mid back to original top-k slot order, then the unchanged stage2_grouped_down_kernel rereads topk_ids and processes (tk,h,split) rather than consuming the expert-major rows just produced. New reference evidence: FlashInfer FC1 grouped SwiGLU and grouped finalize references keep valid M rows in a flattened grouped layout, carry token_id_mapping/permuted_idx_to_expanded_idx metadata, and postpone invalid/padded-row predicates to the scheduler/epilogue. Inference: scattering the intermediate back to top-k order destroys the locality created by grouped GEMM1 and forces GEMM2 to rebuild route/expert context. Action: keep mid grouped until the final output scatter.",
+      "expected_impact": "Should remove one unnecessary layout round trip, let GEMM2 reuse the same expert-major row grouping as GEMM1, and align the CUDA candidate more closely with FlashInfer's grouped FC1 plus grouped finalize boundary. This is distinct from prior GEMM2-only grouped finalize and prior GEMM1-only grouped producer attempts.",
+      "risks": "This touches the contract between the two compute stages, so c_map/permuted mapping mistakes can silently swap top-k rows. Multiple routes for the same token still require correct router-weighted accumulation in final output. If GEMM2 remains scalar per hidden column, preserving layout may not overcome the added indexing unless the implementation avoids extra metadata kernels."
+    }
+  ],
+  "evidence_summary": "The current profile evidence is CUDA-event evaluator data, not an NCU summary. qwen_tp2 T=1 full TP2 metadata passes with max_rel 1.192e-4; stable current source baseline is 1055.200 us, while generation 3's best retest was 1114.016 us and was not promoted. Selected parents are slower but structurally useful: 98a890ad is a GEMM2 dequant/grouped-down parent at 1701.344 us, 0aa690ad is a grouped GEMM1 parent at 1723.200 us, and b9545b81 is a scheduling-only parent at 3136.896 us. Approximate useful GEMM work is 251.66 MFLOP, so the stable source path reaches only about 0.238 TFLOPS before software FP4 decode, atomics, launch, and memory traffic overheads. Dominant actionable bottlenecks are metadata overhead that is not consumed cheaply, scalar software FP4 dequant in GEMM1, and loss of expert-major locality between grouped GEMM1 and GEMM2.",
+  "search_sources": [
+    {
+      "source": "workspace README.md",
+      "layer": "workspace",
+      "new": false,
+      "finding": "Defines FlashInfer-compatible Qwen3.5 Plus TP2 contract: H=4096, I=1024, top_k=10, local_num_experts=256, packed e2m1 FP4 weights, and staged CUDA baseline."
+    },
+    {
+      "source": "profiles/stable_baseline_result.json",
+      "layer": "workspace",
+      "new": true,
+      "finding": "Current source stable retest passes at 1055.200 us with max_rel 1.192e-4; FlashInfer target remains blocked by worker failure."
+    },
+    {
+      "source": "iteration/3/summarizer/summary.md",
+      "layer": "workspace",
+      "new": true,
+      "finding": "Generation 3 best candidate 3_1 retested at 1114.016 us versus current source baseline 1055.200 us, so it was not promoted."
+    },
+    {
+      "source": "tools/evolution_db.py lineage for 98a890ad, 0aa690ad, b9545b81",
+      "layer": "workspace",
+      "new": true,
+      "finding": "Selected lineages already include baseline, grouped_expert_scheduling, tiled_fp4_dequantization, and grouped_gemm plans; new strategies must be narrower than prior metadata creation, active-expert pruning, GEMM2 dequant tiling, split-K partial reduction, and GEMM1 grouped producer attempts."
+    },
+    {
+      "source": "database/solutions/0aa690ad/src/fused_moe_kernel.cu",
+      "layer": "workspace",
+      "new": true,
+      "finding": "stage1_grouped_activation_kernel scans tile_idx_to_expert_idx/problem_sizes across E_local to rediscover the expert for each grouped row, then scatters mid back to original top-k slot order before GEMM2."
+    },
+    {
+      "source": "database/solutions/98a890ad/src/fused_moe_kernel.cu",
+      "layer": "workspace",
+      "new": true,
+      "finding": "GEMM2 has an aligned block-32 dequant path, but GEMM1 remains scalar per output pair and computes a full H=4096 dot inside one thread."
+    },
+    {
+      "source": "iteration/1-3 executor evidence.json files",
+      "layer": "workspace",
+      "new": false,
+      "finding": "Prior tried set includes scheduling metadata creation, GEMM1 shared-hidden dequant, expert-major GEMM2 finalize, active-expert compaction, GEMM2 vectorized dequant, topk-slot split-K reduction, device-only active scheduling, GEMM2 H-tiling, and grouped GEMM1."
+    },
+    {
+      "source": "gpu-wiki/docs/hardware-specs/hardware_specs_hopper.md",
+      "layer": "L1",
+      "new": false,
+      "finding": "Hopper guidance gives warp size 32, up to 64 resident warps/SM, 228 KB shared memory, and H20 BF16/FP8 ridge points; no L20D-specific FP4 tensor-core assumption is made."
+    },
+    {
+      "source": "gpu-wiki/docs/kernel-opt/nvidia/common/blackwell/kernels/grouped-gemm.md",
+      "layer": "L1",
+      "new": true,
+      "finding": "Grouped GEMM for MoE should batch variable-M expert problems with fixed N/K and use explicit tile-to-expert mapping; small-M expert inefficiency and padding are caveats."
+    },
+    {
+      "source": "gpu-wiki/docs/kernel-opt/nvidia/common/blackwell/kernels/fused-moe.md",
+      "layer": "L1",
+      "new": true,
+      "finding": "Fused MoE structure separates gate-up dual GEMM/SwiGLU from down GEMM/combine and emphasizes minimizing global intermediate roundtrips."
+    },
+    {
+      "source": "gpu-wiki/docs/kernel-opt/nvidia/common/blackwell/kernels/nvfp4-gemv.md",
+      "layer": "L1",
+      "new": true,
+      "finding": "NVFP4 GEMV-style kernels use many threads per row/dot, wide vector loads, PTX byte decomposition, cache policies, and warp/shared reductions for memory-bound low-batch work."
+    },
+    {
+      "source": "gpu-wiki/docs/kernel-opt/nvidia/common/blackwell/techniques/vectorized-loads.md",
+      "layer": "L1",
+      "new": false,
+      "finding": "128/256-bit FP4 loads, PTX byte unpack, and register budgeting are core levers for FP4 software dequant paths."
+    },
+    {
+      "source": "gpu-wiki/docs/kernel-opt/nvidia/common/blackwell/techniques/cache-policy.md",
+      "layer": "L1",
+      "new": false,
+      "finding": "Use different cache qualifiers for streamed and reused data; relevant to GEMM1 hidden reuse versus streamed weight rows."
+    },
+    {
+      "source": "gpu-wiki/reference-kernels/nvidia/blackwell/cutedsl/flashinfer/blockscaled_contiguous_gather_grouped_gemm_swiglu_fusion.py",
+      "layer": "L1",
+      "new": true,
+      "finding": "FlashInfer FC1 grouped SwiGLU uses token_id_mapping and tile_idx_to_expert_idx with valid/padded tile predicates, keeping valid M rows grouped."
+    },
+    {
+      "source": "gpu-wiki/reference-kernels/nvidia/blackwell/cutedsl/flashinfer/blockscaled_contiguous_grouped_gemm_finalize_fusion.py",
+      "layer": "L1",
+      "new": true,
+      "finding": "FlashInfer grouped finalize uses permuted_idx_to_expanded_idx/router-scale epilogue logic and persistent tile scheduling rather than scattering intermediate rows back early."
+    },
+    {
+      "source": "gpu-wiki/reference-kernels/nvidia/blackwell/cutedsl/flashinfer/fp4_common.py",
+      "layer": "L1",
+      "new": false,
+      "finding": "FlashInfer FP4 helpers define SF_VEC_SIZE=16 and COPY_BITS=128 for packed FP4 kernels."
+    },
+    {
+      "source": "reference-projects/README.md and local submodule directories",
+      "layer": "L2",
+      "new": false,
+      "finding": "Reference projects are listed as submodules, but the local flashinfer/DeepGEMM/cutlass checkouts expose no relevant files here; gpu-wiki extracted references are the usable local material."
+    }
+  ],
+  "exhaustion": false
+}

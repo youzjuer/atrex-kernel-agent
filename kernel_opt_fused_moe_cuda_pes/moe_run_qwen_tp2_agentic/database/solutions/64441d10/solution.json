@@ -1,0 +1,34 @@
+{
+  "solution_id": "64441d10",
+  "parent_id": "99555166",
+  "generate_plan": "Replace the Qwen TP2 single-token routing_method=0 Python routing sequence with one CUDA extension kernel that emits top-k ids and weights while keeping the generic Python routing fallback.",
+  "island_id": 0,
+  "iteration": 12,
+  "generation": 12,
+  "timestamp": 1782896428.62727,
+  "sample_cnt": 0,
+  "sample_weight": 0.0,
+  "score": 9.643148657301644,
+  "evaluation": "PASS; latency_us=149.21599626541138; strategy=single_token_cuda_routing_topk",
+  "summary": "",
+  "solution": "database/solutions/64441d10/kernel.py",
+  "metadata": {
+    "lang": "cuda",
+    "code_sha256": "8479c0c6574f25a5ca4384c0881a72fbcbc1a980e63ccf5ea2bbea61656a2582",
+    "correctness": {
+      "rel_err": 0.00023841856454964727,
+      "status": "PASS"
+    },
+    "performance": {
+      "latency_us": 149.21599626541138,
+      "tflops": null,
+      "bandwidth_gbps": null
+    },
+    "optimization": {
+      "action_category": "single_token_cuda_routing_topk",
+      "action_description": ""
+    },
+    "iteration_ref": "iteration/12/executor/12_1",
+    "MAP_Elite_feature": "3-3-3"
+  }
+}

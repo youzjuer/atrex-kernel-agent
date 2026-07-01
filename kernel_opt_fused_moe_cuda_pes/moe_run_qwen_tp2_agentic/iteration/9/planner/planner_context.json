@@ -1,0 +1,93 @@
+{
+  "workspace_path": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic",
+  "repo_root": "/home/youchunbo/code/atrex-kernel-agent",
+  "generation": 9,
+  "n_candidates": 3,
+  "parents": [
+    {
+      "solution_id": "a09b7b69",
+      "score": 2.8237881927662363,
+      "island_id": 0,
+      "generation": 7,
+      "code": "database/solutions/a09b7b69/kernel.py",
+      "generate_plan": "Combine the fastest single-token compact schedule with an atomic-free grouped GEMM2 finalize. Keep 6ebb0ad6's GEMM1 and compact local_slots/local_experts path, but change the T=1 GEMM2 kernel to write FP32 slot partials into a compact fixed [TOPK, H] workspace indexed by local slot. Launch a small finalize kernel over H that loops only local_slot_count slots, applies topk_weights and gemm2_bias with the parent semantics, casts directly to bf16, and writes zero when no local slot exists. Do not use the E_local expert_counts/expert_offsets path in this child.",
+      "action_category": "grouped_gemm_compact_atomic_free_finalize",
+      "summary": "",
+      "workspace": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/database/solutions/a09b7b69",
+      "kernel_path": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/database/solutions/a09b7b69/kernel.py",
+      "src_path": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/database/solutions/a09b7b69/src",
+      "iteration_ref": "iteration/7/executor/7_2",
+      "optimization": {
+        "action_category": "grouped_gemm_compact_atomic_free_finalize",
+        "action_description": ""
+      }
+    },
+    {
+      "solution_id": "83d98be7",
+      "score": 2.540882569791301,
+      "island_id": 0,
+      "generation": 6,
+      "code": "database/solutions/83d98be7/kernel.py",
+      "generate_plan": "Retile only the GEMM2 FP4 dequant inner loop so each stage2 thread computes a small adjacent hidden-column microtile, preferably two H columns, for the same active expert slot. Load each mid activation block once, load the two packed FP4 weight rows and scale rows with the existing cache-policy helpers, maintain two FP32 accumulators, and write/reduce the two outputs independently through the parent finalize path. Keep scheduling, GEMM1, and T/top-k semantics unchanged.",
+      "action_category": "tiled_fp4_dequantization",
+      "summary": "",
+      "workspace": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/database/solutions/83d98be7",
+      "kernel_path": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/database/solutions/83d98be7/kernel.py",
+      "src_path": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/database/solutions/83d98be7/src",
+      "iteration_ref": "iteration/6/executor/6_2",
+      "optimization": {
+        "action_category": "tiled_fp4_dequantization",
+        "action_description": ""
+      }
+    },
+    {
+      "solution_id": "b1433778",
+      "score": 1.0412412113641842,
+      "island_id": 0,
+      "generation": 4,
+      "code": "database/solutions/b1433778/kernel.py",
+      "generate_plan": "Preserve the grouped intermediate layout across both GEMMs. In 0aa690ad, stage1_grouped_activation_kernel currently scatters the SwiGLU result back to mid[original_topk_slot, i], after which GEMM2 returns to topk-slot order. Instead, write GEMM1 output as mid_grouped[grouped_idx, i] in expert-major order and make GEMM2 consume grouped_idx/expert_offsets directly, using c_map or a permuted_idx_to_expanded_idx-style mapping only in the final router-weighted scatter. Keep the same software FP4 helpers and routing semantics; the category under test is the grouped GEMM dataflow boundary.",
+      "action_category": "grouped_gemm",
+      "summary": "",
+      "workspace": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/database/solutions/b1433778",
+      "kernel_path": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/database/solutions/b1433778/kernel.py",
+      "src_path": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/database/solutions/b1433778/src",
+      "iteration_ref": "iteration/4/executor/4_2",
+      "optimization": {
+        "action_category": "grouped_gemm",
+        "action_description": ""
+      }
+    }
+  ],
+  "previous_summary": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/iteration/8/summarizer/summary.md",
+  "profiles": {
+    "baseline": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/profiles/auto_baseline.json",
+    "directory": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/profiles"
+  },
+  "operator_surface": "flashinfer.trtllm_fp4_block_scale_moe",
+  "application_profile": "Qwen3_5-Plus_prefill_TP2",
+  "optimization_focus": [
+    "grouped expert scheduling",
+    "tiled FP4 dequantization",
+    "grouped GEMM"
+  ],
+  "framework": "CUDA C++ PyTorch extension",
+  "constraints": [
+    "Do not generate FlyDSL.",
+    "Preserve the FlashInfer-compatible run(...) signature.",
+    "Preserve Qwen3.5 Plus TP2 routing/top_k/local expert semantics.",
+    "Each strategy must target exactly one optimization category."
+  ],
+  "eval_args": {
+    "preset": "qwen_tp2",
+    "tokens": "1",
+    "hidden_size": null,
+    "intermediate_size": null,
+    "local_num_experts": 256,
+    "local_expert_offset": 0,
+    "warmup": 2,
+    "rep": 5
+  },
+  "output_plan_json": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/iteration/9/planner/plan.json",
+  "output_plan_md": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/iteration/9/planner/plan.md"
+}

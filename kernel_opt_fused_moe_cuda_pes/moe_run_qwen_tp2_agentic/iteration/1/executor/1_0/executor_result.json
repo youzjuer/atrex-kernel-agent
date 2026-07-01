@@ -1,0 +1,9 @@
+{
+  "child": "1_0",
+  "parent_id": "7ea9f8ad",
+  "candidate_code": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/iteration/1/executor/1_0/kernel.py",
+  "action_category": "grouped_expert_scheduling",
+  "action_description": "Added a single-CTA CUDA data-prep path that builds int32 expert-major top-k slots, local expert counts/prefix offsets, a_map, c_map, tile_idx_to_expert_idx, and gate/up problem_sizes_mnkl for small topk_length while leaving the parent staged compute kernels as the active fallback consumer.",
+  "self_check": "ok",
+  "history_path": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/iteration/1/executor/1_0/history.md"
+}

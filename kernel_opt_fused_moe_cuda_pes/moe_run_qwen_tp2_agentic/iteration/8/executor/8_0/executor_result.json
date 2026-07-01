@@ -1,0 +1,9 @@
+{
+  "child": "8_0",
+  "parent_id": "a09b7b69",
+  "candidate_code": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/iteration/8/executor/8_0/kernel.py",
+  "action_category": "grouped_expert_scheduling_fixed_topk_metadata",
+  "action_description": "Implemented fixed TOPK slot_to_local_expert metadata for T=1/TOPK<=10 before GEMM1; fixed-slot GEMM1 consumes it, and the single-token GEMM2 partial/finalize path stays indexed by the original top-k slot instead of compacted local-slot rows. The general multi-token grouped path is unchanged.",
+  "self_check": "ok",
+  "history_path": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/iteration/8/executor/8_0/history.md"
+}

@@ -1,0 +1,93 @@
+{
+  "workspace_path": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic",
+  "repo_root": "/home/youchunbo/code/atrex-kernel-agent",
+  "generation": 6,
+  "n_candidates": 3,
+  "parents": [
+    {
+      "solution_id": "eb78820c",
+      "score": 0.7581265242022017,
+      "island_id": 0,
+      "generation": 1,
+      "code": "database/solutions/eb78820c/kernel.py",
+      "generate_plan": "Retile the software FP4 dequant inner loops around K-blocks instead of per-output scalar rows. Stage a reusable hidden or mid K tile per CTA, load packed FP4 weights and block scales in vector chunks, decode e2m1 nibbles for multiple output columns per thread group, and accumulate a small output tile before writing. Keep the staged algorithm shape unchanged, but replace accumulate_fp4_pair_scaled_tile/accumulate_fp4_scaled_tile with a tiled/vectorized dequant path for one projection first, preferably GEMM1 where the same hidden row is reread for every intermediate column.",
+      "action_category": "tiled_fp4_dequantization",
+      "summary": "",
+      "workspace": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/database/solutions/eb78820c",
+      "kernel_path": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/database/solutions/eb78820c/kernel.py",
+      "src_path": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/database/solutions/eb78820c/src",
+      "iteration_ref": "iteration/1/executor/1_1",
+      "optimization": {
+        "action_category": "tiled_fp4_dequantization",
+        "action_description": ""
+      }
+    },
+    {
+      "solution_id": "4479039f",
+      "score": 2.623147935557388,
+      "island_id": 0,
+      "generation": 5,
+      "code": "database/solutions/4479039f/kernel.py",
+      "generate_plan": "Retile only the GEMM1 warp-sliced FP4 dequant fast path so a CTA owns a small contiguous intermediate-column tile for one routed slot, for example 4 or 8 warps for the same tk and adjacent i values. Cooperatively load each 32-element bf16 hidden block once into shared memory or registers per K scale block, let the warps reuse it while each warp keeps its own x1/x2 accumulators and packed FP4 rows, then keep the existing warp reduction and mid[tk, i] store. Leave scheduling, GEMM2, finalization, and fallback paths unchanged.",
+      "action_category": "tiled_fp4_dequantization",
+      "summary": "",
+      "workspace": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/database/solutions/4479039f",
+      "kernel_path": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/database/solutions/4479039f/kernel.py",
+      "src_path": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/database/solutions/4479039f/src",
+      "iteration_ref": "iteration/5/executor/5_1",
+      "optimization": {
+        "action_category": "tiled_fp4_dequantization",
+        "action_description": ""
+      }
+    },
+    {
+      "solution_id": "b64c4514",
+      "score": 1.0042433665522246,
+      "island_id": 0,
+      "generation": 3,
+      "code": "database/solutions/b64c4514/kernel.py",
+      "generate_plan": "Replace the parent grouped-down stage's E_local-wide launch with a device-only active-expert schedule that never copies active_expert_count back to the host. Build active_experts, active_offsets, active_counts, grouped_slots, token_counts, and a device active_count in one small metadata kernel, then launch GEMM2/finalize over the host-known upper bound max_active_experts = min(E_local, T * top_k). In the GEMM2 kernel, return before reading active_experts when blockIdx.y >= active_count[0]. Keep GEMM1 and GEMM2 arithmetic unchanged, and remove cudaMemcpyAsync/cudaStreamSynchronize launch-sizing from the hot path.",
+      "action_category": "grouped_expert_scheduling",
+      "summary": "",
+      "workspace": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/database/solutions/b64c4514",
+      "kernel_path": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/database/solutions/b64c4514/kernel.py",
+      "src_path": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/database/solutions/b64c4514/src",
+      "iteration_ref": "iteration/3/executor/3_0",
+      "optimization": {
+        "action_category": "grouped_expert_scheduling",
+        "action_description": ""
+      }
+    }
+  ],
+  "previous_summary": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/iteration/5/summarizer/summary.md",
+  "profiles": {
+    "baseline": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/profiles/auto_baseline.json",
+    "directory": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/profiles"
+  },
+  "operator_surface": "flashinfer.trtllm_fp4_block_scale_moe",
+  "application_profile": "Qwen3_5-Plus_prefill_TP2",
+  "optimization_focus": [
+    "grouped expert scheduling",
+    "tiled FP4 dequantization",
+    "grouped GEMM"
+  ],
+  "framework": "CUDA C++ PyTorch extension",
+  "constraints": [
+    "Do not generate FlyDSL.",
+    "Preserve the FlashInfer-compatible run(...) signature.",
+    "Preserve Qwen3.5 Plus TP2 routing/top_k/local expert semantics.",
+    "Each strategy must target exactly one optimization category."
+  ],
+  "eval_args": {
+    "preset": "qwen_tp2",
+    "tokens": "1",
+    "hidden_size": null,
+    "intermediate_size": null,
+    "local_num_experts": 256,
+    "local_expert_offset": 0,
+    "warmup": 2,
+    "rep": 5
+  },
+  "output_plan_json": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/iteration/6/planner/plan.json",
+  "output_plan_md": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/iteration/6/planner/plan.md"
+}

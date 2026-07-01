@@ -1,0 +1,9 @@
+{
+  "child": "3_0",
+  "parent_id": "3c90a4b6",
+  "candidate_code": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/iteration/3/executor/3_0/kernel.py",
+  "action_category": "grouped_expert_scheduling",
+  "action_description": "Replaced the parent grouped-down stage's E_local-wide metadata and GEMM2 launch with a device-only active-expert schedule. A single metadata kernel now builds active_experts, active_offsets, active_counts, grouped_slots, token_counts, and a device active_expert_count; GEMM2/finalize launches over min(E_local, T * top_k) and guards blockIdx.y against active_expert_count[0] before loading active_experts. Removed the host active-count copy/synchronize path while keeping GEMM1 and GEMM2 arithmetic unchanged.",
+  "self_check": "ok",
+  "history_path": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_qwen_tp2_agentic/iteration/3/executor/3_0/history.md"
+}

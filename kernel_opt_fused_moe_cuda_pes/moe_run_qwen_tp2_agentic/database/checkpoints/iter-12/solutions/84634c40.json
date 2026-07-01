@@ -1,0 +1,123 @@
+{
+  "solution_id": "84634c40",
+  "parent_id": "a09b7b69",
+  "generate_plan": "On the current best a09b7b69 single-token compact atomic-free finalize path, hoist GEMM2 bias into the stage2 slot partial kernel and slim the finalize kernel so it only performs topk-weighted slot partial reduction. Preserve GEMM1, compact local-slot scheduling, FP4 dequant helpers, workspace shape, and multi-token fallback.",
+  "island_id": 0,
+  "iteration": 9,
+  "generation": 9,
+  "timestamp": 1782892614.2549374,
+  "sample_cnt": 0,
+  "sample_weight": 0.0,
+  "score": 2.861524656873378,
+  "evaluation": "PASS; latency_us=502.8480291366577; strategy=single_token_stage2_bias_hoist_finalize_slim",
+  "summary": "",
+  "solution": "database/solutions/84634c40/kernel.py",
+  "metadata": {
+    "lang": "cuda",
+    "code_sha256": "73a4354d6aea3091974c48a20eb0c185096b9d85abec6050050b833eb06f2765",
+    "correctness": {
+      "rel_err": 0.00023841856454964727,
+      "status": "PASS"
+    },
+    "performance": {
+      "latency_us": 502.8480291366577,
+      "tflops": null,
+      "bandwidth_gbps": null
+    },
+    "optimization": {
+      "action_category": "single_token_stage2_bias_hoist_finalize_slim",
+      "action_description": ""
+    },
+    "iteration_ref": "iteration/9/executor/9_0",
+    "profile_evidence": {
+      "status": "PASS",
+      "operator": "flashinfer.trtllm_fp4_block_scale_moe",
+      "arg_names": [
+        "routing_logits",
+        "routing_bias",
+        "hidden_states",
+        "hidden_states_scale",
+        "gemm1_weights",
+        "gemm1_weights_scale",
+        "gemm1_bias",
+        "gemm1_alpha",
+        "gemm1_beta",
+        "gemm1_clamp_limit",
+        "gemm2_weights",
+        "gemm2_weights_scale",
+        "gemm2_bias",
+        "output1_scale_scalar",
+        "output1_scale_gate_scalar",
+        "output2_scale_scalar",
+        "num_experts",
+        "top_k",
+        "n_group",
+        "topk_group",
+        "intermediate_size",
+        "local_expert_offset",
+        "local_num_experts",
+        "routed_scaling_factor",
+        "routing_method_type",
+        "do_finalize",
+        "enable_pdl",
+        "activation_type",
+        "output",
+        "tune_max_num_tokens",
+        "norm_topk_prob",
+        "routing_replay_out"
+      ],
+      "max_abs": 2.384185791015625e-07,
+      "max_rel": 0.00023841856454964727,
+      "mean_latency_us": 502.8480291366577,
+      "rows": [
+        {
+          "tokens": 1,
+          "preset": "qwen_tp2",
+          "shape": {
+            "hidden_size": 4096,
+            "intermediate_size": 1024,
+            "num_experts": 512,
+            "top_k": 10,
+            "local_expert_offset": 0,
+            "local_num_experts": 256,
+            "routing_method_type": 0
+          },
+          "max_abs": 2.384185791015625e-07,
+          "max_rel": 0.00023841856454964727,
+          "status": "PASS",
+          "candidate_us": 502.8480291366577,
+          "reference_us": 58911.231994628906,
+          "speedup_vs_reference": 117.15514147638979
+        }
+      ],
+      "flashinfer": {
+        "status": "ERROR",
+        "version": "0.6.9",
+        "operator": "flashinfer.trtllm_fp4_block_scale_moe",
+        "max_abs": 0.0,
+        "max_rel": 0.0,
+        "mean_latency_us": null,
+        "rows": [
+          {
+            "tokens": 1,
+            "preset": "qwen_tp2",
+            "shape": {
+              "hidden_size": 4096,
+              "intermediate_size": 1024,
+              "num_experts": 512,
+              "top_k": 10,
+              "local_expert_offset": 0,
+              "local_num_experts": 256,
+              "routing_method_type": 0
+            },
+            "status": "ERROR",
+            "error": "RuntimeError: Error in function 'run' at /dashscope/caches/workspace/tao/flashinfer/csrc/trtllm_batched_gemm_runner.cu:265: Error occurred when running GEMM! (numBatches:  256 , GemmMNK:  1   4096   1024 , Kernel:  bmm_Bfloat16_MxE2m1Bfloat16_castBfloat16_Fp32_bA32_t128x8x256u2_s3_et128x8_m128x8x16_c1x1x1_16dp256b_rM_TN_transOut_schPd2x1x2x3_biasFp32M_bN_rgTma_clmp_dynB_sm100f )"
+          }
+        ]
+      },
+      "target_status": "BLOCKED",
+      "target_reason": "flashinfer_status=ERROR"
+    },
+    "MAP_Elite_feature": "2-2-3"
+  }
+}
