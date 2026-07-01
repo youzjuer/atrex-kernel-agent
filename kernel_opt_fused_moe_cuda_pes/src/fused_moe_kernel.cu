@@ -87,6 +87,12 @@ __device__ __forceinline__ int64_t scale_offset_128x4(int row, int col, int cols
          static_cast<int64_t>(row_idx_in_group1) * 4 + column_idx_in_group;
 }
 
+__device__ __forceinline__ int nvfp4_swizzled_scale_offset(int row, int scale_col,
+                                                           int groups_k) {
+  return (row / 128) * groups_k * 512 + (scale_col / 4) * 512 +
+         (row % 32) * 16 + ((row % 128) / 32) * 4 + (scale_col % 4);
+}
+
 __device__ __forceinline__ float load_weight_scale(
     const float* __restrict__ scales,
     int64_t expert_base,
@@ -933,6 +939,103 @@ __global__ void quantize_dequant_mid_fp4_kernel(float* __restrict__ mid, int row
   }
 }
 
+__global__ void swiglu_requant_from_bmm_kernel(
+    const __nv_bfloat16* __restrict__ gemm1_out,
+    const int32_t* __restrict__ expert_counts,
+    uint8_t* __restrict__ mid_packed,
+    uint8_t* __restrict__ mid_scale,
+    uint8_t* __restrict__ mid_scale_swizzled,
+    int local_num_experts,
+    int padded_rows,
+    int I,
+    int scale_cols,
+    int groups_k,
+    int swizzled_bytes_per_expert) {
+  const int64_t total_blocks =
+      static_cast<int64_t>(local_num_experts) * padded_rows * scale_cols;
+  const int64_t block_idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (block_idx >= total_blocks) {
+    return;
+  }
+
+  const int scale_col = static_cast<int>(block_idx % scale_cols);
+  const int row_flat = static_cast<int>(block_idx / scale_cols);
+  const int local_expert = row_flat / padded_rows;
+  const int row_in_expert = row_flat - local_expert * padded_rows;
+  const int valid_rows = expert_counts[local_expert];
+  const int packed_col = scale_col * 8;
+  uint8_t* packed_base =
+      mid_packed + (static_cast<int64_t>(row_flat) * (I / 2)) + packed_col;
+  const int64_t scale_linear_offset = static_cast<int64_t>(row_flat) * scale_cols + scale_col;
+  const int64_t scale_swizzled_offset =
+      static_cast<int64_t>(local_expert) * swizzled_bytes_per_expert +
+      nvfp4_swizzled_scale_offset(row_in_expert, scale_col, groups_k);
+
+  if (row_in_expert >= valid_rows) {
+#pragma unroll
+    for (int byte_idx = 0; byte_idx < 8; ++byte_idx) {
+      packed_base[byte_idx] = 0;
+    }
+    mid_scale[scale_linear_offset] = 0;
+    mid_scale_swizzled[scale_swizzled_offset] = 0;
+    return;
+  }
+
+  float values[16];
+  float amax = 0.0f;
+  const __nv_bfloat16* row = gemm1_out + static_cast<int64_t>(row_flat) * (2 * I);
+#pragma unroll
+  for (int j = 0; j < 16; ++j) {
+    const int logical_col = scale_col * 16 + j;
+    const int x1_row = prepared_gemm1_row(logical_col, I, true);
+    const int x2_row = prepared_gemm1_row(I + logical_col, I, true);
+    const float x1 = __bfloat162float(row[x1_row]);
+    const float x2 = __bfloat162float(row[x2_row]);
+    const float activated = silu(x2) * x1;
+    values[j] = activated;
+    if (isfinite(activated)) {
+      amax = fmaxf(amax, fabsf(activated));
+    }
+  }
+
+  if (amax == 0.0f) {
+#pragma unroll
+    for (int byte_idx = 0; byte_idx < 8; ++byte_idx) {
+      packed_base[byte_idx] = 0;
+    }
+    mid_scale[scale_linear_offset] = 0;
+    mid_scale_swizzled[scale_swizzled_offset] = 0;
+    return;
+  }
+
+  __nv_fp8_e4m3 sf_fp8(amax * (1.0f / 6.0f));
+  const uint8_t scale_raw = *reinterpret_cast<const uint8_t*>(&sf_fp8);
+  const float scale = static_cast<float>(sf_fp8);
+  if (scale == 0.0f || !isfinite(scale)) {
+#pragma unroll
+    for (int byte_idx = 0; byte_idx < 8; ++byte_idx) {
+      packed_base[byte_idx] = 0;
+    }
+    mid_scale[scale_linear_offset] = 0;
+    mid_scale_swizzled[scale_swizzled_offset] = 0;
+    return;
+  }
+
+  const float inv_scale = 1.0f / scale;
+#pragma unroll
+  for (int byte_idx = 0; byte_idx < 8; ++byte_idx) {
+    const int j0 = byte_idx * 2;
+    const int j1 = j0 + 1;
+    const uint32_t code0 =
+        isfinite(values[j0]) ? encode_fp4_e2m1_nearest(values[j0] * inv_scale) : 0u;
+    const uint32_t code1 =
+        isfinite(values[j1]) ? encode_fp4_e2m1_nearest(values[j1] * inv_scale) : 0u;
+    packed_base[byte_idx] = static_cast<uint8_t>(code0 | (code1 << 4));
+  }
+  mid_scale[scale_linear_offset] = scale_raw;
+  mid_scale_swizzled[scale_swizzled_offset] = scale_raw;
+}
+
 __global__ void count_local_slots_kernel(
     const int64_t* __restrict__ topk_ids,
     int* __restrict__ expert_counts,
@@ -1612,12 +1715,6 @@ __global__ void pack_hidden_bmm_from_metadata_kernel(
   }
 }
 
-__device__ __forceinline__ int nvfp4_swizzled_scale_offset(int row, int scale_col,
-                                                           int groups_k) {
-  return (row / 128) * groups_k * 512 + (scale_col / 4) * 512 +
-         (row % 32) * 16 + ((row % 128) / 32) * 4 + (scale_col % 4);
-}
-
 __global__ void nvfp4_block_scale_interleave_kernel(
     const uint8_t* __restrict__ scale,
     uint8_t* __restrict__ swizzled,
@@ -1876,6 +1973,36 @@ void nvfp4_block_scale_interleave_cuda(torch::Tensor scale, torch::Tensor swizzl
       reinterpret_cast<const uint8_t*>(scale.data_ptr()),
       reinterpret_cast<uint8_t*>(swizzled.data_ptr()), batches, rows, scale_cols, groups_k,
       swizzled_bytes_per_batch);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+void swiglu_requant_from_bmm_cuda(torch::Tensor gemm1_out, torch::Tensor expert_counts,
+                                  torch::Tensor mid_packed, torch::Tensor mid_scale,
+                                  torch::Tensor mid_scale_swizzled, int64_t padded_rows,
+                                  int64_t intermediate_size) {
+  const int local_num_experts = static_cast<int>(expert_counts.size(0));
+  const int rows_per_expert = static_cast<int>(padded_rows);
+  const int I = static_cast<int>(intermediate_size);
+  const int scale_cols = I / 16;
+  const int groups_k = (scale_cols + 3) / 4;
+  const int swizzled_bytes_per_expert = static_cast<int>(mid_scale_swizzled.size(1));
+  const int64_t total_blocks =
+      static_cast<int64_t>(local_num_experts) * rows_per_expert * scale_cols;
+  if (total_blocks == 0) {
+    return;
+  }
+
+  constexpr int block = 256;
+  const int grid = static_cast<int>((total_blocks + block - 1) / block);
+  const auto stream = at::cuda::getCurrentCUDAStream();
+  C10_CUDA_CHECK(cudaMemsetAsync(mid_scale_swizzled.data_ptr(), 0,
+                                 mid_scale_swizzled.numel(), stream.stream()));
+  swiglu_requant_from_bmm_kernel<<<grid, block, 0, stream>>>(
+      reinterpret_cast<const __nv_bfloat16*>(gemm1_out.data_ptr<at::BFloat16>()),
+      expert_counts.data_ptr<int32_t>(), mid_packed.data_ptr<uint8_t>(),
+      reinterpret_cast<uint8_t*>(mid_scale.data_ptr()),
+      reinterpret_cast<uint8_t*>(mid_scale_swizzled.data_ptr()), local_num_experts,
+      rows_per_expert, I, scale_cols, groups_k, swizzled_bytes_per_expert);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 

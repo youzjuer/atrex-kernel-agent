@@ -200,6 +200,32 @@ def nvfp4_block_scale_interleave(scale: torch.Tensor) -> torch.Tensor:
 
 
 @torch.no_grad()
+def swiglu_requant_from_bmm(
+    gemm1_out: torch.Tensor,
+    expert_counts: torch.Tensor,
+    *,
+    padded_rows: int,
+    intermediate_size: int,
+) -> list[torch.Tensor]:
+    """Apply prepared-layout SwiGLU to GEMM1 BMM output and requantize to NVFP4."""
+    if gemm1_out.dtype != torch.bfloat16:
+        raise TypeError("gemm1_out must be torch.bfloat16")
+    if gemm1_out.ndim != 2:
+        raise ValueError("gemm1_out must have shape [E*padded_rows, 2I]")
+    if expert_counts.dtype != torch.int32 or expert_counts.ndim != 1:
+        raise TypeError("expert_counts must be torch.int32 [E]")
+    ext = _load_ext()
+    return list(
+        ext.swiglu_requant_from_bmm(
+            gemm1_out.contiguous(),
+            expert_counts.contiguous(),
+            int(padded_rows),
+            int(intermediate_size),
+        )
+    )
+
+
+@torch.no_grad()
 def pack_hidden_bmm_swizzled_from_metadata(
     topk_packed: torch.Tensor,
     expanded_idx_to_permuted_idx: torch.Tensor,

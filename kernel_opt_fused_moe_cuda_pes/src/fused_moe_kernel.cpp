@@ -41,6 +41,11 @@ void pack_hidden_bmm_from_metadata_cuda(
 
 void nvfp4_block_scale_interleave_cuda(torch::Tensor scale, torch::Tensor swizzled);
 
+void swiglu_requant_from_bmm_cuda(torch::Tensor gemm1_out, torch::Tensor expert_counts,
+                                  torch::Tensor mid_packed, torch::Tensor mid_scale,
+                                  torch::Tensor mid_scale_swizzled, int64_t padded_rows,
+                                  int64_t intermediate_size);
+
 void pack_hidden_bmm_swizzled_from_metadata_cuda(
     torch::Tensor topk_packed, torch::Tensor expanded_idx_to_permuted_idx,
     torch::Tensor expert_padded_offsets, torch::Tensor hidden_states,
@@ -342,6 +347,49 @@ torch::Tensor nvfp4_block_scale_interleave(torch::Tensor scale) {
   return swizzled;
 }
 
+std::vector<torch::Tensor> swiglu_requant_from_bmm(
+    torch::Tensor gemm1_out, torch::Tensor expert_counts, int64_t padded_rows,
+    int64_t intermediate_size) {
+  check_tensor(gemm1_out, "gemm1_out");
+  check_tensor(expert_counts, "expert_counts");
+  TORCH_CHECK(gemm1_out.scalar_type() == torch::kBFloat16,
+              "gemm1_out must be bf16 [E*padded_rows, 2I]");
+  TORCH_CHECK(expert_counts.scalar_type() == torch::kInt32,
+              "expert_counts must be int32 [E]");
+  TORCH_CHECK(gemm1_out.dim() == 2, "gemm1_out must have shape [E*padded_rows, 2I]");
+  TORCH_CHECK(expert_counts.dim() == 1, "expert_counts must have shape [E]");
+  TORCH_CHECK(gemm1_out.is_contiguous(), "gemm1_out must be contiguous");
+  TORCH_CHECK(expert_counts.is_contiguous(), "expert_counts must be contiguous");
+  TORCH_CHECK(padded_rows > 0, "padded_rows must be positive");
+  TORCH_CHECK(intermediate_size > 0, "intermediate_size must be positive");
+  TORCH_CHECK((intermediate_size % 16) == 0, "intermediate_size must be divisible by 16");
+  TORCH_CHECK(gemm1_out.size(1) == 2 * intermediate_size,
+              "gemm1_out second dim must be 2I");
+  TORCH_CHECK(gemm1_out.size(0) == expert_counts.size(0) * padded_rows,
+              "gemm1_out first dim must be E*padded_rows");
+
+  const int64_t local_num_experts = expert_counts.size(0);
+  const int64_t scale_cols = intermediate_size / 16;
+  const int64_t row_blocks = (padded_rows + 127) / 128;
+  const int64_t groups_k = (scale_cols + 3) / 4;
+  const int64_t swizzled_bytes = row_blocks * groups_k * 512;
+  TORCH_CHECK(swizzled_bytes <= std::numeric_limits<int32_t>::max(),
+              "swizzled scale bytes per expert exceed int32 range");
+
+  auto packed_options = gemm1_out.options().dtype(torch::kUInt8);
+  auto scale_options = gemm1_out.options().dtype(torch::kFloat8_e4m3fn);
+  auto mid_packed =
+      torch::empty({local_num_experts, padded_rows, intermediate_size / 2}, packed_options);
+  auto mid_scale =
+      torch::empty({local_num_experts, padded_rows, scale_cols}, scale_options);
+  auto mid_scale_swizzled =
+      torch::empty({local_num_experts, swizzled_bytes}, scale_options);
+
+  swiglu_requant_from_bmm_cuda(gemm1_out, expert_counts, mid_packed, mid_scale,
+                               mid_scale_swizzled, padded_rows, intermediate_size);
+  return {mid_packed, mid_scale, mid_scale_swizzled};
+}
+
 std::vector<torch::Tensor> pack_hidden_bmm_swizzled_from_metadata(
     torch::Tensor topk_packed, torch::Tensor expanded_idx_to_permuted_idx,
     torch::Tensor expert_padded_offsets, torch::Tensor hidden_states,
@@ -420,6 +468,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Pack G11 hidden FP4 rows into expert-major BMM layout using routing metadata");
   m.def("nvfp4_block_scale_interleave", &nvfp4_block_scale_interleave,
         "Interleave linear NVFP4 block scales into FlashInfer/SM100 BMM layout");
+  m.def("swiglu_requant_from_bmm", &swiglu_requant_from_bmm,
+        "Apply prepared-row-aware SwiGLU to GEMM1 BMM output and requantize to NVFP4");
   m.def("pack_hidden_bmm_swizzled_from_metadata", &pack_hidden_bmm_swizzled_from_metadata,
         "Pack G11 hidden FP4 rows and swizzled scales using routing metadata");
 }

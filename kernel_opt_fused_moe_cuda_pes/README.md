@@ -186,6 +186,7 @@ Routing/GEMM decomposition evidence:
 | G11 prepared gemm1 -> generic `mm_fp4(cutlass)` probe (`T=128`, one expert) | 105.248 us | finite sample but no correctness proof; still requires prepared-layout grouped GEMM |
 | G11 prepared gemm1 -> standalone `mm_fp4(trtllm)` probe (`T=8`, one expert) | 70.368 us | required local JIT include workaround and produced a non-finite sample; not a candidate path |
 | G11 full generated task08 Mpad=238 v310 GEMM1 BMM-only runtime smoke | 694.144 us | true packed NVFP4 activation plus FlashInfer prepared GEMM1 weights; valid-row sample finite; not a full MoE replacement |
+| G11 full task08 GEMM1 BMM output -> CUDA SwiGLU NVFP4 requant | 396.128 us | prepared-row-aware epilogue; packed/linear-scale/swizzled-scale sample byte mismatches all 0 |
 
 Prepared-layout GEMM1 row-order evidence: `probe_prepared_gemm1_order.py` forces G11
 `top_k=1` to one local expert and uses the real `flashinfer.trtllm_fp4_block_scale_moe` output as
@@ -206,6 +207,10 @@ the candidate path, the M dimension must become runtime-driven or be recompiled 
 `probe_task08_runtime_smoke.py` proves that variant runs on the full G11 packed-NVFP4 contract with
 `a_fp4=[121856,2048]`, `a_scale_swizzled_u8=[512,65536]`, prepared
 `w13_fp4=[512,2048,2048]`, and prepared `w13_scale_swizzled_u8=[512,524288]`.
+`swiglu_requant_from_bmm` then consumes the task08 bf16 GEMM1 output, restores logical SwiGLU row
+semantics, writes `mid_q=[512,238,512]`, `mid_scale=[512,238,64]`, and
+`mid_scale_swizzled=[512,16384]`, and zeros invalid padded rows according to `expert_counts`.
+The next missing piece is a GEMM2 BMM/final scatter path over this intermediate contract.
 
 `ncu` on G11 tokens=8 attributes the current CUDA time mostly to scalar stage1 (`407.136 us`) and
 warp stage2 (`189.344 us`). The tokens=128 scaling confirms that scalar FP4 FMA is not a viable

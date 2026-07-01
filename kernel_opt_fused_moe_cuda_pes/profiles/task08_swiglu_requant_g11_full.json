@@ -1,0 +1,51 @@
+{
+  "status": "PASS",
+  "operator": "task08 GEMM1 BMM + prepared-row-aware SwiGLU NVFP4 requant",
+  "preset": "g11",
+  "tokens": 9500,
+  "task08_root": "/home/youchunbo/code/sumu/omoExplore/proj/proj_019_moe_workload_op_opt/assets/task_08_cuda_fp4_bmm_sm103",
+  "work_root": "/tmp/task08_mpad238_jm_22k8d",
+  "compiled_symbol": "up_gate_fp4_sm103_umma_tma_u8_cta2_v310_cta_rank_specialized_tid0_consumer_from_v309",
+  "patch_counts": {
+    "comment_mpad": 1,
+    "flattened_rows_comment": 1,
+    "rows_const": 1,
+    "rows_per_expert_const": 1,
+    "fixed_mpad_static_assert": 1
+  },
+  "shape": {
+    "intermediate_size": 1024,
+    "padded_rows": 238,
+    "gemm1_out": [
+      121856,
+      2048
+    ],
+    "mid_q": [
+      512,
+      238,
+      512
+    ],
+    "mid_scale": [
+      512,
+      238,
+      64
+    ],
+    "mid_scale_swizzled": [
+      512,
+      16384
+    ]
+  },
+  "checks": {
+    "valid_rows_checked": 1024,
+    "invalid_rows_checked": 1024,
+    "packed_mismatches": 0,
+    "scale_mismatches": 0,
+    "swizzled_scale_mismatches": 0,
+    "invalid_q_nonzero": 0,
+    "invalid_scale_nonzero": 0
+  },
+  "latency_us": {
+    "swiglu_requant_from_bmm": 396.12799882888794
+  },
+  "next_step": "Feed mid_q and mid_scale_swizzled into a GEMM2 BMM/final scatter path."
+}
