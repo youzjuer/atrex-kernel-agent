@@ -1197,7 +1197,131 @@ __global__ void stage2_direct_topk_finalize_warp_kernel(
   }
 }
 
+__global__ void routing_topk_softmax_type1_bf16_kernel(
+    const __nv_bfloat16* __restrict__ routing_logits,
+    int64_t* __restrict__ topk_ids,
+    float* __restrict__ topk_weights,
+    int T,
+    int E,
+    int TOPK,
+    float scale) {
+  const int t = blockIdx.x * blockDim.x + threadIdx.x;
+  if (t >= T) {
+    return;
+  }
+
+  float best_vals[16];
+  int best_idx[16];
+#pragma unroll
+  for (int i = 0; i < 16; ++i) {
+    best_vals[i] = -3.402823466e+38F;
+    best_idx[i] = -1;
+  }
+
+  const __nv_bfloat16* row = routing_logits + static_cast<int64_t>(t) * E;
+  for (int e = 0; e < E; ++e) {
+    const float val = __bfloat162float(row[e]);
+    if (val <= best_vals[TOPK - 1]) {
+      continue;
+    }
+    int pos = TOPK - 1;
+    while (pos > 0 && val > best_vals[pos - 1]) {
+      best_vals[pos] = best_vals[pos - 1];
+      best_idx[pos] = best_idx[pos - 1];
+      --pos;
+    }
+    best_vals[pos] = val;
+    best_idx[pos] = e;
+  }
+
+  const float max_val = best_vals[0];
+  float denom = 0.0f;
+  for (int i = 0; i < TOPK; ++i) {
+    const float w = __expf(best_vals[i] - max_val);
+    best_vals[i] = w;
+    denom += w;
+  }
+  const float inv_denom = scale / denom;
+  for (int i = 0; i < TOPK; ++i) {
+    topk_ids[static_cast<int64_t>(t) * TOPK + i] = static_cast<int64_t>(best_idx[i]);
+    topk_weights[static_cast<int64_t>(t) * TOPK + i] = best_vals[i] * inv_denom;
+  }
+}
+
+__global__ void routing_topk_softmax_type1_f32_kernel(
+    const float* __restrict__ routing_logits,
+    int64_t* __restrict__ topk_ids,
+    float* __restrict__ topk_weights,
+    int T,
+    int E,
+    int TOPK,
+    float scale) {
+  const int t = blockIdx.x * blockDim.x + threadIdx.x;
+  if (t >= T) {
+    return;
+  }
+
+  float best_vals[16];
+  int best_idx[16];
+#pragma unroll
+  for (int i = 0; i < 16; ++i) {
+    best_vals[i] = -3.402823466e+38F;
+    best_idx[i] = -1;
+  }
+
+  const float* row = routing_logits + static_cast<int64_t>(t) * E;
+  for (int e = 0; e < E; ++e) {
+    const float val = row[e];
+    if (val <= best_vals[TOPK - 1]) {
+      continue;
+    }
+    int pos = TOPK - 1;
+    while (pos > 0 && val > best_vals[pos - 1]) {
+      best_vals[pos] = best_vals[pos - 1];
+      best_idx[pos] = best_idx[pos - 1];
+      --pos;
+    }
+    best_vals[pos] = val;
+    best_idx[pos] = e;
+  }
+
+  const float max_val = best_vals[0];
+  float denom = 0.0f;
+  for (int i = 0; i < TOPK; ++i) {
+    const float w = __expf(best_vals[i] - max_val);
+    best_vals[i] = w;
+    denom += w;
+  }
+  const float inv_denom = scale / denom;
+  for (int i = 0; i < TOPK; ++i) {
+    topk_ids[static_cast<int64_t>(t) * TOPK + i] = static_cast<int64_t>(best_idx[i]);
+    topk_weights[static_cast<int64_t>(t) * TOPK + i] = best_vals[i] * inv_denom;
+  }
+}
+
 }  // namespace
+
+void routing_topk_softmax_type1_cuda(torch::Tensor routing_logits, torch::Tensor topk_ids,
+                                     torch::Tensor topk_weights, int64_t top_k,
+                                     double routed_scaling_factor) {
+  const int T = static_cast<int>(routing_logits.size(0));
+  const int E = static_cast<int>(routing_logits.size(1));
+  const int TOPK = static_cast<int>(top_k);
+  const auto stream = at::cuda::getCurrentCUDAStream();
+  constexpr int block = 128;
+  const int grid = (T + block - 1) / block;
+  const float scale = static_cast<float>(routed_scaling_factor);
+  if (routing_logits.scalar_type() == torch::kBFloat16) {
+    routing_topk_softmax_type1_bf16_kernel<<<grid, block, 0, stream>>>(
+        reinterpret_cast<const __nv_bfloat16*>(routing_logits.data_ptr<at::BFloat16>()),
+        topk_ids.data_ptr<int64_t>(), topk_weights.data_ptr<float>(), T, E, TOPK, scale);
+  } else {
+    routing_topk_softmax_type1_f32_kernel<<<grid, block, 0, stream>>>(
+        routing_logits.data_ptr<float>(), topk_ids.data_ptr<int64_t>(),
+        topk_weights.data_ptr<float>(), T, E, TOPK, scale);
+  }
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
 
 void fused_moe_forward_cuda(torch::Tensor hidden_states, torch::Tensor hidden_states_scale,
                             torch::Tensor gemm1_weights, torch::Tensor gemm1_weights_scale,

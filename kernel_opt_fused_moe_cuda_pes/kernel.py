@@ -101,6 +101,33 @@ def _use_prepared_weight_layout(hidden_states: torch.Tensor) -> bool:
     return hidden_states.dtype == torch.uint8
 
 
+def _use_cuda_type1_routing(
+    routing_logits: torch.Tensor,
+    routing_bias: Optional[torch.Tensor],
+    n_group: Optional[int],
+    topk_group: Optional[int],
+    routed_scaling_factor: Optional[float],
+    routing_method_type: int,
+    top_k: int,
+) -> bool:
+    value = os.environ.get("FUSED_MOE_CUDA_ROUTING", "auto").strip().lower()
+    if value in {"0", "false", "no", "off", "torch"}:
+        return False
+    if routing_method_type != 1:
+        return False
+    if routing_bias is not None or n_group not in (None, 0) or topk_group not in (None, 0):
+        return False
+    if routing_logits.dtype not in (torch.bfloat16, torch.float32):
+        return False
+    if top_k <= 0 or top_k > 16:
+        return False
+    if routing_logits.shape[0] < 512 and value not in {"1", "true", "yes", "on", "cuda"}:
+        return False
+    if routed_scaling_factor not in (None, 1.0):
+        return value in {"1", "true", "yes", "on", "cuda"}
+    return True
+
+
 @torch.no_grad()
 def run(
     routing_logits: torch.Tensor,
@@ -159,17 +186,6 @@ def run(
     if local_num_experts != gemm1_weights.shape[0]:
         raise ValueError("local_num_experts must match gemm1_weights.shape[0]")
 
-    compute_routing = _routing()
-    topk_idx, topk_weights = compute_routing(
-        routing_logits,
-        routing_bias,
-        top_k=top_k,
-        n_group=n_group,
-        topk_group=topk_group,
-        routed_scaling_factor=routed_scaling_factor,
-        routing_method_type=routing_method_type,
-    )
-
     ext = _load_ext()
     empty_bias = _empty_optional_like(hidden_states, dtype=torch.float32)
     hidden_states_scale_arg = (
@@ -179,22 +195,60 @@ def run(
     )
     gemm1_bias_arg = empty_bias if gemm1_bias is None else _as_fp32_scale(gemm1_bias)
     gemm2_bias_arg = empty_bias if gemm2_bias is None else _as_fp32_scale(gemm2_bias)
-    out = ext.forward(
-        hidden_states.contiguous(),
-        hidden_states_scale_arg,
-        gemm1_weights.contiguous(),
-        _as_fp32_scale(gemm1_weights_scale),
-        gemm1_bias_arg,
-        gemm2_weights.contiguous(),
-        _as_fp32_scale(gemm2_weights_scale),
-        gemm2_bias_arg,
-        topk_idx.to(torch.int64).contiguous(),
-        topk_weights.to(torch.float32).contiguous(),
-        int(num_experts),
-        int(local_expert_offset),
-        int(intermediate_size),
-        bool(_use_prepared_weight_layout(hidden_states)),
-    )
+    use_prepared_layout = bool(_use_prepared_weight_layout(hidden_states))
+    if _use_cuda_type1_routing(
+        routing_logits,
+        routing_bias,
+        n_group,
+        topk_group,
+        routed_scaling_factor,
+        routing_method_type,
+        top_k,
+    ):
+        out = ext.forward_logits_type1(
+            routing_logits.contiguous(),
+            hidden_states.contiguous(),
+            hidden_states_scale_arg,
+            gemm1_weights.contiguous(),
+            _as_fp32_scale(gemm1_weights_scale),
+            gemm1_bias_arg,
+            gemm2_weights.contiguous(),
+            _as_fp32_scale(gemm2_weights_scale),
+            gemm2_bias_arg,
+            int(num_experts),
+            int(top_k),
+            int(local_expert_offset),
+            int(intermediate_size),
+            1.0 if routed_scaling_factor is None else float(routed_scaling_factor),
+            use_prepared_layout,
+        )
+    else:
+        compute_routing = _routing()
+        topk_idx, topk_weights = compute_routing(
+            routing_logits,
+            routing_bias,
+            top_k=top_k,
+            n_group=n_group,
+            topk_group=topk_group,
+            routed_scaling_factor=routed_scaling_factor,
+            routing_method_type=routing_method_type,
+        )
+        out = ext.forward(
+            hidden_states.contiguous(),
+            hidden_states_scale_arg,
+            gemm1_weights.contiguous(),
+            _as_fp32_scale(gemm1_weights_scale),
+            gemm1_bias_arg,
+            gemm2_weights.contiguous(),
+            _as_fp32_scale(gemm2_weights_scale),
+            gemm2_bias_arg,
+            topk_idx.to(torch.int64).contiguous(),
+            topk_weights.to(torch.float32).contiguous(),
+            int(num_experts),
+            int(local_expert_offset),
+            int(intermediate_size),
+            use_prepared_layout,
+        )
     if output is not None:
         output.copy_(out)
         out = output
