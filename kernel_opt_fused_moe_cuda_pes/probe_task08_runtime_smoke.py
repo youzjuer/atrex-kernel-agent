@@ -101,6 +101,8 @@ def _make_case(args: argparse.Namespace) -> dict:
     hidden_states_scale = inputs[3]
     gemm1_weights = inputs[4]
     gemm1_weights_scale = inputs[5]
+    gemm2_weights = inputs[10]
+    gemm2_weights_scale = inputs[11]
     num_experts = int(inputs[16])
     top_k = int(inputs[17])
     local_expert_offset = int(inputs[21])
@@ -164,6 +166,10 @@ def _make_case(args: argparse.Namespace) -> dict:
         "a_scale_swizzled_u8": a_scale_swizzled_u8.contiguous(),
         "w13_fp4": gemm1_weights.contiguous(),
         "w13_scale_swizzled_u8": w13_scale_swizzled_u8.contiguous(),
+        "w2_fp4": gemm2_weights.contiguous(),
+        "w2_scale_swizzled_u8": _as_u8(gemm2_weights_scale).reshape(
+            local_num_experts, -1
+        ).contiguous(),
         "expert_offsets": affine_offsets,
         "num_experts": num_experts,
         "local_num_experts": local_num_experts,
