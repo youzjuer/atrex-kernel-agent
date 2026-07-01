@@ -1,0 +1,72 @@
+{
+  "version": "v9_progress_save",
+  "masked": false,
+  "timestamp": "2026-07-01T17:41:47Z",
+  "operator": "flashinfer.trtllm_fp4_block_scale_moe",
+  "application_profile": "Qwen3_5-Plus_prefill_TP1_G11",
+  "input_contract": "packed_nvfp4_activation_flashinfer_prepared_weights",
+  "saved_context": {
+    "branch": "dev_ycb",
+    "head_before_save": "86fc1fa Probe standalone TRTLLM FP4 GEMM",
+    "user_goal": "Implement an in-repo CUDA kernel that is functionally aligned with flashinfer.trtllm_fp4_block_scale_moe and faster than that FlashInfer baseline on the real TP=1 G11 workload.",
+    "baseline": "Real flashinfer.trtllm_fp4_block_scale_moe, not the PyTorch reference.",
+    "candidate_rule": "The candidate must not call flashinfer.trtllm_fp4_block_scale_moe as its implementation."
+  },
+  "g11_tp1_contract": {
+    "source": "proj_019_moe_workload_op_opt/assets/workload_shape_catalog.py",
+    "tokens": 9500,
+    "hidden_size": 4096,
+    "intermediate_size": 1024,
+    "num_experts": 512,
+    "top_k": 10,
+    "local_num_experts": 512,
+    "hidden_states": "uint8 [T, 2048], packed NVFP4",
+    "hidden_states_scale": "fp8 [T, 256]",
+    "gemm1_weights": "[512, 2048, 2048], FlashInfer/TensorRT-LLM prepared layout",
+    "gemm1_weights_scale": "[512, 2048, 256]",
+    "gemm2_weights": "[512, 4096, 512], FlashInfer/TensorRT-LLM prepared layout",
+    "gemm2_weights_scale": "[512, 4096, 64]"
+  },
+  "current_evidence": {
+    "candidate_status": "correct_but_far_slower",
+    "full_g11_profile": {
+      "correctness": "PASS",
+      "candidate_us": 680466.064,
+      "flashinfer_us": 1636.416,
+      "speedup_vs_flashinfer": 0.0024
+    },
+    "g11_tokens_8_after_cuda_routing_pack": {
+      "correctness": "PASS",
+      "candidate_us": 741.984,
+      "flashinfer_us": 425.856,
+      "speedup_vs_flashinfer": 0.574
+    },
+    "routing_decomposition": {
+      "cuda_routing_pack_type1_full_g11_us": 246.944,
+      "flashinfer_routed_backend_with_cuda_packed_routing_us": 1576.544,
+      "cuda_pack_plus_flashinfer_routed_backend_us": 1370.496,
+      "flashinfer_same_probe_us": 1435.392,
+      "conclusion": "Routing pack is not the main remaining gap; the candidate needs tensor-core grouped GEMM and finalize/scatter alignment."
+    }
+  },
+  "negative_probe_evidence": {
+    "generic_cutlass_mm_fp4": "Works for ordinary dense NVFP4 GEMM on SM103, but directly feeding real G11 prepared gemm1 tensors produced non-finite output.",
+    "standalone_trtllm_mm_fp4": "Callable after a local FlashInfer JIT include workaround, but returned non-finite output on real G11 prepared stage1 tensors.",
+    "conclusion": "Generic dense mm_fp4 APIs are not drop-in replacements for the fused MoE prepared layout path."
+  },
+  "flashinfer_source_map": {
+    "launcher": "/usr/local/lib/python3.12/dist-packages/flashinfer/data/csrc/trtllm_fused_moe_kernel_launcher.cu",
+    "runner": "/usr/local/lib/python3.12/dist-packages/flashinfer/data/csrc/trtllm_fused_moe_runner.cu",
+    "routing_custom": "/usr/local/lib/python3.12/dist-packages/flashinfer/data/csrc/fused_moe/trtllm_backend/trtllm_fused_moe_routing_custom.cu",
+    "routing_header": "/usr/local/lib/python3.12/dist-packages/flashinfer/data/include/flashinfer/trtllm/fused_moe/RoutingKernel.h",
+    "key_contract": "Build expanded_idx_to_permuted_idx, permuted_idx_to_token_idx, cta_idx_xy_to_batch_idx, cta_idx_xy_to_mn_limit, num_non_exiting_ctas, and total_num_padded_tokens for TensorRT-LLM MoE grouped GEMMs."
+  },
+  "next_step": {
+    "action_category": "moe_specific_routing_metadata_and_grouped_gemm",
+    "description": "Add a CUDA extension entry point that converts topk_packed int32 [T, top_k] into the TensorRT-LLM fused MoE routing metadata, validate it against a Python reproduction of FlashInfer routing rules, then use that metadata to pursue a tensor-core grouped GEMM implementation instead of the current scalar/software FP4 FMA path.",
+    "suggested_binding": "routing_metadata_from_packed(topk_packed, num_experts, local_expert_offset, local_num_experts, tile_tokens_dim)",
+    "g11_tile_tokens_dim": 256,
+    "small_t8_tile_tokens_dim": 8
+  },
+  "git_commit_hash": "pending"
+}
