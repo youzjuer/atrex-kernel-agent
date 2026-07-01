@@ -1,0 +1,83 @@
+{
+  "status": "PASS",
+  "operator": "generated task08 SM103 FP4 GEMM2 BMM runtime probe",
+  "preset": "g11",
+  "tokens": 9500,
+  "task08_root": "/home/youchunbo/code/sumu/omoExplore/proj/proj_019_moe_workload_op_opt/assets/task_08_cuda_fp4_bmm_sm103",
+  "work_roots": {
+    "gemm1": "/tmp/atrex_task08_gemm1_mpad238_src",
+    "gemm2": "/tmp/atrex_task08_gemm2_mpad238_src"
+  },
+  "compiled_symbol": {
+    "gemm1": "up_gate_fp4_sm103_umma_tma_u8_cta2_v310_cta_rank_specialized_tid0_consumer_from_v309",
+    "gemm2": "atrex_gemm2_tilegrid_quadcolepi_t512"
+  },
+  "patch_counts": {
+    "gemm1": {
+      "comment_mpad": 1,
+      "flattened_rows_comment": 1,
+      "rows_const": 1,
+      "rows_per_expert_const": 1,
+      "fixed_mpad_static_assert": 1
+    },
+    "gemm2": {
+      "comment_shape": 1,
+      "flattened_rows_comment": 1,
+      "rows_const": 1,
+      "rows_per_expert_const": 1,
+      "kbytes_const": 1,
+      "kscale_const": 1,
+      "output_cols_const": 1,
+      "fixed_mpad_static_assert": 1,
+      "atrex_tilegrid_splitcol_wrapper": 1,
+      "atrex_tilegrid_splitcol_bind": 1
+    }
+  },
+  "shape": {
+    "padded_rows": 238,
+    "mid_q_flat": [
+      121856,
+      512
+    ],
+    "mid_scale_swizzled": [
+      512,
+      16384
+    ],
+    "w2_fp4": [
+      512,
+      4096,
+      512
+    ],
+    "w2_scale_swizzled_u8": [
+      512,
+      262144
+    ],
+    "gemm2_out": [
+      121856,
+      4096
+    ]
+  },
+  "checks": {
+    "out_shape": "PASS",
+    "finite_sample": "PASS",
+    "sample_compare": {
+      "finite": true,
+      "rows": 16,
+      "cols": 32,
+      "max_abs": 0.0,
+      "mean_abs": 0.0,
+      "max_rel": 0.0,
+      "mean_rel": 0.0
+    },
+    "sample_compare_skipped": false,
+    "thresholds": {
+      "max_abs": 0.75,
+      "max_rel": 8.0
+    }
+  },
+  "latency_us": {
+    "task08_generated_gemm2_bmm_only": NaN
+  },
+  "elapsed_s": 149.53745517507195,
+  "next_step": "Add final top-k weighted scatter/reorder from physical GEMM2 columns to token-major output."
+}

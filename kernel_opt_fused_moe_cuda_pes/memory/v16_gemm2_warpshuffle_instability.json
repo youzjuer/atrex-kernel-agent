@@ -1,0 +1,93 @@
+{
+  "version": "v16_gemm2_warpshuffle_instability",
+  "date_utc": "2026-07-02",
+  "head_at_save": "f755b3b Record metadata pack experiments",
+  "goal": "Improve TP=1 G11 packed-NVFP4 GEMM2 BMM inside the task08 FlashInfer-aligned MoE pipeline.",
+  "baseline_kept": {
+    "source_state": "reverted to committed best source",
+    "default_gemm2_symbol": "atrex_gemm2_tilegrid_splitcolepi_postsync",
+    "best_committed_profile": "kernel_opt_fused_moe_cuda_pes/profiles/task08_end_to_end_g11_bench_scatter_oct_metadata_swiglu.json",
+    "best_committed_candidate_total_us": 2832.0000171661377,
+    "best_committed_gemm2_us": 984.4480156898499,
+    "best_committed_flashinfer_us": 1403.007984161377
+  },
+  "experiments": [
+    {
+      "name": "tile-grid quad-column direct epilogue, 512 threads",
+      "symbol": "atrex_gemm2_tilegrid_quadcolepi_t512",
+      "profiles": {
+        "sample_compare": "kernel_opt_fused_moe_cuda_pes/profiles/task08_gemm2_compare_atrex_tilegrid_quadcol_t512.json",
+        "standalone_bench": "kernel_opt_fused_moe_cuda_pes/profiles/task08_gemm2_bench_atrex_tilegrid_quadcol_t512.json"
+      },
+      "result": "rejected",
+      "evidence": {
+        "sample_compare": "PASS",
+        "standalone_gemm2_us": 1008.3199739456177,
+        "reason": "Slower than the existing split-column GEMM2 path (~984us)."
+      }
+    },
+    {
+      "name": "tile-grid split-column warp-shuffle streaming epilogue, no post-load sync",
+      "symbol": "atrex_gemm2_tilegrid_splitcolepi_warpshuffle",
+      "profiles": {
+        "sample_compare": "kernel_opt_fused_moe_cuda_pes/profiles/task08_gemm2_compare_atrex_tilegrid_splitcol_warpshuffle.json",
+        "standalone_bench": "kernel_opt_fused_moe_cuda_pes/profiles/task08_gemm2_bench_atrex_tilegrid_splitcol_warpshuffle.json",
+        "end_to_end_correctness": "kernel_opt_fused_moe_cuda_pes/profiles/task08_end_to_end_g11_correctness_gemm2_warpshuffle.json"
+      },
+      "result": "rejected",
+      "evidence": {
+        "sample_compare": "PASS",
+        "standalone_gemm2_us": 915.2960181236267,
+        "end_to_end_correctness": "FAIL",
+        "max_abs_vs_flashinfer": 48.1962890625,
+        "gemm2_valid_row_max_abs": 482.0,
+        "reason": "Standalone samples missed sparse corrupt outputs in full end-to-end validation."
+      }
+    },
+    {
+      "name": "tile-grid split-column warp-shuffle streaming epilogue with post-load sync",
+      "symbol": "atrex_gemm2_tilegrid_splitcolepi_warpshuffle_postldsync",
+      "profiles": {
+        "initial_correctness_pass": "kernel_opt_fused_moe_cuda_pes/profiles/task08_end_to_end_g11_correctness_gemm2_warpshuffle_postldsync.json",
+        "short_bench": "kernel_opt_fused_moe_cuda_pes/profiles/task08_end_to_end_g11_bench_gemm2_warpshuffle_postldsync.json",
+        "rerun_correctness_fail": "kernel_opt_fused_moe_cuda_pes/profiles/task08_end_to_end_g11_correctness_gemm2_warpshuffle_postldsync_default.json"
+      },
+      "result": "rejected",
+      "evidence": {
+        "initial_correctness": "PASS",
+        "short_bench_candidate_total_us": 2741.9838905334473,
+        "short_bench_gemm2_us": 913.7600064277649,
+        "short_bench_flashinfer_us": 1388.416051864624,
+        "rerun_correctness": "FAIL",
+        "rerun_max_abs_vs_flashinfer": 471.8115234375,
+        "rerun_gemm2_valid_row_max_abs": 4672.0,
+        "reason": "The speedup is not usable because correctness is intermittent."
+      }
+    },
+    {
+      "name": "tile-grid split-column warp-shuffle non-streaming epilogue with post-load and post-epilogue sync",
+      "symbol": "atrex_gemm2_tilegrid_splitcolepi_warpshuffle_sync_postldsync",
+      "profiles": {
+        "end_to_end_correctness": "kernel_opt_fused_moe_cuda_pes/profiles/task08_end_to_end_g11_correctness_gemm2_warpshuffle_sync_postldsync_rerun1.json"
+      },
+      "result": "rejected",
+      "evidence": {
+        "end_to_end_correctness": "FAIL",
+        "max_abs_vs_flashinfer": 575.8564453125,
+        "gemm2_valid_row_max_abs": 5792.0,
+        "reason": "Extra synchronization and non-stream stores did not remove sparse corruption."
+      }
+    }
+  ],
+  "conclusion": {
+    "code_change_kept": false,
+    "do_not_repeat": [
+      "Do not switch default GEMM2 to the warp-shuffle variants without a full-output correctness fix and repeated end-to-end reruns.",
+      "Do not rely on GEMM2 sample_compare for these epilogue variants; it can pass while full output is corrupted."
+    ],
+    "next_steps": [
+      "If revisiting warp-shuffle GEMM2, compare full gemm2_out against the stable split-column postsync output and localize corrupted rows/columns.",
+      "Otherwise move to a different high-leverage area such as variable-row GEMM padding elimination or fusing preprocessing stages."
+    ]
+  }
+}
