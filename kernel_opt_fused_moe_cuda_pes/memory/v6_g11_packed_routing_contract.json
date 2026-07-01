@@ -46,5 +46,5 @@
     "action_category": "blackwell_fp4_grouped_gemm",
     "description": "Use routing_pack_type1 metadata to drive a custom SM103 NVFP4 grouped GEMM stage that consumes FlashInfer prepared weights/scales and replaces the scalar stage1/stage2 kernels."
   },
-  "git_commit_hash": "pending"
+  "git_commit_hash": "8cb1cb5"
 }

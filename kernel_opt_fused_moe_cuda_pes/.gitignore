@@ -3,6 +3,7 @@ __pycache__/
 .torch_extensions/
 *.so
 *.o
+logs/
 profiles/*/ncu/
 profiles/*/*.ncu-rep
 moe_run/

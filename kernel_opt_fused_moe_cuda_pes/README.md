@@ -181,6 +181,9 @@ Routing/GEMM decomposition evidence:
 | G11 full FlashInfer routed backend with CUDA-packed routing | 1576.544 us | FlashInfer backend only, not a candidate |
 | G11 full CUDA pack + FlashInfer routed backend | 1370.496 us | contract/decomposition probe, output exactly matched FlashInfer |
 | G11 full FlashInfer `trtllm_fp4_block_scale_moe` in same probe | 1435.392 us | same inputs, noisy short run |
+| SM103 dense 128x4 NVFP4 `mm_fp4(cutlass)` probe (`M=8,N=2048,K=4096`) | 96.704 us | lower-level dense GEMM building block, not a MoE candidate |
+| G11 prepared gemm1 -> generic `mm_fp4(cutlass)` probe (`T=8`, one expert) | 98.080 us | produced a NaN sample; prepared TRT-LLM layout is not a direct generic CUTLASS drop-in |
+| G11 prepared gemm1 -> generic `mm_fp4(cutlass)` probe (`T=128`, one expert) | 105.248 us | finite sample but no correctness proof; still requires prepared-layout grouped GEMM |
 
 `ncu` on G11 tokens=8 attributes the current CUDA time mostly to scalar stage1 (`407.136 us`) and
 warp stage2 (`189.344 us`). The tokens=128 scaling confirms that scalar FP4 FMA is not a viable
@@ -188,4 +191,9 @@ path to the tp=1 G11 target. The next implementation step must replace stage1/st
 Blackwell FP4 tensor-core grouped GEMM, matching FlashInfer/TensorRT-LLM's routing + shuffled-weight
 block-scale structure. The full G11 profile confirms the same conclusion on the actual target
 shape: the implementation is functionally aligned with FlashInfer but misses the performance
-objective by roughly 416x.
+objective by roughly 416x. The SM103 `mm_fp4(cutlass)` probe narrows the next step further:
+ordinary 128x4 dense FP4 GEMM is callable, but the real `prepare_static_weights_for_trtllm_fp4_moe`
+layout cannot be treated as an ordinary CUTLASS weight/scale layout. The custom path must therefore
+consume the TRT-LLM prepared row/scale layout explicitly or use a TRT-LLM-compatible grouped GEMM
+interface, then fuse the routing permutation, SwiGLU intermediate FP4 quantization, and stage2
+finalize/scatter.

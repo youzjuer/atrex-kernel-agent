@@ -1,0 +1,51 @@
+{
+  "version": "v7_sm103_cutlass_fp4_probe",
+  "masked": false,
+  "timestamp": "2026-07-02T01:27:00Z",
+  "operator": "flashinfer.trtllm_fp4_block_scale_moe",
+  "application_profile": "Qwen3_5-Plus_prefill_TP1_G11",
+  "input_contract": "packed_nvfp4_flashinfer",
+  "optimization": {
+    "action_category": "sm103_fp4_gemm_layout_probe",
+    "action_description": "Add probe_fp4_gemm_layout.py to test SM103 FlashInfer CUTLASS mm_fp4 as a building block and to check whether real G11 FlashInfer/TRT-LLM prepared weights can be consumed directly by the generic CUTLASS FP4 GEMM API.",
+    "expected_impact": "Constrain the next custom grouped-GEMM implementation: generic 128x4 CUTLASS FP4 GEMM is available on SM103, but the true prepared-weight layout needs a TRT-LLM-compatible prepared-layout path rather than a direct call to ordinary CUTLASS mm_fp4.",
+    "risks_and_rollback": "The probe imports FlashInfer lower-level GEMM APIs only for evidence; it is not used by kernel.py and does not change candidate behavior."
+  },
+  "profile_evidence": {
+    "tool_used": "torch.cuda.Event + flashinfer.mm_fp4(cutlass) probe",
+    "commands": [
+      "CUDA_VISIBLE_DEVICES=6 PROJ019_ROOT=/home/youchunbo/code/sumu/omoExplore/proj/proj_019_moe_workload_op_opt python probe_fp4_gemm_layout.py --mode both --tokens 8 --warmup 3 --rep 5 --json-out profiles/fp4_gemm_layout_probe_t8.json",
+      "CUDA_VISIBLE_DEVICES=6 PROJ019_ROOT=/home/youchunbo/code/sumu/omoExplore/proj/proj_019_moe_workload_op_opt python probe_fp4_gemm_layout.py --mode prepared --tokens 128 --warmup 3 --rep 5 --json-out profiles/fp4_gemm_layout_probe_t128_prepared.json"
+    ],
+    "profile_jsons": [
+      "profiles/fp4_gemm_layout_probe_t8.json",
+      "profiles/fp4_gemm_layout_probe_t128_prepared.json"
+    ],
+    "evidence_summary": "On NVIDIA L20D/SM103, dense 128x4 NVFP4 mm_fp4(cutlass) runs for M=8,N=2048,K=4096 at 96.704 us. Directly feeding true G11 prepared gemm1 weights to generic cutlass mm_fp4 produced a non-finite stage1 sample at tokens=8; tokens=128 produced finite samples but still has no correctness proof. Prepared stage probes were around 93-105 us per single-expert dense GEMM.",
+    "bottleneck_type": "layout_and_grouped_gemm_missing",
+    "evidence_chain": "FlashInfer mm_fp4(cutlass) confirms SM103 FP4 Tensor Core dense GEMM is callable, but true G11 weights/scales from prepare_static_weights_for_trtllm_fp4_moe are TRT-LLM prepared/shuffled. The generic cutlass entry expects its documented 128x4 layout and is not a drop-in replacement for the prepared MoE layout. Therefore the next candidate must implement or wrap a prepared-layout grouped GEMM/finalize path, not just substitute ordinary dense CUTLASS GEMMs into the scalar MoE."
+  },
+  "correctness": {
+    "status": "EVIDENCE_ONLY",
+    "details": "probe_fp4_gemm_layout.py passed Python syntax checks. Dense CUTLASS sanity produced finite output; prepared-layout probes were not correctness gates and one tokens=8 stage1 sample was NaN."
+  },
+  "performance": {
+    "dense_cutlass_t8_m8_n2048_k4096_us": 96.70399874448776,
+    "prepared_stage1_t8_single_expert_us": 98.08000177145004,
+    "prepared_stage2_t8_single_expert_us": 93.02400052547455,
+    "prepared_stage1_t128_single_expert_us": 105.24799674749374,
+    "prepared_stage2_t128_single_expert_us": 94.01600062847137,
+    "candidate_latency_us": null,
+    "flashinfer_latency_us": null,
+    "speedup_vs_flashinfer": null
+  },
+  "quality_gate": {
+    "result": "PARTIAL_PASS",
+    "failure_reason": "This iteration records a necessary layout finding and a reproducible probe, but it does not yet replace the scalar candidate stages or meet the objective of beating flashinfer.trtllm_fp4_block_scale_moe."
+  },
+  "next_step": {
+    "action_category": "prepared_layout_grouped_gemm",
+    "description": "Build a custom prepared-layout grouped GEMM path that uses routing_pack_type1 metadata, preserves FlashInfer/TensorRT-LLM row/scale shuffles, quantizes the SwiGLU intermediate, and fuses stage2 finalize/scatter."
+  },
+  "git_commit_hash": "pending"
+}

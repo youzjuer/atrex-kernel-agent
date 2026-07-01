@@ -1,0 +1,57 @@
+{
+  "capability": [
+    10,
+    3
+  ],
+  "device": "NVIDIA L20D",
+  "results": [
+    {
+      "backend": "flashinfer.mm_fp4(cutlass)",
+      "errors": {
+        "max_abs": 0.3360723853111267,
+        "max_rel": 392.54266357421875
+      },
+      "latency_us": 96.70399874448776,
+      "name": "dense_cutlass_128x4_sanity",
+      "notes": [
+        "Uses nvfp4_quantize with 128x4 scale layout and do_shuffle=False, the layout documented for cutlass mm_fp4.",
+        "Quantization error is expected; this check is mainly an interface and finite-output sanity test."
+      ],
+      "output_sample": 0.59765625,
+      "reference": "bf16 matmul against the original unquantized tensors",
+      "shape": {
+        "k": 4096,
+        "m": 8,
+        "n": 2048
+      }
+    },
+    {
+      "backend": "flashinfer.mm_fp4(cutlass)",
+      "expert": 0,
+      "name": "g11_prepared_weight_cutlass_probe",
+      "notes": [
+        "The real G11 tensors use FlashInfer/TRT-LLM prepared weights from prepare_static_weights_for_trtllm_fp4_moe.",
+        "This probe intentionally tests whether the prepared layout can be consumed by cutlass mm_fp4 directly.",
+        "A finite latency is not a correctness proof; the final custom kernel still needs a prepared-layout grouped GEMM/finalize implementation."
+      ],
+      "stage1": {
+        "error": "non-finite sample nan",
+        "k": 4096,
+        "latency_us": 98.08000177145004,
+        "m": 8,
+        "n": 2048,
+        "sample": null
+      },
+      "stage2": {
+        "error": null,
+        "k": 1024,
+        "latency_us": 93.02400052547455,
+        "m": 8,
+        "n": 4096,
+        "sample": -1752.0
+      },
+      "tokens": 8
+    }
+  ],
+  "script": "probe_fp4_gemm_layout.py"
+}

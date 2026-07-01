@@ -1,0 +1,37 @@
+{
+  "capability": [
+    10,
+    3
+  ],
+  "device": "NVIDIA L20D",
+  "results": [
+    {
+      "backend": "flashinfer.mm_fp4(cutlass)",
+      "expert": 0,
+      "name": "g11_prepared_weight_cutlass_probe",
+      "notes": [
+        "The real G11 tensors use FlashInfer/TRT-LLM prepared weights from prepare_static_weights_for_trtllm_fp4_moe.",
+        "This probe intentionally tests whether the prepared layout can be consumed by cutlass mm_fp4 directly.",
+        "A finite latency is not a correctness proof; the final custom kernel still needs a prepared-layout grouped GEMM/finalize implementation."
+      ],
+      "stage1": {
+        "error": null,
+        "k": 4096,
+        "latency_us": 105.24799674749374,
+        "m": 128,
+        "n": 2048,
+        "sample": -0.8203125
+      },
+      "stage2": {
+        "error": null,
+        "k": 1024,
+        "latency_us": 94.01600062847137,
+        "m": 128,
+        "n": 4096,
+        "sample": 0.047119140625
+      },
+      "tokens": 128
+    }
+  ],
+  "script": "probe_fp4_gemm_layout.py"
+}
