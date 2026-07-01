@@ -1668,7 +1668,7 @@ __global__ void final_scatter_from_bmm_kernel(
     int padded_rows,
     bool use_prepared_output_layout) {
   const int token = blockIdx.x;
-  const int src_h0 = (blockIdx.y * blockDim.x + threadIdx.x) * 4;
+  const int src_h0 = (blockIdx.y * blockDim.x + threadIdx.x) * 8;
   if (token >= T) {
     return;
   }
@@ -1704,15 +1704,27 @@ __global__ void final_scatter_from_bmm_kernel(
   const int src_h1 = src_h0 + 1;
   const int src_h2 = src_h0 + 2;
   const int src_h3 = src_h0 + 3;
+  const int src_h4 = src_h0 + 4;
+  const int src_h5 = src_h0 + 5;
+  const int src_h6 = src_h0 + 6;
+  const int src_h7 = src_h0 + 7;
   const int dst_h0 = inverse_prepared_gemm2_row(src_h0, use_prepared_output_layout);
   const int dst_h1 = inverse_prepared_gemm2_row(src_h1, use_prepared_output_layout);
   const int dst_h2 = inverse_prepared_gemm2_row(src_h2, use_prepared_output_layout);
   const int dst_h3 = inverse_prepared_gemm2_row(src_h3, use_prepared_output_layout);
-  const bool full_quad = src_h3 < H;
+  const int dst_h4 = inverse_prepared_gemm2_row(src_h4, use_prepared_output_layout);
+  const int dst_h5 = inverse_prepared_gemm2_row(src_h5, use_prepared_output_layout);
+  const int dst_h6 = inverse_prepared_gemm2_row(src_h6, use_prepared_output_layout);
+  const int dst_h7 = inverse_prepared_gemm2_row(src_h7, use_prepared_output_layout);
+  const bool full_oct = src_h7 < H;
   float acc0 = 0.0f;
   float acc1 = 0.0f;
   float acc2 = 0.0f;
   float acc3 = 0.0f;
+  float acc4 = 0.0f;
+  float acc5 = 0.0f;
+  float acc6 = 0.0f;
+  float acc7 = 0.0f;
 
 #pragma unroll
   for (int k = 0; k < 16; ++k) {
@@ -1724,35 +1736,68 @@ __global__ void final_scatter_from_bmm_kernel(
       continue;
     }
     const int64_t offset = static_cast<int64_t>(row) * H + src_h0;
-    uint64_t packed = 0;
-    if (full_quad) {
-      packed = *reinterpret_cast<const uint64_t*>(gemm2_out + offset);
+    uint64_t packed_lo = 0;
+    uint64_t packed_hi = 0;
+    if (full_oct) {
+      packed_lo = *reinterpret_cast<const uint64_t*>(gemm2_out + offset);
+      packed_hi = *reinterpret_cast<const uint64_t*>(gemm2_out + offset + 4);
     } else {
-      packed = static_cast<uint64_t>(
+      packed_lo = static_cast<uint64_t>(
           *reinterpret_cast<const uint16_t*>(gemm2_out + offset));
       if (src_h1 < H) {
-        packed |= static_cast<uint64_t>(
-                      *reinterpret_cast<const uint16_t*>(gemm2_out + offset + 1))
-                  << 16;
+        packed_lo |= static_cast<uint64_t>(
+                         *reinterpret_cast<const uint16_t*>(gemm2_out + offset + 1))
+                     << 16;
       }
       if (src_h2 < H) {
-        packed |= static_cast<uint64_t>(
-                      *reinterpret_cast<const uint16_t*>(gemm2_out + offset + 2))
-                  << 32;
+        packed_lo |= static_cast<uint64_t>(
+                         *reinterpret_cast<const uint16_t*>(gemm2_out + offset + 2))
+                     << 32;
+      }
+      if (src_h3 < H) {
+        packed_lo |= static_cast<uint64_t>(
+                         *reinterpret_cast<const uint16_t*>(gemm2_out + offset + 3))
+                     << 48;
+      }
+      if (src_h4 < H) {
+        packed_hi = static_cast<uint64_t>(
+            *reinterpret_cast<const uint16_t*>(gemm2_out + offset + 4));
+      }
+      if (src_h5 < H) {
+        packed_hi |= static_cast<uint64_t>(
+                         *reinterpret_cast<const uint16_t*>(gemm2_out + offset + 5))
+                     << 16;
+      }
+      if (src_h6 < H) {
+        packed_hi |= static_cast<uint64_t>(
+                         *reinterpret_cast<const uint16_t*>(gemm2_out + offset + 6))
+                     << 32;
       }
     }
     const float value0 = __bfloat162float(
-        __ushort_as_bfloat16(static_cast<uint16_t>(packed & 0xFFFFull)));
+        __ushort_as_bfloat16(static_cast<uint16_t>(packed_lo & 0xFFFFull)));
     const float value1 = __bfloat162float(
-        __ushort_as_bfloat16(static_cast<uint16_t>((packed >> 16) & 0xFFFFull)));
+        __ushort_as_bfloat16(static_cast<uint16_t>((packed_lo >> 16) & 0xFFFFull)));
     const float value2 = __bfloat162float(
-        __ushort_as_bfloat16(static_cast<uint16_t>((packed >> 32) & 0xFFFFull)));
+        __ushort_as_bfloat16(static_cast<uint16_t>((packed_lo >> 32) & 0xFFFFull)));
     const float value3 = __bfloat162float(
-        __ushort_as_bfloat16(static_cast<uint16_t>((packed >> 48) & 0xFFFFull)));
+        __ushort_as_bfloat16(static_cast<uint16_t>((packed_lo >> 48) & 0xFFFFull)));
+    const float value4 = __bfloat162float(
+        __ushort_as_bfloat16(static_cast<uint16_t>(packed_hi & 0xFFFFull)));
+    const float value5 = __bfloat162float(
+        __ushort_as_bfloat16(static_cast<uint16_t>((packed_hi >> 16) & 0xFFFFull)));
+    const float value6 = __bfloat162float(
+        __ushort_as_bfloat16(static_cast<uint16_t>((packed_hi >> 32) & 0xFFFFull)));
+    const float value7 = __bfloat162float(
+        __ushort_as_bfloat16(static_cast<uint16_t>((packed_hi >> 48) & 0xFFFFull)));
     acc0 = fmaf(weights[k], value0, acc0);
     acc1 = fmaf(weights[k], value1, acc1);
     acc2 = fmaf(weights[k], value2, acc2);
     acc3 = fmaf(weights[k], value3, acc3);
+    acc4 = fmaf(weights[k], value4, acc4);
+    acc5 = fmaf(weights[k], value5, acc5);
+    acc6 = fmaf(weights[k], value6, acc6);
+    acc7 = fmaf(weights[k], value7, acc7);
   }
 
   out[static_cast<int64_t>(token) * H + dst_h0] = __float2bfloat16(acc0);
@@ -1764,6 +1809,18 @@ __global__ void final_scatter_from_bmm_kernel(
   }
   if (src_h3 < H) {
     out[static_cast<int64_t>(token) * H + dst_h3] = __float2bfloat16(acc3);
+  }
+  if (src_h4 < H) {
+    out[static_cast<int64_t>(token) * H + dst_h4] = __float2bfloat16(acc4);
+  }
+  if (src_h5 < H) {
+    out[static_cast<int64_t>(token) * H + dst_h5] = __float2bfloat16(acc5);
+  }
+  if (src_h6 < H) {
+    out[static_cast<int64_t>(token) * H + dst_h6] = __float2bfloat16(acc6);
+  }
+  if (src_h7 < H) {
+    out[static_cast<int64_t>(token) * H + dst_h7] = __float2bfloat16(acc7);
   }
 }
 
@@ -2316,8 +2373,8 @@ void final_scatter_from_bmm_cuda(torch::Tensor gemm2_out, torch::Tensor topk_pac
   }
 
   constexpr int block = 128;
-  const int h_quads = (H + 3) / 4;
-  const dim3 grid(T, (h_quads + block - 1) / block, 1);
+  const int h_octets = (H + 7) / 8;
+  const dim3 grid(T, (h_octets + block - 1) / block, 1);
   const auto stream = at::cuda::getCurrentCUDAStream();
   final_scatter_from_bmm_kernel<<<grid, block, 0, stream>>>(
       reinterpret_cast<const __nv_bfloat16*>(gemm2_out.data_ptr<at::BFloat16>()),
