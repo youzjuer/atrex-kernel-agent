@@ -1,0 +1,71 @@
+{
+  "version": "v18_progress_save",
+  "date_utc": "2026-07-02",
+  "head_at_save": "6adc873 Record SwiGLU padding zero experiment",
+  "branch": "dev_ycb",
+  "goal": "Implement an in-repo CUDA kernel aligned with flashinfer.trtllm_fp4_block_scale_moe for real TP=1 G11 packed NVFP4 MoE, and beat FlashInfer performance.",
+  "workload_contract": {
+    "source": "G11 TP=1 from workload_shape_catalog.py",
+    "T": 9500,
+    "H": 4096,
+    "I": 1024,
+    "num_experts": 512,
+    "top_k": 10,
+    "hidden_states": "uint8 [9500, 2048], packed NVFP4 activation",
+    "hidden_states_scale": "fp8 [9500, 256]",
+    "gemm1_weights": "uint8 [512, 2048, 2048], FlashInfer prepared layout",
+    "gemm1_weights_scale": "fp8 [512, 2048, 256]",
+    "gemm2_weights": "uint8 [512, 4096, 512], FlashInfer prepared layout",
+    "gemm2_weights_scale": "fp8 [512, 4096, 64]",
+    "oracle_and_baseline": "flashinfer.trtllm_fp4_block_scale_moe"
+  },
+  "current_source_state": {
+    "status": "best committed source kept; negative experiments reverted",
+    "tracked_diff_at_save": "none before this checkpoint file",
+    "default_gemm2_symbol": "atrex_gemm2_tilegrid_splitcolepi_postsync",
+    "best_profile": "kernel_opt_fused_moe_cuda_pes/profiles/task08_end_to_end_g11_bench_scatter_oct_metadata_swiglu.json",
+    "correctness": "PASS versus FlashInfer direct-layout comparison",
+    "target_status": "MISS"
+  },
+  "current_best_latency_us": {
+    "candidate_total": 2832.0000171661377,
+    "flashinfer": 1403.007984161377,
+    "speedup_vs_flashinfer": 0.4954,
+    "stage_breakdown": {
+      "routing_topk": 244.7,
+      "metadata": 150.4,
+      "hidden_pack": 126.3,
+      "gemm1_bmm": 676.0000,
+      "swiglu_requant": 393.7280,
+      "gemm2_bmm": 984.4480,
+      "final_scatter": 223.8720
+    }
+  },
+  "recent_rejected_experiments": [
+    {
+      "memory": "kernel_opt_fused_moe_cuda_pes/memory/v14_routing_warp_negative_checkpoint.json",
+      "summary": "Warp-per-token routing regressed end-to-end latency to about 3275.94us; source reverted."
+    },
+    {
+      "memory": "kernel_opt_fused_moe_cuda_pes/memory/v15_metadata_pack_experiments.json",
+      "summary": "Atomic metadata and fused metadata+hidden pack were not accepted because end-to-end correctness was intermittent or total latency regressed; source kept at best state."
+    },
+    {
+      "memory": "kernel_opt_fused_moe_cuda_pes/memory/v16_gemm2_warpshuffle_instability.json",
+      "summary": "GEMM2 warp-shuffle variants showed up to about 70us potential but produced intermittent full-output corruption; do not switch default without full-output localization and repeated correctness reruns."
+    },
+    {
+      "memory": "kernel_opt_fused_moe_cuda_pes/memory/v17_swiglu_padding_zero_negative.json",
+      "summary": "Padding-only zero for SwiGLU/requant was correct but regressed end-to-end latency to about 2841.02us; source reverted."
+    }
+  ],
+  "untracked_files_policy": {
+    "status": "Historical profile/log files and the separate kernel_opt_fused_moe_pes directory are left untracked.",
+    "reason": "They are either temporary outputs, older experiment artifacts, or unrelated nested worktree content. The recoverable state is captured by committed memory records and selected tracked profiles."
+  },
+  "recommended_next_steps": [
+    "If pursuing the GEMM2 warp-shuffle speedup, compare full gemm2_out from stable postsync versus the warp-shuffle variant and localize corrupted rows, columns, expert ids, and CTA ranks before retesting.",
+    "For larger gains, investigate fusing GEMM2 epilogue with top-k weighted scatter or otherwise eliminating the GEMM2 output/final-scatter memory round trip.",
+    "Keep FlashInfer as the baseline/oracle and continue using real G11 packed NVFP4 activation plus FlashInfer prepared weight layout."
+  ]
+}
