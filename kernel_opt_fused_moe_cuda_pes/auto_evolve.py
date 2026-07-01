@@ -288,6 +288,16 @@ def solution_record(run_dir: Path, solution_id: str | None) -> dict[str, Any] | 
     return (parse_json(state_path).get("solutions") or {}).get(solution_id)
 
 
+def solution_for_iteration_ref(run_dir: Path, iteration_ref: str) -> str | None:
+    state_path = run_dir / "database" / "state.json"
+    if not state_path.exists():
+        return None
+    for sid, sol in (parse_json(state_path).get("solutions") or {}).items():
+        if ((sol.get("metadata") or {}).get("iteration_ref") or "") == iteration_ref:
+            return sid
+    return None
+
+
 def parent_workspace(run_dir: Path, parent_id: str | None) -> Path:
     if parent_id is None:
         return run_dir
@@ -518,6 +528,21 @@ def run_planner(
     plan_dir.mkdir(parents=True, exist_ok=True)
     plan_json = plan_dir / "plan.json"
     plan_md = plan_dir / "plan.md"
+    if args.resume_existing and plan_json.exists():
+        print(f"[Atrex] resume: using existing planner output {plan_json}", flush=True)
+        plan = read_plan(plan_json)
+        default_parent = parents[0]["solution_id"] if parents else None
+        strategies = [
+            normalize_strategy(raw, generation=generation, idx=idx, parent_id=default_parent)
+            for idx, raw in enumerate(plan["strategies"][: args.n_candidates])
+        ]
+        if len(strategies) < args.n_candidates:
+            raise RuntimeError(
+                f"planner produced {len(strategies)} strategies, expected {args.n_candidates}"
+            )
+        plan["strategies"] = [strategy_to_json(strategy) for strategy in strategies]
+        write_plan(run_dir, generation, plan)
+        return plan, strategies
     if plan_json.exists():
         plan_json.unlink()
     if plan_md.exists():
@@ -606,8 +631,17 @@ def run_executor(
 ) -> dict[str, Any]:
     child_dir = run_dir / "iteration" / str(generation) / "executor" / strategy.child
     parent_id = strategy.parent_id
-    parent_dir = materialize_candidate_base(run_dir, child_dir, parent_id)
     result_path = child_dir / "executor_result.json"
+    if (
+        args.resume_existing
+        and result_path.exists()
+        and (child_dir / "kernel.py").exists()
+        and (child_dir / "src").exists()
+    ):
+        print(f"[Atrex] resume: using existing executor output {result_path}", flush=True)
+        return parse_json(result_path)
+
+    parent_dir = materialize_candidate_base(run_dir, child_dir, parent_id)
     if result_path.exists():
         result_path.unlink()
     history_path = child_dir / "history.md"
@@ -838,6 +872,12 @@ def main() -> int:
         default=os.environ.get("ATREX_CODEX_MODEL"),
         help="Optional model override for codex exec planner/executor backends.",
     )
+    parser.add_argument(
+        "--resume-existing",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Reuse existing incomplete-generation planner/executor/evaluator artifacts.",
+    )
     args = parser.parse_args()
 
     source = args.source.resolve()
@@ -866,7 +906,11 @@ def main() -> int:
             executor_result = run_executor(repo_root, run_dir, generation, strategy, args)
             parent_id = strategy.parent_id
             result_path = child_dir / "result.json"
-            result = profile_kernel(run_dir, child_dir / "kernel.py", result_path, args)
+            if args.resume_existing and result_path.exists():
+                print(f"[Atrex] resume: using existing evaluator output {result_path}", flush=True)
+                result = parse_json(result_path)
+            else:
+                result = profile_kernel(run_dir, child_dir / "kernel.py", result_path, args)
             evidence = {
                 "tool_used": "torch.cuda.Event",
                 "strategy": strategy_to_json(strategy),
@@ -882,16 +926,20 @@ def main() -> int:
             }
             evidence_path = child_dir / "evidence.json"
             write_json(evidence_path, evidence)
-            add_candidate(
-                repo_root,
-                run_dir,
-                generation,
-                child,
-                parent_id,
-                strategy,
-                result,
-                evidence_path,
-            )
+            iteration_ref = f"iteration/{generation}/executor/{child}"
+            if args.resume_existing and solution_for_iteration_ref(run_dir, iteration_ref):
+                print(f"[Atrex] resume: DB already has {iteration_ref}", flush=True)
+            else:
+                add_candidate(
+                    repo_root,
+                    run_dir,
+                    generation,
+                    child,
+                    parent_id,
+                    strategy,
+                    result,
+                    evidence_path,
+                )
             rows.append(
                 {
                     "child": child,
