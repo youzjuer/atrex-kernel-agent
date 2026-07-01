@@ -1,0 +1,19 @@
+{
+  "status": "PASS",
+  "operator": "generated task08 SM103 FP4 BMM compile probe",
+  "task08_root": "/home/youchunbo/code/sumu/omoExplore/proj/proj_019_moe_workload_op_opt/assets/task_08_cuda_fp4_bmm_sm103",
+  "mpad": 238,
+  "work_root": "/tmp/task08_mpad238_i4v060jc",
+  "patch_counts": {
+    "comment_mpad": 1,
+    "flattened_rows_comment": 1,
+    "rows_const": 1,
+    "rows_per_expert_const": 1,
+    "fixed_mpad_static_assert": 1
+  },
+  "compiled_symbol": "up_gate_fp4_sm103_umma_tma_u8_cta2_v310_cta_rank_specialized_tid0_consumer_from_v309",
+  "has_compiled_symbol": true,
+  "elapsed_s": 101.0628653030144,
+  "error": null,
+  "next_step": "Wire this generated Mpad into a runtime smoke using current hidden_bmm and prepared GEMM1 weights."
+}
