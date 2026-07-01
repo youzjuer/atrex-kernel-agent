@@ -1,0 +1,77 @@
+{
+  "status": "PASS",
+  "operator": "flashinfer.trtllm_fp4_block_scale_moe",
+  "oracle": "flashinfer.trtllm_fp4_block_scale_moe real packed NVFP4 output",
+  "preset": "g11",
+  "tokens": 2,
+  "expert": 0,
+  "forced_top_k": 1,
+  "shape": {
+    "hidden_size": 4096,
+    "intermediate_size": 1024,
+    "num_experts": 512,
+    "local_num_experts": 512,
+    "catalog_top_k": 10,
+    "dtype": "nvfp4"
+  },
+  "expected_winner": "logical_silu_second_times_first",
+  "winner": "logical_silu_second_times_first",
+  "variants": [
+    {
+      "name": "logical_silu_second_times_first",
+      "row_mode": "logical",
+      "activation_mode": "silu_second_times_first",
+      "note": "Recover logical GEMM1 rows from prepared layout, then use silu(second_half) * first_half.",
+      "errors_vs_flashinfer": {
+        "finite": true,
+        "max_abs": 0.25390625,
+        "mean_abs": 0.050992824137210846,
+        "max_rel": 102.89954376220703,
+        "mean_rel": 0.4387773275375366
+      }
+    },
+    {
+      "name": "logical_silu_first_times_second",
+      "row_mode": "logical",
+      "activation_mode": "silu_first_times_second",
+      "note": "Recover logical GEMM1 rows from prepared layout, then use silu(first_half) * second_half.",
+      "errors_vs_flashinfer": {
+        "finite": true,
+        "max_abs": 1.78125,
+        "mean_abs": 0.35482102632522583,
+        "max_rel": 883.68603515625,
+        "mean_rel": 3.0684702396392822
+      }
+    },
+    {
+      "name": "stored_silu_second_times_first",
+      "row_mode": "stored",
+      "activation_mode": "silu_second_times_first",
+      "note": "Treat prepared storage rows as the direct GEMM1 output order and split the stored tensor halves.",
+      "errors_vs_flashinfer": {
+        "finite": true,
+        "max_abs": 4.0234375,
+        "mean_abs": 0.7765264511108398,
+        "max_rel": 1507.8333740234375,
+        "mean_rel": 5.200705051422119
+      }
+    },
+    {
+      "name": "stored_silu_first_times_second",
+      "row_mode": "stored",
+      "activation_mode": "silu_first_times_second",
+      "note": "Treat prepared storage rows as the direct GEMM1 output order and swap the SwiGLU halves.",
+      "errors_vs_flashinfer": {
+        "finite": true,
+        "max_abs": 4.0390625,
+        "mean_abs": 0.8141174912452698,
+        "max_rel": 1687.5208740234375,
+        "mean_rel": 5.406362533569336
+      }
+    }
+  ],
+  "conclusion": "Prepared GEMM1 rows must be consumed through the inverse prepared row map; the logical first half is multiplied by silu(logical second half).",
+  "latency_us": {
+    "flashinfer_trtllm_fp4_block_scale_moe_top1": 366.7199909687042
+  }
+}

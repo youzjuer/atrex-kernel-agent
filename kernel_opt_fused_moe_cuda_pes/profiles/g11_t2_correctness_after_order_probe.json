@@ -1,0 +1,92 @@
+{
+  "status": "PASS",
+  "operator": "flashinfer.trtllm_fp4_block_scale_moe",
+  "correctness_oracle": "flashinfer.trtllm_fp4_block_scale_moe (real packed NVFP4 contract)",
+  "performance_baseline": null,
+  "arg_names": [
+    "routing_logits",
+    "routing_bias",
+    "hidden_states",
+    "hidden_states_scale",
+    "gemm1_weights",
+    "gemm1_weights_scale",
+    "gemm1_bias",
+    "gemm1_alpha",
+    "gemm1_beta",
+    "gemm1_clamp_limit",
+    "gemm2_weights",
+    "gemm2_weights_scale",
+    "gemm2_bias",
+    "output1_scale_scalar",
+    "output1_scale_gate_scalar",
+    "output2_scale_scalar",
+    "num_experts",
+    "top_k",
+    "n_group",
+    "topk_group",
+    "intermediate_size",
+    "local_expert_offset",
+    "local_num_experts",
+    "routed_scaling_factor",
+    "routing_method_type",
+    "do_finalize",
+    "enable_pdl",
+    "activation_type",
+    "output",
+    "tune_max_num_tokens",
+    "norm_topk_prob",
+    "routing_replay_out"
+  ],
+  "max_abs": 0.00390625,
+  "max_rel": 0.9613036513328552,
+  "mean_latency_us": null,
+  "rows": [
+    {
+      "tokens": 2,
+      "preset": "g11",
+      "shape": {
+        "hidden_size": 4096,
+        "hidden_states_shape": [
+          2,
+          2048
+        ],
+        "hidden_states_dtype": "torch.uint8",
+        "hidden_states_scale_shape": [
+          2,
+          256
+        ],
+        "hidden_states_scale_dtype": "torch.float8_e4m3fn",
+        "gemm1_weights_shape": [
+          512,
+          2048,
+          2048
+        ],
+        "gemm1_weights_scale_shape": [
+          512,
+          2048,
+          256
+        ],
+        "gemm2_weights_shape": [
+          512,
+          4096,
+          512
+        ],
+        "gemm2_weights_scale_shape": [
+          512,
+          4096,
+          64
+        ],
+        "intermediate_size": 1024,
+        "num_experts": 512,
+        "top_k": 10,
+        "local_expert_offset": 0,
+        "local_num_experts": 512,
+        "routing_method_type": 1
+      },
+      "input_contract": "packed_nvfp4_flashinfer",
+      "max_abs": 0.00390625,
+      "max_rel": 0.9613036513328552,
+      "status": "PASS"
+    }
+  ]
+}

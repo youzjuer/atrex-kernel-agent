@@ -186,6 +186,14 @@ Routing/GEMM decomposition evidence:
 | G11 prepared gemm1 -> generic `mm_fp4(cutlass)` probe (`T=128`, one expert) | 105.248 us | finite sample but no correctness proof; still requires prepared-layout grouped GEMM |
 | G11 prepared gemm1 -> standalone `mm_fp4(trtllm)` probe (`T=8`, one expert) | 70.368 us | required local JIT include workaround and produced a non-finite sample; not a candidate path |
 
+Prepared-layout GEMM1 row-order evidence: `probe_prepared_gemm1_order.py` forces G11
+`top_k=1` to one local expert and uses the real `flashinfer.trtllm_fp4_block_scale_moe` output as
+the oracle. The measured winner in `profiles/prepared_gemm1_order_g11_top1.json` is
+`logical_silu_second_times_first`: consume prepared rows through the inverse row map, then compute
+`silu(logical second half) * logical first half`. Treating the stored prepared row order as the
+GEMM1 output order was much worse, so a custom tensor-core GEMM must restore the logical SwiGLU row
+semantics in its epilogue.
+
 `ncu` on G11 tokens=8 attributes the current CUDA time mostly to scalar stage1 (`407.136 us`) and
 warp stage2 (`189.344 us`). The tokens=128 scaling confirms that scalar FP4 FMA is not a viable
 path to the tp=1 G11 target. The next implementation step must replace stage1/stage2 with
