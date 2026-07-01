@@ -12,6 +12,9 @@ from torch.utils.cpp_extension import load
 
 
 _EXT = None
+_SCALE_CACHE = {}
+_SCALE_CACHE_ORDER = []
+_MAX_SCALE_CACHE_ITEMS = 8
 
 
 def _workspace_root() -> Path:
@@ -63,6 +66,30 @@ def _routing():
 
 def _empty_optional_like(tensor: torch.Tensor, *, dtype: torch.dtype) -> torch.Tensor:
     return torch.empty((0,), device=tensor.device, dtype=dtype)
+
+
+def _as_fp32_scale(tensor: torch.Tensor) -> torch.Tensor:
+    if tensor.dtype == torch.float32 and tensor.is_contiguous():
+        return tensor
+    key = (
+        id(tensor),
+        tensor.data_ptr(),
+        tuple(tensor.shape),
+        str(tensor.dtype),
+        tensor.device.type,
+        tensor.device.index,
+        tensor.stride(),
+    )
+    cached = _SCALE_CACHE.get(key)
+    if cached is not None:
+        return cached
+    converted = tensor.to(torch.float32).contiguous()
+    _SCALE_CACHE[key] = converted
+    _SCALE_CACHE_ORDER.append(key)
+    while len(_SCALE_CACHE_ORDER) > _MAX_SCALE_CACHE_ITEMS:
+        old_key = _SCALE_CACHE_ORDER.pop(0)
+        _SCALE_CACHE.pop(old_key, None)
+    return converted
 
 
 def _use_prepared_weight_layout(hidden_states: torch.Tensor) -> bool:
@@ -148,18 +175,18 @@ def run(
     hidden_states_scale_arg = (
         empty_bias
         if hidden_states_scale is None
-        else hidden_states_scale.to(torch.float32).contiguous()
+        else _as_fp32_scale(hidden_states_scale)
     )
-    gemm1_bias_arg = empty_bias if gemm1_bias is None else gemm1_bias.to(torch.float32).contiguous()
-    gemm2_bias_arg = empty_bias if gemm2_bias is None else gemm2_bias.to(torch.float32).contiguous()
+    gemm1_bias_arg = empty_bias if gemm1_bias is None else _as_fp32_scale(gemm1_bias)
+    gemm2_bias_arg = empty_bias if gemm2_bias is None else _as_fp32_scale(gemm2_bias)
     out = ext.forward(
         hidden_states.contiguous(),
         hidden_states_scale_arg,
         gemm1_weights.contiguous(),
-        gemm1_weights_scale.to(torch.float32).contiguous(),
+        _as_fp32_scale(gemm1_weights_scale),
         gemm1_bias_arg,
         gemm2_weights.contiguous(),
-        gemm2_weights_scale.to(torch.float32).contiguous(),
+        _as_fp32_scale(gemm2_weights_scale),
         gemm2_bias_arg,
         topk_idx.to(torch.int64).contiguous(),
         topk_weights.to(torch.float32).contiguous(),

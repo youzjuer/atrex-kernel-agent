@@ -171,6 +171,18 @@ __device__ __forceinline__ void accumulate_fp4_block32_gemm2(
   accumulate_fp4_word8_gemm2(activations, begin + 24, packed.w, scale, acc);
 }
 
+__device__ __forceinline__ void accumulate_fp4_block16_gemm2(
+    const float* __restrict__ activations,
+    const uint8_t* __restrict__ row,
+    int begin,
+    float scale,
+    float& acc) {
+  const uint32_t packed0 = ld_global_u32_l1_no_allocate(row + (begin >> 1));
+  const uint32_t packed1 = ld_global_u32_l1_no_allocate(row + (begin >> 1) + 4);
+  accumulate_fp4_word8_gemm2(activations, begin, packed0, scale, acc);
+  accumulate_fp4_word8_gemm2(activations, begin + 8, packed1, scale, acc);
+}
+
 __device__ __forceinline__ void accumulate_fp4_pair_scaled_tile(
     const __nv_bfloat16* __restrict__ hidden,
     const uint8_t* __restrict__ row1,
@@ -1057,6 +1069,134 @@ __global__ void stage2_grouped_down_finalize_kernel(
   }
 }
 
+__global__ void stage2_direct_topk_finalize_kernel(
+    const float* __restrict__ mid,
+    const uint8_t* __restrict__ gemm2_weights,
+    const float* __restrict__ gemm2_weights_scale,
+    const float* __restrict__ gemm2_bias,
+    const int64_t* __restrict__ topk_ids,
+    const float* __restrict__ topk_weights,
+    __nv_bfloat16* __restrict__ out,
+    int T,
+    int H,
+    int I,
+    int E_local,
+    int TOPK,
+    int num_experts,
+    int local_expert_offset,
+    int gemm2_scale_cols,
+    bool has_gemm2_bias,
+    bool use_prepared_layout) {
+  const int h = blockIdx.x * blockDim.x + threadIdx.x;
+  const int t = blockIdx.y * blockDim.y + threadIdx.y;
+  if (h >= H || t >= T) {
+    return;
+  }
+
+  const int gemm2_scale_vec = I / gemm2_scale_cols;
+  const int w2_row_idx = prepared_gemm2_row(h, use_prepared_layout);
+  float total = 0.0f;
+
+  for (int k = 0; k < TOPK; ++k) {
+    const int tk = t * TOPK + k;
+    const int64_t global_expert_raw = topk_ids[tk];
+    if (global_expert_raw < 0 || global_expert_raw >= num_experts) {
+      continue;
+    }
+    const int le = static_cast<int>(global_expert_raw) - local_expert_offset;
+    if (le < 0 || le >= E_local) {
+      continue;
+    }
+
+    float partial = has_gemm2_bias ? gemm2_bias[static_cast<int64_t>(le) * H + h] : 0.0f;
+    const int64_t w2_packed_base =
+        (static_cast<int64_t>(le) * H + w2_row_idx) * (I / 2);
+    const int64_t w2_scale_expert_base = static_cast<int64_t>(le) * H * gemm2_scale_cols;
+    const uint8_t* w2_row = gemm2_weights + w2_packed_base;
+    const float* mid_row = mid + static_cast<int64_t>(tk) * I;
+
+    accumulate_fp4_scaled_i_tiles_gemm2_layout(
+        mid_row, w2_row, gemm2_weights_scale, w2_scale_expert_base, w2_row_idx,
+        gemm2_scale_cols, gemm2_scale_vec, use_prepared_layout, partial);
+    total = fmaf(topk_weights[tk], partial, total);
+  }
+
+  out[static_cast<int64_t>(t) * H + h] = __float2bfloat16(total);
+}
+
+__global__ void stage2_direct_topk_finalize_warp_kernel(
+    const float* __restrict__ mid,
+    const uint8_t* __restrict__ gemm2_weights,
+    const float* __restrict__ gemm2_weights_scale,
+    const float* __restrict__ gemm2_bias,
+    const int64_t* __restrict__ topk_ids,
+    const float* __restrict__ topk_weights,
+    __nv_bfloat16* __restrict__ out,
+    int T,
+    int H,
+    int I,
+    int E_local,
+    int TOPK,
+    int num_experts,
+    int local_expert_offset,
+    int gemm2_scale_cols,
+    bool has_gemm2_bias,
+    bool use_prepared_layout) {
+  const int lane = threadIdx.x & 31;
+  const int warp_in_block = threadIdx.x >> 5;
+  const int warps_per_block = blockDim.x >> 5;
+  const int64_t out_linear =
+      static_cast<int64_t>(blockIdx.x) * warps_per_block + warp_in_block;
+  const int64_t total_outputs = static_cast<int64_t>(T) * H;
+  if (out_linear >= total_outputs) {
+    return;
+  }
+
+  const int h = static_cast<int>(out_linear % H);
+  const int t = static_cast<int>(out_linear / H);
+  const int w2_row_idx = prepared_gemm2_row(h, use_prepared_layout);
+  constexpr unsigned int full_warp_mask = 0xFFFFFFFFu;
+  float total = 0.0f;
+
+  for (int k = 0; k < TOPK; ++k) {
+    const int tk = t * TOPK + k;
+    const int64_t global_expert_raw = topk_ids[tk];
+    float partial = 0.0f;
+    if (global_expert_raw >= 0 && global_expert_raw < num_experts) {
+      const int le = static_cast<int>(global_expert_raw) - local_expert_offset;
+      if (le >= 0 && le < E_local) {
+        const int64_t w2_packed_base =
+            (static_cast<int64_t>(le) * H + w2_row_idx) * (I / 2);
+        const int64_t w2_scale_expert_base =
+            static_cast<int64_t>(le) * H * gemm2_scale_cols;
+        const uint8_t* w2_row = gemm2_weights + w2_packed_base;
+        const float* mid_row = mid + static_cast<int64_t>(tk) * I;
+        for (int scale_col = lane; scale_col < gemm2_scale_cols; scale_col += 32) {
+          const float scale = load_weight_scale(
+              gemm2_weights_scale, w2_scale_expert_base, w2_row_idx, scale_col,
+              gemm2_scale_cols, use_prepared_layout);
+          accumulate_fp4_block16_gemm2(mid_row, w2_row, scale_col * 16, scale, partial);
+        }
+        if (lane == 0 && has_gemm2_bias) {
+          partial += gemm2_bias[static_cast<int64_t>(le) * H + h];
+        }
+      }
+    }
+
+#pragma unroll
+    for (int offset = 16; offset > 0; offset >>= 1) {
+      partial += __shfl_down_sync(full_warp_mask, partial, offset);
+    }
+    if (lane == 0) {
+      total = fmaf(topk_weights[tk], partial, total);
+    }
+  }
+
+  if (lane == 0) {
+    out[static_cast<int64_t>(t) * H + h] = __float2bfloat16(total);
+  }
+}
+
 }  // namespace
 
 void fused_moe_forward_cuda(torch::Tensor hidden_states, torch::Tensor hidden_states_scale,
@@ -1149,56 +1289,33 @@ void fused_moe_forward_cuda(torch::Tensor hidden_states, torch::Tensor hidden_st
     C10_CUDA_KERNEL_LAUNCH_CHECK();
   }
 
-  const int total_slots = T * TOPK;
-  auto int_options = hidden_states.options().dtype(torch::kInt32);
-  auto expert_counts = torch::empty({E_local}, int_options);
-  auto expert_offsets = torch::empty({E_local + 1}, int_options);
-  auto expert_cursors = torch::empty({E_local}, int_options);
-  auto grouped_slots = torch::empty({total_slots}, int_options);
-  auto token_counts = torch::empty({T}, int_options);
-  auto completion_counts = torch::empty({T, H}, int_options);
-  auto out_accum = torch::empty({T, H}, hidden_states.options().dtype(torch::kFloat32));
-
-  C10_CUDA_CHECK(cudaMemsetAsync(expert_counts.data_ptr<int>(), 0,
-                                 static_cast<size_t>(E_local) * sizeof(int), stream));
-  C10_CUDA_CHECK(cudaMemsetAsync(token_counts.data_ptr<int>(), 0,
-                                 static_cast<size_t>(T) * sizeof(int), stream));
-  constexpr int metadata_block = 256;
-  count_local_slots_kernel<<<(total_slots + metadata_block - 1) / metadata_block,
-                             metadata_block, 0, stream>>>(
-      topk_ids.data_ptr<int64_t>(), expert_counts.data_ptr<int>(),
-      token_counts.data_ptr<int>(), total_slots, TOPK, E_local,
-      static_cast<int>(num_experts), static_cast<int>(local_expert_offset));
-  C10_CUDA_KERNEL_LAUNCH_CHECK();
-
-  build_expert_offsets_kernel<<<1, 1, 0, stream>>>(
-      expert_counts.data_ptr<int>(), expert_offsets.data_ptr<int>(),
-      expert_cursors.data_ptr<int>(), E_local);
-  C10_CUDA_KERNEL_LAUNCH_CHECK();
-
-  fill_grouped_slots_kernel<<<(total_slots + metadata_block - 1) / metadata_block,
-                              metadata_block, 0, stream>>>(
-      topk_ids.data_ptr<int64_t>(), expert_cursors.data_ptr<int>(),
-      grouped_slots.data_ptr<int>(), total_slots, E_local, static_cast<int>(num_experts),
-      static_cast<int>(local_expert_offset));
-  C10_CUDA_KERNEL_LAUNCH_CHECK();
-
-  C10_CUDA_CHECK(cudaMemsetAsync(out_accum.data_ptr<float>(), 0,
-                                 static_cast<size_t>(T) * H * sizeof(float), stream));
-  C10_CUDA_CHECK(cudaMemsetAsync(completion_counts.data_ptr<int>(), 0,
-                                 static_cast<size_t>(T) * H * sizeof(int), stream));
-  C10_CUDA_CHECK(cudaMemsetAsync(out.data_ptr<at::BFloat16>(), 0,
-                                 static_cast<size_t>(T) * H * sizeof(at::BFloat16), stream));
-
-  constexpr dim3 block_stage2(32);
-  const dim3 grid_stage2((H + block_stage2.x - 1) / block_stage2.x, E_local);
-  stage2_grouped_down_finalize_kernel<<<grid_stage2, block_stage2, 0, stream>>>(
-      mid.data_ptr<float>(), gemm2_weights.data_ptr<uint8_t>(),
-      gemm2_weights_scale.data_ptr<float>(), gemm2_bias.data_ptr<float>(),
-      topk_weights.data_ptr<float>(), expert_offsets.data_ptr<int>(),
-      expert_counts.data_ptr<int>(), grouped_slots.data_ptr<int>(), token_counts.data_ptr<int>(),
-      out_accum.data_ptr<float>(), completion_counts.data_ptr<int>(),
-      reinterpret_cast<__nv_bfloat16*>(out.data_ptr<at::BFloat16>()), T, H, I, TOPK,
-      gemm2_scale_cols, gemm2_bias.numel() > 0, use_prepared_weight_layout);
+  const int gemm2_scale_vec = I / gemm2_scale_cols;
+  if (gemm2_scale_vec == 16 && (I % 16) == 0) {
+    constexpr int stage2_warp_threads = 256;
+    constexpr int stage2_warps_per_block = stage2_warp_threads / 32;
+    const int64_t total_stage2_outputs = static_cast<int64_t>(T) * H;
+    const dim3 block_stage2(stage2_warp_threads);
+    const dim3 grid_stage2(
+        static_cast<unsigned int>((total_stage2_outputs + stage2_warps_per_block - 1) /
+                                  stage2_warps_per_block));
+    stage2_direct_topk_finalize_warp_kernel<<<grid_stage2, block_stage2, 0, stream>>>(
+        mid.data_ptr<float>(), gemm2_weights.data_ptr<uint8_t>(),
+        gemm2_weights_scale.data_ptr<float>(), gemm2_bias.data_ptr<float>(),
+        topk_ids.data_ptr<int64_t>(), topk_weights.data_ptr<float>(),
+        reinterpret_cast<__nv_bfloat16*>(out.data_ptr<at::BFloat16>()), T, H, I, E_local,
+        TOPK, static_cast<int>(num_experts), static_cast<int>(local_expert_offset),
+        gemm2_scale_cols, gemm2_bias.numel() > 0, use_prepared_weight_layout);
+  } else {
+    constexpr dim3 block_stage2(32, 4);
+    const dim3 grid_stage2((H + block_stage2.x - 1) / block_stage2.x,
+                           (T + block_stage2.y - 1) / block_stage2.y);
+    stage2_direct_topk_finalize_kernel<<<grid_stage2, block_stage2, 0, stream>>>(
+        mid.data_ptr<float>(), gemm2_weights.data_ptr<uint8_t>(),
+        gemm2_weights_scale.data_ptr<float>(), gemm2_bias.data_ptr<float>(),
+        topk_ids.data_ptr<int64_t>(), topk_weights.data_ptr<float>(),
+        reinterpret_cast<__nv_bfloat16*>(out.data_ptr<at::BFloat16>()), T, H, I, E_local,
+        TOPK, static_cast<int>(num_experts), static_cast<int>(local_expert_offset),
+        gemm2_scale_cols, gemm2_bias.numel() > 0, use_prepared_weight_layout);
+  }
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
