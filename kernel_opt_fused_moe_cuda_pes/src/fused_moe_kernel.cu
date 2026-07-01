@@ -1514,6 +1514,60 @@ __device__ __forceinline__ int unpack_packed_expert_idx(int32_t packed) {
   return static_cast<int>(static_cast<int16_t>((raw >> 16) & 0xFFFFu));
 }
 
+__device__ __forceinline__ float unpack_packed_bf16_score(int32_t packed) {
+  const uint16_t bits = static_cast<uint16_t>(static_cast<uint32_t>(packed) & 0xFFFFu);
+  return __bfloat162float(__ushort_as_bfloat16(bits));
+}
+
+__global__ void final_scatter_from_bmm_kernel(
+    const __nv_bfloat16* __restrict__ gemm2_out,
+    const int32_t* __restrict__ topk_packed,
+    const int32_t* __restrict__ expanded_idx_to_permuted_idx,
+    const int32_t* __restrict__ expert_padded_offsets,
+    __nv_bfloat16* __restrict__ out,
+    int T,
+    int H,
+    int TOPK,
+    int local_expert_offset,
+    int local_num_experts,
+    int padded_rows,
+    bool use_prepared_output_layout) {
+  const int64_t linear = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  const int64_t total = static_cast<int64_t>(T) * H;
+  if (linear >= total) {
+    return;
+  }
+
+  const int h = static_cast<int>(linear % H);
+  const int src_h = prepared_gemm2_row(h, use_prepared_output_layout);
+  const int token = static_cast<int>(linear / H);
+  float acc = 0.0f;
+
+  for (int k = 0; k < TOPK; ++k) {
+    const int token_slot = token * TOPK + k;
+    const int dynamic_row = expanded_idx_to_permuted_idx[token_slot];
+    if (dynamic_row < 0) {
+      continue;
+    }
+    const int32_t packed = topk_packed[token_slot];
+    const int expert = unpack_packed_expert_idx(packed);
+    const int local_expert = expert - local_expert_offset;
+    if (local_expert < 0 || local_expert >= local_num_experts) {
+      continue;
+    }
+    const int rank = dynamic_row - expert_padded_offsets[local_expert];
+    if (rank < 0 || rank >= padded_rows) {
+      continue;
+    }
+    const int row = local_expert * padded_rows + rank;
+    const float weight = unpack_packed_bf16_score(packed);
+    const float value = __bfloat162float(gemm2_out[static_cast<int64_t>(row) * H + src_h]);
+    acc = fmaf(weight, value, acc);
+  }
+
+  out[static_cast<int64_t>(token) * H + h] = __float2bfloat16(acc);
+}
+
 __global__ void routing_metadata_chunk_ranks_counts_kernel(
     const int32_t* __restrict__ topk_packed,
     int32_t* __restrict__ expanded_idx_to_permuted_idx,
@@ -2003,6 +2057,33 @@ void swiglu_requant_from_bmm_cuda(torch::Tensor gemm1_out, torch::Tensor expert_
       reinterpret_cast<uint8_t*>(mid_scale.data_ptr()),
       reinterpret_cast<uint8_t*>(mid_scale_swizzled.data_ptr()), local_num_experts,
       rows_per_expert, I, scale_cols, groups_k, swizzled_bytes_per_expert);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+void final_scatter_from_bmm_cuda(torch::Tensor gemm2_out, torch::Tensor topk_packed,
+                                 torch::Tensor expanded_idx_to_permuted_idx,
+                                 torch::Tensor expert_padded_offsets,
+                                 torch::Tensor out, int64_t local_expert_offset,
+                                 int64_t padded_rows, bool use_prepared_output_layout) {
+  const int T = static_cast<int>(topk_packed.size(0));
+  const int TOPK = static_cast<int>(topk_packed.size(1));
+  const int H = static_cast<int>(gemm2_out.size(1));
+  const int local_num_experts = static_cast<int>(expert_padded_offsets.numel() - 1);
+  const int64_t total = static_cast<int64_t>(T) * H;
+  if (total == 0) {
+    return;
+  }
+
+  constexpr int block = 256;
+  const int grid = static_cast<int>((total + block - 1) / block);
+  const auto stream = at::cuda::getCurrentCUDAStream();
+  final_scatter_from_bmm_kernel<<<grid, block, 0, stream>>>(
+      reinterpret_cast<const __nv_bfloat16*>(gemm2_out.data_ptr<at::BFloat16>()),
+      topk_packed.data_ptr<int32_t>(), expanded_idx_to_permuted_idx.data_ptr<int32_t>(),
+      expert_padded_offsets.data_ptr<int32_t>(),
+      reinterpret_cast<__nv_bfloat16*>(out.data_ptr<at::BFloat16>()), T, H, TOPK,
+      static_cast<int>(local_expert_offset), local_num_experts,
+      static_cast<int>(padded_rows), use_prepared_output_layout);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
