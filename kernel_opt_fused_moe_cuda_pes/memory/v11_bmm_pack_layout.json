@@ -1,0 +1,66 @@
+{
+  "version": "v11_bmm_pack_layout",
+  "masked": false,
+  "timestamp": "2026-07-02T02:12:30Z",
+  "operator": "flashinfer.trtllm_fp4_block_scale_moe",
+  "application_profile": "Qwen3_5-Plus_prefill_TP1_G11",
+  "input_contract": "packed_nvfp4_activation_flashinfer_prepared_weights",
+  "optimization": {
+    "action_category": "bmm_layout_pack",
+    "action_description": "Add an in-repo CUDA extension path that packs hidden_states uint8 [T,H/2] and hidden_states_scale fp8 [T,H/16] into expert-major BMM layout [E_local,padded_rows,*] using the validated TRT-LLM routing metadata.",
+    "implementation": "pack_hidden_bmm_from_metadata uses topk_packed, expanded_idx_to_permuted_idx, and expert_padded_offsets to recover each selected expert row rank, then vector-copies 16-byte chunks of hidden payload and scale into [local_expert, rank]. Padding rows are left untouched, matching the task07 no-large-memset direction.",
+    "expected_impact": "This is the next required data movement primitive for replacing the current scalar FP4 FMA path with a BMM/grouped-GEMM pipeline."
+  },
+  "external_route_evidence": {
+    "source": "/home/youchunbo/code/sumu/omoExplore/proj/proj_019_moe_workload_op_opt/assets/task_07_flashinfer_bmm_full_moe_prototype",
+    "summary": "A prior task07 prototype using CUDA C++ glue plus FlashInfer fp4_gemm BMM measured about 1438.9 us on G11 and beat the recorded FlashInfer trtllm_fp4_block_scale_moe baseline of about 1636.4 us, but it depends on FlashInfer fp4_gemm/DeepGEMM for GEMM and is therefore route evidence rather than the final own-kernel implementation.",
+    "constraint": "Do not treat direct calls to flashinfer.trtllm_fp4_block_scale_moe as a candidate solution. Also do not count TRTLLMGen cubin body reuse as an own hand-written GEMM kernel."
+  },
+  "correctness": {
+    "status": "PASS",
+    "reference": "probe_bmm_pack_layout.py compares sampled active expert rows against original hidden_states and hidden_states_scale rows selected by topk_packed and metadata ranks.",
+    "g11_tokens_8": {
+      "checked_slots": 80,
+      "hidden_mismatches": 0,
+      "scale_mismatches": 0,
+      "rank_min": 0,
+      "rank_max": 2
+    },
+    "g11_full": {
+      "checked_slots": 4096,
+      "hidden_mismatches": 0,
+      "scale_mismatches": 0,
+      "rank_min": 0,
+      "rank_max": 225
+    }
+  },
+  "performance": {
+    "profiles": [
+      "profiles/bmm_pack_t8.json",
+      "profiles/bmm_pack_g11_full.json"
+    ],
+    "g11_tokens_8": {
+      "padded_rows": 3,
+      "pack_hidden_bmm_from_metadata_us": 21.856000646948814,
+      "metadata_plus_pack_us": 111.80800199508667
+    },
+    "g11_full": {
+      "tokens": 9500,
+      "padded_rows": 238,
+      "max_expert_count": 238,
+      "hidden_bmm_shape": [512, 238, 2048],
+      "hidden_scale_bmm_shape": [512, 238, 256],
+      "pack_hidden_bmm_from_metadata_us": 113.63200098276138,
+      "metadata_plus_pack_us": 247.0400035381317
+    }
+  },
+  "quality_gate": {
+    "result": "PARTIAL_PROGRESS",
+    "reason": "The in-repo candidate can now create correct expert-major BMM inputs cheaply, but end-to-end forward still uses scalar/software FP4 stage1/stage2 and has not yet exceeded flashinfer.trtllm_fp4_block_scale_moe."
+  },
+  "next_step": {
+    "action_category": "bmm_gemm_stage",
+    "description": "Connect this packed BMM layout to an FP4 GEMM stage. The task07 evidence shows the full BMM pipeline can beat the FlashInfer MoE baseline, but the final candidate still needs an own-kernel GEMM path or an explicitly accepted lower-level backend strategy."
+  },
+  "git_commit_hash": "pending"
+}

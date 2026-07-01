@@ -1561,6 +1561,57 @@ __global__ void routing_metadata_scatter_kernel(
   permuted_idx_to_token_idx[permuted_idx] = slot / TOPK;
 }
 
+__global__ void pack_hidden_bmm_from_metadata_kernel(
+    const int32_t* __restrict__ topk_packed,
+    const int32_t* __restrict__ expanded_idx_to_permuted_idx,
+    const int32_t* __restrict__ expert_padded_offsets,
+    const uint4* __restrict__ hidden_q,
+    const uint4* __restrict__ hidden_scale,
+    uint4* __restrict__ hidden_q_bmm,
+    uint4* __restrict__ hidden_scale_bmm,
+    int total_slots,
+    int TOPK,
+    int q_chunks_per_row,
+    int scale_chunks_per_row,
+    int num_experts,
+    int local_expert_offset,
+    int local_num_experts,
+    int padded_rows) {
+  const int64_t total = static_cast<int64_t>(total_slots) * q_chunks_per_row;
+  const int64_t linear = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (linear >= total) {
+    return;
+  }
+
+  const int chunk = static_cast<int>(linear % q_chunks_per_row);
+  const int slot = static_cast<int>(linear / q_chunks_per_row);
+  const int permuted_idx = expanded_idx_to_permuted_idx[slot];
+  if (permuted_idx < 0) {
+    return;
+  }
+
+  const int expert = unpack_packed_expert_idx(topk_packed[slot]);
+  const int local_expert = expert - local_expert_offset;
+  if (expert < 0 || expert >= num_experts || local_expert < 0 ||
+      local_expert >= local_num_experts) {
+    return;
+  }
+
+  const int rank = permuted_idx - expert_padded_offsets[local_expert];
+  if (rank < 0 || rank >= padded_rows) {
+    return;
+  }
+
+  const int token = slot / TOPK;
+  const int64_t dst_row = static_cast<int64_t>(local_expert) * padded_rows + rank;
+  hidden_q_bmm[dst_row * q_chunks_per_row + chunk] =
+      hidden_q[static_cast<int64_t>(token) * q_chunks_per_row + chunk];
+  if (chunk < scale_chunks_per_row) {
+    hidden_scale_bmm[dst_row * scale_chunks_per_row + chunk] =
+        hidden_scale[static_cast<int64_t>(token) * scale_chunks_per_row + chunk];
+  }
+}
+
 }  // namespace
 
 void routing_topk_softmax_type1_cuda(torch::Tensor routing_logits, torch::Tensor topk_ids,
@@ -1673,6 +1724,38 @@ void routing_metadata_from_packed_cuda(
         static_cast<int>(local_expert_offset), static_cast<int>(local_num_experts));
     C10_CUDA_KERNEL_LAUNCH_CHECK();
   }
+}
+
+void pack_hidden_bmm_from_metadata_cuda(
+    torch::Tensor topk_packed, torch::Tensor expanded_idx_to_permuted_idx,
+    torch::Tensor expert_padded_offsets, torch::Tensor hidden_states,
+    torch::Tensor hidden_states_scale, torch::Tensor hidden_packed_bmm,
+    torch::Tensor hidden_scale_bmm, int64_t num_experts, int64_t local_expert_offset,
+    int64_t local_num_experts, int64_t padded_rows) {
+  const int T = static_cast<int>(topk_packed.size(0));
+  const int TOPK = static_cast<int>(topk_packed.size(1));
+  const int total_slots = T * TOPK;
+  const int q_chunks_per_row = static_cast<int>(hidden_states.size(1) / 16);
+  const int scale_chunks_per_row =
+      static_cast<int>((hidden_states_scale.size(1) * hidden_states_scale.element_size()) / 16);
+  const int64_t total_chunks = static_cast<int64_t>(total_slots) * q_chunks_per_row;
+  if (total_chunks == 0) {
+    return;
+  }
+
+  constexpr int block = 256;
+  const int grid = static_cast<int>((total_chunks + block - 1) / block);
+  const auto stream = at::cuda::getCurrentCUDAStream();
+  pack_hidden_bmm_from_metadata_kernel<<<grid, block, 0, stream>>>(
+      topk_packed.data_ptr<int32_t>(), expanded_idx_to_permuted_idx.data_ptr<int32_t>(),
+      expert_padded_offsets.data_ptr<int32_t>(),
+      reinterpret_cast<const uint4*>(hidden_states.data_ptr<uint8_t>()),
+      reinterpret_cast<const uint4*>(hidden_states_scale.data_ptr()),
+      reinterpret_cast<uint4*>(hidden_packed_bmm.data_ptr<uint8_t>()),
+      reinterpret_cast<uint4*>(hidden_scale_bmm.data_ptr()), total_slots, TOPK, q_chunks_per_row,
+      scale_chunks_per_row, static_cast<int>(num_experts), static_cast<int>(local_expert_offset),
+      static_cast<int>(local_num_experts), static_cast<int>(padded_rows));
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
 void fused_moe_forward_cuda(torch::Tensor hidden_states, torch::Tensor hidden_states_scale,

@@ -155,6 +155,40 @@ def routing_metadata_from_packed(
 
 
 @torch.no_grad()
+def pack_hidden_bmm_from_metadata(
+    topk_packed: torch.Tensor,
+    expanded_idx_to_permuted_idx: torch.Tensor,
+    expert_padded_offsets: torch.Tensor,
+    hidden_states: torch.Tensor,
+    hidden_states_scale: torch.Tensor,
+    *,
+    num_experts: int,
+    local_expert_offset: int,
+    local_num_experts: int,
+    padded_rows: int,
+) -> list[torch.Tensor]:
+    """Pack hidden FP4 activations to expert-major [E, padded_rows, *] BMM layout."""
+    if hidden_states.dtype != torch.uint8:
+        raise TypeError("hidden_states must be torch.uint8")
+    if hidden_states_scale.dtype not in (torch.float8_e4m3fn, torch.uint8):
+        raise TypeError("hidden_states_scale must be torch.float8_e4m3fn or torch.uint8")
+    ext = _load_ext()
+    return list(
+        ext.pack_hidden_bmm_from_metadata(
+            topk_packed.contiguous(),
+            expanded_idx_to_permuted_idx.contiguous(),
+            expert_padded_offsets.contiguous(),
+            hidden_states.contiguous(),
+            hidden_states_scale.contiguous(),
+            int(num_experts),
+            int(local_expert_offset),
+            int(local_num_experts),
+            int(padded_rows),
+        )
+    )
+
+
+@torch.no_grad()
 def run(
     routing_logits: torch.Tensor,
     routing_bias: Optional[torch.Tensor],
