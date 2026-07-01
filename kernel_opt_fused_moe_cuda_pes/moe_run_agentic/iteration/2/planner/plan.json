@@ -1,0 +1,48 @@
+{
+  "plan_path": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_agentic/iteration/2/planner/plan.md",
+  "strategies": [
+    {
+      "child": "2_0",
+      "parent_id": "d660c1aa",
+      "action_category": "grouped_expert_scheduling_inline",
+      "action_description": "Keep the d660c1aa scale-tiled FP4 decode path, but test grouped expert scheduling without the generation-1 standalone compaction launch. Re-map stage1 to an expert-major, on-the-fly route traversal: each CTA owns a local expert and an I tile, scans the small M = T * TOPK route list in registers/shared memory to find routes for that expert, writes mid by the original route index, and leaves stage2 output order unchanged. Do not allocate global expert_counts/expert_offsets/grouped_route_ids for the smoke/qwen_micro path.",
+      "evidence_chain": "d660c1aa is the current best parent at 223.744 us, while the generation-1 grouped_expert_scheduling candidate took 330.816 us because it added global route metadata, FP32 out_accum, atomics, and finalize work before any GEMM rewrite. The smoke shape has only M=20 routes, so a separate scheduler launch is unlikely to amortize. New finding: the SM120 MoE data-prep reference explicitly separates small-route single-CTA behavior from large-route multi-CTA behavior and warns that global scatter/atomic machinery can dominate; FlashInfer grouped kernels still consume expert/tile maps, so the scheduling question should be isolated from global metadata overhead.",
+      "expected_impact": "Low to medium on the T=2 smoke benchmark, but high diagnostic value: it tests whether expert-contiguous weight access helps once the failed extra launch and global route arrays are removed. If useful, it becomes a cheap scheduling primitive for later grouped GEMM children.",
+      "risks": "Repeated per-CTA scans over topk_ids can waste work, and launching CTAs for empty experts can hurt small shapes. Route ordering must continue to write mid by original route id so final FlashInfer top_k accumulation remains unchanged. Roll back by restoring d660c1aa raw topk traversal."
+    },
+    {
+      "child": "2_1",
+      "parent_id": "f1aa1c2d",
+      "action_category": "tiled_fp4_dequantization_grouped_gemm",
+      "action_description": "Use f1aa1c2d as the grouped-GEMM parent, but change only FP4 load/dequant inside its stage1_grouped_gemm_kernel and stage2_grouped_gemm_kernel. Replace the switch-based scalar load_fp4_scaled path with d660c1aa-style scale-tiled helpers: one scale load per scale vector, constant/LUT or branchless e2m1 decode, aligned packed uint32/uint4 loads with byte fallbacks, and K-split-safe handling when a cooperative lane begins inside a scale tile. Preserve the existing route grouping, 8x16 tiles, 4-way K split, atomics, and output semantics.",
+      "evidence_chain": "The grouped GEMM parent already improved the scalar baseline to 247.424 us, but its kernel still calls a scalar switch decoder for every FP4 nibble. The d660c1aa dequant-only parent cut latency to 223.744 us by replacing scalar per-element decode with scale-tiled packed loads. New finding: the local wiki vectorized-load guidance calls out FP4's 0.5-byte element size as requiring wide loads, and the compute-capability table says CC 8.9 has BF16/FP8 tensor cores but no FP4 tensor cores, so this CUDA target still needs efficient software FP4 decode inside any grouped GEMM.",
+      "expected_impact": "Medium to high. This is the cleanest combination of the two successful generation-1 ideas: keep f1aa1c2d's additional GEMM parallelism while removing its remaining scalar decode overhead. It should be especially useful if qwen_micro or TP2-like shapes expose more K work per tile.",
+      "risks": "K-split lanes cross scale-vector boundaries, so blindly copying d660c1aa helpers can apply the wrong scale. Wider decode tiles may raise register pressure in the already larger grouped-GEMM kernels. Roll back to f1aa1c2d scalar load_fp4_scaled if occupancy or correctness regresses."
+    },
+    {
+      "child": "2_2",
+      "parent_id": "d660c1aa",
+      "action_category": "grouped_gemm_down_projection",
+      "action_description": "Keep d660c1aa stage1 exactly as the current best tiled-dequant implementation, and replace only stage2_output_kernel with a route-parallel grouped down-projection tile. Treat each valid local route as an M row, use CTAs over route tiles x hidden-column tiles with a cooperative split over I, reuse the d660c1aa scale-tiled FP4 decode for gemm2 weights, multiply by topk_weights, atomicAdd into a FP32 out_accum buffer, and finalize to bf16. Avoid changing gate/up stage1 in this child so the effect is attributable to the down-projection grouped GEMM boundary.",
+      "evidence_chain": "In d660c1aa, stage2 still launches only T*H output threads and each thread serially loops over TOPK and I, giving only 256 output threads for the smoke shape before serial work. The generation-1 full grouped-GEMM child reached 247.424 us but changed both stages, added scalar decode, and paid route compaction overhead. New finding: the FlashInfer reference material has a separate blockscaled contiguous grouped GEMM finalize-fusion kernel using tile_idx_to_expert_idx/token_id_mapping, which supports testing the down/finalize boundary independently instead of rewriting the whole MoE mainloop at once.",
+      "expected_impact": "Medium. This should increase stage2 parallelism by using M=T*TOPK route rows instead of serial TOPK work per token/output column, while preserving the fastest known stage1. It is also a focused stepping stone toward full FlashInfer-style grouped GEMM finalize fusion.",
+      "risks": "The FP32 out_accum memset, atomicAdd traffic, and finalize launch can erase the benefit for T=2. Atomic accumulation order may change bf16 rounding, although the prior grouped-GEMM child passed exact smoke correctness. Roll back by restoring d660c1aa stage2_output_kernel."
+    }
+  ],
+  "evidence_summary": "Available profile evidence is CUDA-event evaluator data, not an NCU summary: no profile summary.txt or ncu bundle exists under the run profiles. For smoke T=2,H=128,I=64,top_k=10, the approximate GEMM work is 983,040 FLOPs. Baseline latency was 530.848 us (~0.00185 TFLOPS); d660c1aa is best at 223.744 us (~0.00439 TFLOPS); f1aa1c2d grouped GEMM is 247.424 us; 333db3e8 grouped scheduling is 330.816 us. The dominant bottleneck is therefore instruction/launch structure in scalar CUDA FP4 MoE: software FP4 dequantization remains hot, stage2 retains serial TOPK/I work in the best parent, and standalone scheduling overhead already regressed. CC 8.9 has no native FP4 tensor core path in the local gpu-wiki table, so the next generation should isolate cheaper expert scheduling, tiled software FP4 decode inside grouped GEMM, and a stage2-only grouped GEMM boundary.",
+  "search_sources": [
+    "USED: workspace README.md for FlashInfer-compatible operator contract, Qwen3.5 Plus TP2/smoke shapes, and constraints.",
+    "USED: profiles/auto_baseline.json for baseline CUDA-event latency 530.848 us and FlashInfer reference blocked by no valid config for the smoke shape.",
+    "USED: iteration/1/summarizer/summary.md and iteration/1/executor/*/result.json for generation-1 candidate latencies and correctness status.",
+    "USED: database/state.json plus evolution_db.py lineage for already-tried action categories and parent ancestry.",
+    "USED: database/solutions/d660c1aa/src/fused_moe_kernel.cu for current scale-tiled FP4 decode and remaining serial stage2 structure.",
+    "USED: database/solutions/f1aa1c2d/src/fused_moe_kernel.cu for grouped GEMM tiling, route compaction overhead, and remaining scalar switch decode.",
+    "NEW: gpu-wiki/docs/kernel-opt/nvidia/common/nvidia-compute-capabilities.md for CC 8.9 tensor-core support: BF16/FP8 supported, FP4 not supported.",
+    "NEW: gpu-wiki/docs/kernel-opt/nvidia/common/blackwell/kernels/grouped-gemm.md and patterns/moe-load-imbalance.md for MoE grouped GEMM layouts, variable-M expert scheduling, and tail/small-M caveats.",
+    "NEW: gpu-wiki/reference-kernels/nvidia/blackwell/cutedsl/flashinfer/blockscaled_contiguous_gather_grouped_gemm_swiglu_fusion.py and blockscaled_contiguous_grouped_gemm_finalize_fusion.py for FlashInfer-style token_id_mapping/tile_idx_to_expert_idx and separate swiglu/finalize grouped-GEMM boundaries.",
+    "NEW: gpu-wiki/docs/kernel-opt/nvidia/cutedsl/sm120/sm120-moe-data-prep.md and ref-docs/nvidia/cutedsl/sm120/sm120-moe-data-prep-optimization.md for small-route vs multi-CTA data-prep, contention-free scatter, and anti-patterns that regress.",
+    "NEW: gpu-wiki/docs/kernel-opt/nvidia/common/blackwell/techniques/vectorized-loads.md and gpu-wiki/reference-kernels/nvidia/hopper/cutedsl/tilelang/quantize.py for wide FP4 loads and prmt/mul.bf16x2 decode patterns.",
+    "SEARCHED: reference-projects/flashinfer was present but empty in this checkout, so local gpu-wiki FlashInfer reference kernels were used instead."
+  ],
+  "exhaustion": false
+}

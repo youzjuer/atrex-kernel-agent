@@ -1,0 +1,69 @@
+{
+  "generation": 0,
+  "timestamp": 1782806920.0832984,
+  "baseline": {
+    "solution_id": "dec7821d",
+    "latency_us": 527.0079970359802
+  },
+  "best_solution_id": "dec7821d",
+  "best_score": 1.0,
+  "population_size_current": 1,
+  "elites": [
+    "dec7821d"
+  ],
+  "islands_state": [
+    {
+      "island_id": 0,
+      "members": [
+        "dec7821d"
+      ],
+      "best_solution_id": "dec7821d",
+      "feature_map": {
+        "2-0-2": "dec7821d"
+      }
+    },
+    {
+      "island_id": 1,
+      "members": [],
+      "best_solution_id": null,
+      "feature_map": {}
+    },
+    {
+      "island_id": 2,
+      "members": [],
+      "best_solution_id": null,
+      "feature_map": {}
+    }
+  ],
+  "feature_stats": {
+    "complexity": {
+      "min": 5154.0,
+      "max": 5154.0,
+      "values": [
+        5154.0
+      ]
+    },
+    "score": {
+      "min": 1.0,
+      "max": 1.0,
+      "values": [
+        1.0
+      ]
+    }
+  },
+  "migration": {
+    "last_migration_generation": 0
+  },
+  "history": [
+    {
+      "generation": 0,
+      "best_score": 1.0,
+      "best_solution_id": "dec7821d"
+    }
+  ],
+  "convergence": {
+    "no_improve_streak": 0,
+    "stopped": false,
+    "stop_reason": null
+  }
+}

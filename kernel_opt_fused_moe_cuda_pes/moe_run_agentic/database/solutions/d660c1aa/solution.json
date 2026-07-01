@@ -1,0 +1,59 @@
+{
+  "solution_id": "d660c1aa",
+  "parent_id": "dec7821d",
+  "generate_plan": "Replace scalar per-element FP4 dequantization in the dot-product inner loops with tile-level decode. Use a 16-entry e2m1 lookup table or branchless nibble decode, vectorized uint32/uint4 packed loads where alignment allows, and decode one K tile at a time while reusing each loaded block scale for all FP4 values covered by scale_vec_size. Keep the existing two-stage algorithm and output order unchanged; only change how FP4 weights and scales are loaded/dequantized inside each dot.",
+  "island_id": 0,
+  "iteration": 1,
+  "generation": 1,
+  "timestamp": 1782808790.1894703,
+  "sample_cnt": 0,
+  "sample_weight": 0.0,
+  "score": 2.3554061129764055,
+  "evaluation": "PASS; latency_us=223.7440049648285; strategy=tiled_fp4_dequantization",
+  "summary": "",
+  "solution": "database/solutions/d660c1aa/kernel.py",
+  "metadata": {
+    "lang": "cuda",
+    "code_sha256": "73a4354d6aea3091974c48a20eb0c185096b9d85abec6050050b833eb06f2765",
+    "correctness": {
+      "rel_err": 0.0,
+      "status": "PASS"
+    },
+    "performance": {
+      "latency_us": 223.7440049648285,
+      "tflops": null,
+      "bandwidth_gbps": null
+    },
+    "optimization": {
+      "action_category": "tiled_fp4_dequantization",
+      "action_description": ""
+    },
+    "iteration_ref": "iteration/1/executor/1_1",
+    "profile_evidence": {
+      "tool_used": "torch.cuda.Event",
+      "strategy": {
+        "child": "1_1",
+        "parent_id": "dec7821d",
+        "action_category": "tiled_fp4_dequantization",
+        "action_description": "Replace scalar per-element FP4 dequantization in the dot-product inner loops with tile-level decode. Use a 16-entry e2m1 lookup table or branchless nibble decode, vectorized uint32/uint4 packed loads where alignment allows, and decode one K tile at a time while reusing each loaded block scale for all FP4 values covered by scale_vec_size. Keep the existing two-stage algorithm and output order unchanged; only change how FP4 weights and scales are loaded/dequantized inside each dot.",
+        "evidence_chain": "The baseline helper load_fp4_scaled loads one byte, extracts one nibble, calls a switch-based e2m1 decoder, loads a scale, and multiplies for every scalar weight. Stage1 calls it twice per H element for every (token, topk, I), and stage2 calls it once per I element for every (token, topk, H). On the smoke profile this is about 988,160 arithmetic FLOPs but 527.008 us, around 0.0019 TFLOPS, so instruction overhead and scalar memory traffic dominate. gpu-wiki compute capability data shows CC 8.9 supports BF16/FP8 tensor cores but not FP4 tensor cores, so this target needs software FP4 dequantization. New finding: the NVFP4 reference recommends wide vectorized loads for FP4 because packed FP4 has only 0.5 byte per element, and the FlashInfer block-scaled references separate scale-factor movement from MMA/accumulation.",
+        "expected_impact": "Medium to high for both smoke and larger shapes by removing switch-heavy scalar decode, reducing scale reloads, and improving memory instruction efficiency without changing the algorithmic structure. This is the lowest-risk path to speed up the current scalar CUDA baseline.",
+        "risks": "Vectorized loads require alignment and bounds handling for small H/I. Larger decode tiles can increase register pressure or shared-memory use. FP4 scale_vec_size must be derived from tensor shape, not hard-coded, to preserve correctness across smoke, qwen_micro, and TP2 metadata."
+      },
+      "executor_result": {
+        "child": "1_1",
+        "parent_id": "dec7821d",
+        "candidate_code": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_agentic/iteration/1/executor/1_1/kernel.py",
+        "action_category": "tiled_fp4_dequantization",
+        "action_description": "Replaced scalar per-element FP4 load/decode in the staged CUDA dot-product loops with scale-tiled FP4 decode helpers using a 16-entry E2M1 lookup table, per-scale-vector scale reuse, and aligned uint32 packed loads with byte/nibble fallbacks.",
+        "self_check": "ok",
+        "history_path": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_agentic/iteration/1/executor/1_1/history.md"
+      },
+      "status": "PASS",
+      "latency_us": 223.7440049648285,
+      "max_rel": 0.0,
+      "result_file": "iteration/1/executor/1_1/result.json"
+    },
+    "MAP_Elite_feature": "2-2-3"
+  }
+}

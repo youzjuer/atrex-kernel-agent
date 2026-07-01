@@ -1,0 +1,101 @@
+{
+  "plan_path": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_agentic/iteration/1/planner/plan.md",
+  "strategies": [
+    {
+      "child": "1_0",
+      "parent_id": "dec7821d",
+      "action_category": "grouped_expert_scheduling",
+      "action_description": "Add a lightweight CUDA data-prep/scheduling path that converts local top-k routes into expert-contiguous metadata: expert_counts/expert_offsets, grouped_route_ids holding t * TOPK + k in expert order, and an inverse grouped_to_route map. For the smoke path, start with a single-CTA shared-memory histogram and scatter over T * TOPK route slots; keep invalid/non-local experts mapped to empty groups. Feed stage1/stage2 from grouped_route_ids so consecutive CTAs work on the same expert before any GEMM rewrite.",
+      "evidence_chain": "Baseline profile is correct but slow for the smoke shape: 527.008 us at T=2,H=128,I=64,top_k=10. The baseline kernels process raw top-k order and branch per route in both stage1 and stage2, so expert weights are accessed in router order rather than expert-contiguous order. FlashInfer/CUTLASS reference MoE data prep builds expert_offsets, problem_sizes, a_map/c_map from topk_ids, and the FlashInfer grouped kernels consume token_id_mapping plus tile_idx_to_expert_idx for expert-contiguous work. New finding: the local reference data-prep V9 uses shared-memory histogram/scatter with per-CTA base offsets and avoids global atomics in the scatter hot path.",
+      "expected_impact": "Medium near-term impact on smoke because T * TOPK is tiny and the scheduling launch adds overhead, but high strategic value: it creates the metadata needed for expert-local weight reuse and later grouped GEMM. It should improve locality when multiple routes hit the same local expert and eliminate repeated topk branch work in the compute kernels.",
+      "risks": "Extra temporary tensors and an added launch can regress the T=2 smoke benchmark. Route ordering changes require careful inverse mapping so final accumulation still matches FlashInfer top_k semantics. Roll back by restoring raw topk traversal if scheduling overhead dominates."
+    },
+    {
+      "child": "1_1",
+      "parent_id": "dec7821d",
+      "action_category": "tiled_fp4_dequantization",
+      "action_description": "Replace scalar per-element FP4 dequantization in the dot-product inner loops with tile-level decode. Use a 16-entry e2m1 lookup table or branchless nibble decode, vectorized uint32/uint4 packed loads where alignment allows, and decode one K tile at a time while reusing each loaded block scale for all FP4 values covered by scale_vec_size. Keep the existing two-stage algorithm and output order unchanged; only change how FP4 weights and scales are loaded/dequantized inside each dot.",
+      "evidence_chain": "The baseline helper load_fp4_scaled loads one byte, extracts one nibble, calls a switch-based e2m1 decoder, loads a scale, and multiplies for every scalar weight. Stage1 calls it twice per H element for every (token, topk, I), and stage2 calls it once per I element for every (token, topk, H). On the smoke profile this is about 988,160 arithmetic FLOPs but 527.008 us, around 0.0019 TFLOPS, so instruction overhead and scalar memory traffic dominate. gpu-wiki compute capability data shows CC 8.9 supports BF16/FP8 tensor cores but not FP4 tensor cores, so this target needs software FP4 dequantization. New finding: the NVFP4 reference recommends wide vectorized loads for FP4 because packed FP4 has only 0.5 byte per element, and the FlashInfer block-scaled references separate scale-factor movement from MMA/accumulation.",
+      "expected_impact": "Medium to high for both smoke and larger shapes by removing switch-heavy scalar decode, reducing scale reloads, and improving memory instruction efficiency without changing the algorithmic structure. This is the lowest-risk path to speed up the current scalar CUDA baseline.",
+      "risks": "Vectorized loads require alignment and bounds handling for small H/I. Larger decode tiles can increase register pressure or shared-memory use. FP4 scale_vec_size must be derived from tensor shape, not hard-coded, to preserve correctness across smoke, qwen_micro, and TP2 metadata."
+    },
+    {
+      "child": "1_2",
+      "parent_id": "dec7821d",
+      "action_category": "grouped_gemm_tiling",
+      "action_description": "Replace the one-output-per-thread serial dot loops with CTA-level grouped GEMM tiles. Treat the routed rows as M = T * TOPK grouped by local expert, compute gate/up as grouped GEMM [M_e, H] x [2I, H]^T with a BM x BN tile such as 8x16 or 16x16 for the smoke path, and compute down projection as [M_e, I] x [H, I]^T. Use cooperative K-split within a CTA and warp/block reductions for each output tile; keep FP32 accumulation and the same SwiGLU/final weighted sum semantics.",
+      "evidence_chain": "Baseline stage1 assigns one thread to one (route, I) output and loops over all H serially; stage2 assigns one thread to one (token, H) output and loops over TOPK and I serially. This is the naive GEMM pattern identified in gpu-wiki: each thread independently reads whole rows/columns, has low compute-to-memory ratio, and repeats global reads. The GEMM guide shows shared-memory tiling can reduce global read volume versus naive by roughly the tile reuse factor, and the grouped GEMM wiki/reference material identifies MoE as the direct use case where multiple expert GEMMs share N/K and differ in M. New finding: FlashInfer's blockscaled grouped MoE kernels use persistent tile scheduling, expert tile maps, and fused SwiGLU/finalize epilogues; for this CUDA baseline, a smaller CUDA-core CTA micro-GEMM is the architecture-compatible first step.",
+      "expected_impact": "Highest upside on qwen_micro and TP2-like dimensions because it changes the dominant serial O(K) dot loops into cooperative tiled GEMM work with data reuse. On smoke, it may still help if launch count stays at two and tile sizes are tuned for T * TOPK <= 40.",
+      "risks": "Largest implementation risk: reductions and scatter-add semantics can introduce numerical-order differences, and small M per expert can underutilize CTAs. It may depend on grouped route metadata; if implemented standalone, it should include a minimal local grouping path or fall back to raw route rows. Roll back to the staged scalar kernels if correctness or occupancy is poor."
+    }
+  ],
+  "evidence_summary": "Parent dec7821d is the only lineage item and only baseline was tried. The available profile shows PASS correctness with 527.008 us latency on smoke T=2,H=128,I=64,top_k=10, about 0.0019 TFLOPS for the staged arithmetic count. Code evidence shows scalar inner loops over H and I with per-element FP4 unpack/dequant and no expert-contiguous scheduling. The local gpu-wiki indicates CC 8.9 has no native FP4 tensor core support, so the plan should optimize software dequant and CUDA-core tiling while borrowing FlashInfer/CUTLASS grouped metadata patterns.",
+  "search_sources": [
+    {
+      "source": "agents/gpu-kernel-planner.md",
+      "new": false,
+      "finding": "Planner contract requires N diverse, single-category, lineage-novel strategies and read-only kernel research."
+    },
+    {
+      "source": "moe_run_agentic/README.md",
+      "new": false,
+      "finding": "FlashInfer-compatible FP4 MoE surface, Qwen3.5 Plus TP2 semantics, current staged CUDA baseline, and smoke/qwen_micro/TP2 shape contract."
+    },
+    {
+      "source": "moe_run_agentic/profiles/auto_baseline.json",
+      "new": true,
+      "finding": "Baseline profile PASS, max_abs/max_rel 0, candidate_us 527.008 for T=2 smoke."
+    },
+    {
+      "source": "database/solutions/dec7821d/src/fused_moe_kernel.cu:53-60,109-120,148-173,196-217",
+      "new": true,
+      "finding": "Scalar FP4 dequant helper is called inside serial H/I loops; stage1 and stage2 launch fixed small 2D blocks without expert grouping."
+    },
+    {
+      "source": "tools/evolution_db.py lineage --workspace moe_run_agentic --solution dec7821d --json",
+      "new": false,
+      "finding": "Lineage contains only baseline action_category=baseline; no optimization categories have been tried in this run."
+    },
+    {
+      "source": "gpu-wiki/docs/kernel-opt/nvidia/common/nvidia-compute-capabilities.md:49-60",
+      "new": true,
+      "finding": "CC 8.9 supports BF16/FP8 but not FP4 tensor cores; native FP4 tensor core strategies are not architecture-compatible with L20D/Ada-style target."
+    },
+    {
+      "source": "gpu-wiki/docs/ref-docs/generic/gemm-optimization-guide.md:70-115,151-169",
+      "new": true,
+      "finding": "Naive per-output GEMM repeats global reads and has low compute-to-memory ratio; shared/register tiling improves reuse and arithmetic intensity."
+    },
+    {
+      "source": "gpu-wiki/docs/kernel-opt/nvidia/common/blackwell/kernels/grouped-gemm.md:1-18,94-150,166-178",
+      "new": true,
+      "finding": "Grouped GEMM is the MoE pattern for expert-varying M with fixed N/K; tile scheduling maps tiles to experts and caveats include small-M inefficiency and load imbalance."
+    },
+    {
+      "source": "gpu-wiki/docs/kernel-opt/nvidia/common/blackwell/techniques/vectorized-loads.md:1-8,36-40,86-118",
+      "new": true,
+      "finding": "Packed FP4 benefits from 128/256-bit loads and cache policy separation; wide loads reduce instruction overhead for FP4 GEMV/GEMM-like paths."
+    },
+    {
+      "source": "gpu-wiki/reference-kernels/nvidia/blackwell-geforce/cutedsl/moe_data_prep/README.md:14-52,64-72",
+      "new": true,
+      "finding": "Reference MoE data prep emits expert_offsets, problem sizes, a_map/c_map; shared-memory histogram/scatter V9 beats vLLM CUDA-graph data prep across listed T values."
+    },
+    {
+      "source": "gpu-wiki/reference-kernels/nvidia/blackwell/cutedsl/flashinfer/blockscaled_contiguous_gather_grouped_gemm_swiglu_fusion.py:52-155",
+      "new": true,
+      "finding": "FlashInfer grouped SwiGLU reference uses token_id_mapping, tile_idx_to_expert_idx, persistent scheduling, and fused SwiGLU epilogue."
+    },
+    {
+      "source": "gpu-wiki/reference-kernels/nvidia/blackwell/cutedsl/flashinfer/blockscaled_contiguous_grouped_gemm_finalize_fusion.py:53-158",
+      "new": true,
+      "finding": "FlashInfer finalize reference maps permuted rows back to expanded token/topk indices and applies router scale in the epilogue."
+    },
+    {
+      "source": "reference-projects/{flashinfer,cutlass,DeepGEMM}",
+      "new": false,
+      "finding": "Submodule directories were present but empty in this checkout; no additional local upstream files were available there."
+    }
+  ],
+  "exhaustion": false
+}

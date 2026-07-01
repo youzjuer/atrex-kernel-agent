@@ -1,0 +1,9 @@
+{
+  "child": "2_0",
+  "parent_id": "d660c1aa",
+  "candidate_code": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_agentic/iteration/2/executor/2_0/kernel.py",
+  "action_category": "grouped_expert_scheduling_inline",
+  "action_description": "Kept the d660c1aa scale-tiled FP4 decode path and changed only stage1 scheduling to expert-major CTAs. Each CTA owns one local expert and one I tile, scans the T * TOPK route list on the fly, writes mid by the original route index, and leaves stage2 output order unchanged without adding global route metadata or a compaction launch.",
+  "self_check": "ok",
+  "history_path": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_agentic/iteration/2/executor/2_0/history.md"
+}

@@ -1,0 +1,111 @@
+{
+  "generation": 2,
+  "timestamp": 1782815018.487561,
+  "baseline": {
+    "solution_id": "dec7821d",
+    "latency_us": 527.0079970359802
+  },
+  "best_solution_id": "8642a1b0",
+  "best_score": 2.751712520880843,
+  "population_size_current": 7,
+  "elites": [
+    "8642a1b0",
+    "a093b0ba",
+    "d660c1aa",
+    "f1aa1c2d",
+    "84326ad4",
+    "333db3e8",
+    "dec7821d"
+  ],
+  "islands_state": [
+    {
+      "island_id": 0,
+      "members": [
+        "dec7821d",
+        "8642a1b0"
+      ],
+      "best_solution_id": "8642a1b0",
+      "feature_map": {
+        "2-0-2": "dec7821d",
+        "2-2-3": "8642a1b0"
+      }
+    },
+    {
+      "island_id": 1,
+      "members": [],
+      "best_solution_id": null,
+      "feature_map": {}
+    },
+    {
+      "island_id": 2,
+      "members": [],
+      "best_solution_id": null,
+      "feature_map": {}
+    }
+  ],
+  "feature_stats": {
+    "complexity": {
+      "min": 5154.0,
+      "max": 5154.0,
+      "values": [
+        5154.0,
+        5154.0,
+        5154.0,
+        5154.0,
+        5154.0,
+        5154.0,
+        5154.0
+      ]
+    },
+    "score": {
+      "min": 1.0,
+      "max": 2.751712520880843,
+      "values": [
+        1.0,
+        1.593054737137402,
+        2.3554061129764055,
+        2.1299792391677745,
+        2.1035891426990987,
+        2.5105182306035574,
+        2.751712520880843
+      ]
+    },
+    "diversity": {
+      "min": 0.0,
+      "max": 0.0,
+      "values": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ]
+    }
+  },
+  "migration": {
+    "last_migration_generation": 0
+  },
+  "history": [
+    {
+      "generation": 0,
+      "best_score": 1.0,
+      "best_solution_id": "dec7821d"
+    },
+    {
+      "generation": 1,
+      "best_score": 2.3554061129764055,
+      "best_solution_id": "d660c1aa"
+    },
+    {
+      "generation": 2,
+      "best_score": 2.751712520880843,
+      "best_solution_id": "8642a1b0"
+    }
+  ],
+  "convergence": {
+    "no_improve_streak": 0,
+    "stopped": false,
+    "stop_reason": null
+  }
+}

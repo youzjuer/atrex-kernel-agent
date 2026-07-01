@@ -1,0 +1,10 @@
+{
+  "version": "auto_seed",
+  "performance": {
+    "latency_us": 527.0079970359802
+  },
+  "correctness": {
+    "status": "PASS",
+    "max_rel": 0.0
+  }
+}

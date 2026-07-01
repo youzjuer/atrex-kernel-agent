@@ -1,0 +1,31 @@
+{
+  "solution_id": "dec7821d",
+  "parent_id": null,
+  "generate_plan": "baseline seed",
+  "island_id": 0,
+  "iteration": 0,
+  "generation": 0,
+  "timestamp": 1782806920.0828347,
+  "sample_cnt": 0,
+  "sample_weight": 0.0,
+  "score": 1.0,
+  "evaluation": "seed (baseline)",
+  "summary": "",
+  "solution": "database/solutions/dec7821d/kernel.py",
+  "metadata": {
+    "lang": "",
+    "code_sha256": "73a4354d6aea3091974c48a20eb0c185096b9d85abec6050050b833eb06f2765",
+    "correctness": {
+      "rel_err": null,
+      "status": "PASS"
+    },
+    "performance": {
+      "latency_us": 527.0079970359802
+    },
+    "optimization": {
+      "action_category": "baseline",
+      "action_description": "seed"
+    },
+    "MAP_Elite_feature": "2-0-2"
+  }
+}

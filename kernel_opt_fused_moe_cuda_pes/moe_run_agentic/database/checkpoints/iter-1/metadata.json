@@ -1,0 +1,94 @@
+{
+  "generation": 1,
+  "timestamp": 1782810000.428558,
+  "baseline": {
+    "solution_id": "dec7821d",
+    "latency_us": 527.0079970359802
+  },
+  "best_solution_id": "d660c1aa",
+  "best_score": 2.3554061129764055,
+  "population_size_current": 4,
+  "elites": [
+    "d660c1aa",
+    "f1aa1c2d",
+    "333db3e8",
+    "dec7821d"
+  ],
+  "islands_state": [
+    {
+      "island_id": 0,
+      "members": [
+        "dec7821d",
+        "d660c1aa"
+      ],
+      "best_solution_id": "d660c1aa",
+      "feature_map": {
+        "2-0-2": "dec7821d",
+        "2-2-3": "d660c1aa"
+      }
+    },
+    {
+      "island_id": 1,
+      "members": [],
+      "best_solution_id": null,
+      "feature_map": {}
+    },
+    {
+      "island_id": 2,
+      "members": [],
+      "best_solution_id": null,
+      "feature_map": {}
+    }
+  ],
+  "feature_stats": {
+    "complexity": {
+      "min": 5154.0,
+      "max": 5154.0,
+      "values": [
+        5154.0,
+        5154.0,
+        5154.0,
+        5154.0
+      ]
+    },
+    "score": {
+      "min": 1.0,
+      "max": 2.3554061129764055,
+      "values": [
+        1.0,
+        1.593054737137402,
+        2.3554061129764055,
+        2.1299792391677745
+      ]
+    },
+    "diversity": {
+      "min": 0.0,
+      "max": 0.0,
+      "values": [
+        0.0,
+        0.0,
+        0.0
+      ]
+    }
+  },
+  "migration": {
+    "last_migration_generation": 0
+  },
+  "history": [
+    {
+      "generation": 0,
+      "best_score": 1.0,
+      "best_solution_id": "dec7821d"
+    },
+    {
+      "generation": 1,
+      "best_score": 2.3554061129764055,
+      "best_solution_id": "d660c1aa"
+    }
+  ],
+  "convergence": {
+    "no_improve_streak": 0,
+    "stopped": true,
+    "stop_reason": "target_met"
+  }
+}

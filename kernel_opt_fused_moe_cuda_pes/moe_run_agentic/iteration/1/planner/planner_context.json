@@ -1,0 +1,93 @@
+{
+  "workspace_path": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_agentic",
+  "repo_root": "/home/youchunbo/code/atrex-kernel-agent",
+  "generation": 1,
+  "n_candidates": 3,
+  "parents": [
+    {
+      "solution_id": "dec7821d",
+      "score": 1.0,
+      "island_id": 0,
+      "generation": 0,
+      "code": "database/solutions/dec7821d/kernel.py",
+      "generate_plan": "baseline seed",
+      "action_category": "baseline",
+      "summary": "",
+      "workspace": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_agentic/database/solutions/dec7821d",
+      "kernel_path": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_agentic/database/solutions/dec7821d/kernel.py",
+      "src_path": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_agentic/database/solutions/dec7821d/src",
+      "iteration_ref": null,
+      "optimization": {
+        "action_category": "baseline",
+        "action_description": "seed"
+      }
+    },
+    {
+      "solution_id": "dec7821d",
+      "score": 1.0,
+      "island_id": 0,
+      "generation": 0,
+      "code": "database/solutions/dec7821d/kernel.py",
+      "generate_plan": "baseline seed",
+      "action_category": "baseline",
+      "summary": "",
+      "workspace": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_agentic/database/solutions/dec7821d",
+      "kernel_path": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_agentic/database/solutions/dec7821d/kernel.py",
+      "src_path": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_agentic/database/solutions/dec7821d/src",
+      "iteration_ref": null,
+      "optimization": {
+        "action_category": "baseline",
+        "action_description": "seed"
+      }
+    },
+    {
+      "solution_id": "dec7821d",
+      "score": 1.0,
+      "island_id": 0,
+      "generation": 0,
+      "code": "database/solutions/dec7821d/kernel.py",
+      "generate_plan": "baseline seed",
+      "action_category": "baseline",
+      "summary": "",
+      "workspace": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_agentic/database/solutions/dec7821d",
+      "kernel_path": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_agentic/database/solutions/dec7821d/kernel.py",
+      "src_path": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_agentic/database/solutions/dec7821d/src",
+      "iteration_ref": null,
+      "optimization": {
+        "action_category": "baseline",
+        "action_description": "seed"
+      }
+    }
+  ],
+  "previous_summary": null,
+  "profiles": {
+    "baseline": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_agentic/profiles/auto_baseline.json",
+    "directory": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_agentic/profiles"
+  },
+  "operator_surface": "flashinfer.trtllm_fp4_block_scale_moe",
+  "application_profile": "Qwen3_5-Plus_prefill_TP2",
+  "optimization_focus": [
+    "grouped expert scheduling",
+    "tiled FP4 dequantization",
+    "grouped GEMM"
+  ],
+  "framework": "CUDA C++ PyTorch extension",
+  "constraints": [
+    "Do not generate FlyDSL.",
+    "Preserve the FlashInfer-compatible run(...) signature.",
+    "Preserve Qwen3.5 Plus TP2 routing/top_k/local expert semantics.",
+    "Each strategy must target exactly one optimization category."
+  ],
+  "eval_args": {
+    "preset": "smoke",
+    "tokens": "2",
+    "hidden_size": null,
+    "intermediate_size": null,
+    "local_num_experts": null,
+    "local_expert_offset": 0,
+    "warmup": 1,
+    "rep": 3
+  },
+  "output_plan_json": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_agentic/iteration/1/planner/plan.json",
+  "output_plan_md": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_agentic/iteration/1/planner/plan.md"
+}

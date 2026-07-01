@@ -1,0 +1,93 @@
+{
+  "workspace_path": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_agentic",
+  "repo_root": "/home/youchunbo/code/atrex-kernel-agent",
+  "generation": 3,
+  "n_candidates": 3,
+  "parents": [
+    {
+      "solution_id": "dec7821d",
+      "score": 1.0,
+      "island_id": 0,
+      "generation": 0,
+      "code": "database/solutions/dec7821d/kernel.py",
+      "generate_plan": "baseline seed",
+      "action_category": "baseline",
+      "summary": "",
+      "workspace": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_agentic/database/solutions/dec7821d",
+      "kernel_path": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_agentic/database/solutions/dec7821d/kernel.py",
+      "src_path": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_agentic/database/solutions/dec7821d/src",
+      "iteration_ref": null,
+      "optimization": {
+        "action_category": "baseline",
+        "action_description": "seed"
+      }
+    },
+    {
+      "solution_id": "f1aa1c2d",
+      "score": 2.1299792391677745,
+      "island_id": 0,
+      "generation": 1,
+      "code": "database/solutions/f1aa1c2d/kernel.py",
+      "generate_plan": "Replace the one-output-per-thread serial dot loops with CTA-level grouped GEMM tiles. Treat the routed rows as M = T * TOPK grouped by local expert, compute gate/up as grouped GEMM [M_e, H] x [2I, H]^T with a BM x BN tile such as 8x16 or 16x16 for the smoke path, and compute down projection as [M_e, I] x [H, I]^T. Use cooperative K-split within a CTA and warp/block reductions for each output tile; keep FP32 accumulation and the same SwiGLU/final weighted sum semantics.",
+      "action_category": "grouped_gemm_tiling",
+      "summary": "",
+      "workspace": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_agentic/database/solutions/f1aa1c2d",
+      "kernel_path": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_agentic/database/solutions/f1aa1c2d/kernel.py",
+      "src_path": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_agentic/database/solutions/f1aa1c2d/src",
+      "iteration_ref": "iteration/1/executor/1_2",
+      "optimization": {
+        "action_category": "grouped_gemm_tiling",
+        "action_description": ""
+      }
+    },
+    {
+      "solution_id": "a093b0ba",
+      "score": 2.5105182306035574,
+      "island_id": 0,
+      "generation": 2,
+      "code": "database/solutions/a093b0ba/kernel.py",
+      "generate_plan": "Use f1aa1c2d as the grouped-GEMM parent, but change only FP4 load/dequant inside its stage1_grouped_gemm_kernel and stage2_grouped_gemm_kernel. Replace the switch-based scalar load_fp4_scaled path with d660c1aa-style scale-tiled helpers: one scale load per scale vector, constant/LUT or branchless e2m1 decode, aligned packed uint32/uint4 loads with byte fallbacks, and K-split-safe handling when a cooperative lane begins inside a scale tile. Preserve the existing route grouping, 8x16 tiles, 4-way K split, atomics, and output semantics.",
+      "action_category": "tiled_fp4_dequantization_grouped_gemm",
+      "summary": "",
+      "workspace": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_agentic/database/solutions/a093b0ba",
+      "kernel_path": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_agentic/database/solutions/a093b0ba/kernel.py",
+      "src_path": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_agentic/database/solutions/a093b0ba/src",
+      "iteration_ref": "iteration/2/executor/2_1",
+      "optimization": {
+        "action_category": "tiled_fp4_dequantization_grouped_gemm",
+        "action_description": ""
+      }
+    }
+  ],
+  "previous_summary": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_agentic/iteration/2/summarizer/summary.md",
+  "profiles": {
+    "baseline": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_agentic/profiles/auto_baseline.json",
+    "directory": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_agentic/profiles"
+  },
+  "operator_surface": "flashinfer.trtllm_fp4_block_scale_moe",
+  "application_profile": "Qwen3_5-Plus_prefill_TP2",
+  "optimization_focus": [
+    "grouped expert scheduling",
+    "tiled FP4 dequantization",
+    "grouped GEMM"
+  ],
+  "framework": "CUDA C++ PyTorch extension",
+  "constraints": [
+    "Do not generate FlyDSL.",
+    "Preserve the FlashInfer-compatible run(...) signature.",
+    "Preserve Qwen3.5 Plus TP2 routing/top_k/local expert semantics.",
+    "Each strategy must target exactly one optimization category."
+  ],
+  "eval_args": {
+    "preset": "smoke",
+    "tokens": "2",
+    "hidden_size": null,
+    "intermediate_size": null,
+    "local_num_experts": null,
+    "local_expert_offset": 0,
+    "warmup": 1,
+    "rep": 3
+  },
+  "output_plan_json": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_agentic/iteration/3/planner/plan.json",
+  "output_plan_md": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_agentic/iteration/3/planner/plan.md"
+}

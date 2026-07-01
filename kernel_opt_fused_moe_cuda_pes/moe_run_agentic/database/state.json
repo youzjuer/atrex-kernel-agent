@@ -1,0 +1,574 @@
+{
+  "solutions": {
+    "dec7821d": {
+      "solution_id": "dec7821d",
+      "parent_id": null,
+      "generate_plan": "baseline seed",
+      "island_id": 0,
+      "iteration": 0,
+      "generation": 0,
+      "timestamp": 1782806920.0828347,
+      "sample_cnt": 4,
+      "sample_weight": 0.0,
+      "score": 1.0,
+      "evaluation": "seed (baseline)",
+      "summary": "",
+      "solution": "database/solutions/dec7821d/kernel.py",
+      "metadata": {
+        "lang": "",
+        "code_sha256": "73a4354d6aea3091974c48a20eb0c185096b9d85abec6050050b833eb06f2765",
+        "correctness": {
+          "rel_err": null,
+          "status": "PASS"
+        },
+        "performance": {
+          "latency_us": 527.0079970359802
+        },
+        "optimization": {
+          "action_category": "baseline",
+          "action_description": "seed"
+        },
+        "MAP_Elite_feature": "2-0-2"
+      }
+    },
+    "333db3e8": {
+      "solution_id": "333db3e8",
+      "parent_id": "dec7821d",
+      "generate_plan": "Add a lightweight CUDA data-prep/scheduling path that converts local top-k routes into expert-contiguous metadata: expert_counts/expert_offsets, grouped_route_ids holding t * TOPK + k in expert order, and an inverse grouped_to_route map. For the smoke path, start with a single-CTA shared-memory histogram and scatter over T * TOPK route slots; keep invalid/non-local experts mapped to empty groups. Feed stage1/stage2 from grouped_route_ids so consecutive CTAs work on the same expert before any GEMM rewrite.",
+      "island_id": 0,
+      "iteration": 1,
+      "generation": 1,
+      "timestamp": 1782808145.5611365,
+      "sample_cnt": 0,
+      "sample_weight": 0.0,
+      "score": 1.593054737137402,
+      "evaluation": "PASS; latency_us=330.81600069999695; strategy=grouped_expert_scheduling",
+      "summary": "",
+      "solution": "database/solutions/333db3e8/kernel.py",
+      "metadata": {
+        "lang": "cuda",
+        "code_sha256": "73a4354d6aea3091974c48a20eb0c185096b9d85abec6050050b833eb06f2765",
+        "correctness": {
+          "rel_err": 0.0,
+          "status": "PASS"
+        },
+        "performance": {
+          "latency_us": 330.81600069999695,
+          "tflops": null,
+          "bandwidth_gbps": null
+        },
+        "optimization": {
+          "action_category": "grouped_expert_scheduling",
+          "action_description": ""
+        },
+        "iteration_ref": "iteration/1/executor/1_0",
+        "profile_evidence": {
+          "tool_used": "torch.cuda.Event",
+          "strategy": {
+            "child": "1_0",
+            "parent_id": "dec7821d",
+            "action_category": "grouped_expert_scheduling",
+            "action_description": "Add a lightweight CUDA data-prep/scheduling path that converts local top-k routes into expert-contiguous metadata: expert_counts/expert_offsets, grouped_route_ids holding t * TOPK + k in expert order, and an inverse grouped_to_route map. For the smoke path, start with a single-CTA shared-memory histogram and scatter over T * TOPK route slots; keep invalid/non-local experts mapped to empty groups. Feed stage1/stage2 from grouped_route_ids so consecutive CTAs work on the same expert before any GEMM rewrite.",
+            "evidence_chain": "Baseline profile is correct but slow for the smoke shape: 527.008 us at T=2,H=128,I=64,top_k=10. The baseline kernels process raw top-k order and branch per route in both stage1 and stage2, so expert weights are accessed in router order rather than expert-contiguous order. FlashInfer/CUTLASS reference MoE data prep builds expert_offsets, problem_sizes, a_map/c_map from topk_ids, and the FlashInfer grouped kernels consume token_id_mapping plus tile_idx_to_expert_idx for expert-contiguous work. New finding: the local reference data-prep V9 uses shared-memory histogram/scatter with per-CTA base offsets and avoids global atomics in the scatter hot path.",
+            "expected_impact": "Medium near-term impact on smoke because T * TOPK is tiny and the scheduling launch adds overhead, but high strategic value: it creates the metadata needed for expert-local weight reuse and later grouped GEMM. It should improve locality when multiple routes hit the same local expert and eliminate repeated topk branch work in the compute kernels.",
+            "risks": "Extra temporary tensors and an added launch can regress the T=2 smoke benchmark. Route ordering changes require careful inverse mapping so final accumulation still matches FlashInfer top_k semantics. Roll back by restoring raw topk traversal if scheduling overhead dominates."
+          },
+          "executor_result": {
+            "child": "1_0",
+            "parent_id": "dec7821d",
+            "candidate_code": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_agentic/iteration/1/executor/1_0/kernel.py",
+            "action_category": "grouped_expert_scheduling",
+            "action_description": "Added a single-CTA CUDA scheduling kernel that builds expert_counts, expert_offsets, grouped_route_ids in expert-contiguous order, and route_to_grouped as the inverse map. Stage1 and stage2 now consume grouped_route_ids so consecutive work is grouped by local expert; stage2 accumulates grouped route contributions through an FP32 output buffer before bf16 finalize.",
+            "self_check": "ok",
+            "history_path": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_agentic/iteration/1/executor/1_0/history.md"
+          },
+          "status": "PASS",
+          "latency_us": 330.81600069999695,
+          "max_rel": 0.0,
+          "result_file": "iteration/1/executor/1_0/result.json"
+        },
+        "MAP_Elite_feature": "2-2-3"
+      }
+    },
+    "d660c1aa": {
+      "solution_id": "d660c1aa",
+      "parent_id": "dec7821d",
+      "generate_plan": "Replace scalar per-element FP4 dequantization in the dot-product inner loops with tile-level decode. Use a 16-entry e2m1 lookup table or branchless nibble decode, vectorized uint32/uint4 packed loads where alignment allows, and decode one K tile at a time while reusing each loaded block scale for all FP4 values covered by scale_vec_size. Keep the existing two-stage algorithm and output order unchanged; only change how FP4 weights and scales are loaded/dequantized inside each dot.",
+      "island_id": 0,
+      "iteration": 1,
+      "generation": 1,
+      "timestamp": 1782808790.1894703,
+      "sample_cnt": 2,
+      "sample_weight": 0.0,
+      "score": 2.3554061129764055,
+      "evaluation": "PASS; latency_us=223.7440049648285; strategy=tiled_fp4_dequantization",
+      "summary": "",
+      "solution": "database/solutions/d660c1aa/kernel.py",
+      "metadata": {
+        "lang": "cuda",
+        "code_sha256": "73a4354d6aea3091974c48a20eb0c185096b9d85abec6050050b833eb06f2765",
+        "correctness": {
+          "rel_err": 0.0,
+          "status": "PASS"
+        },
+        "performance": {
+          "latency_us": 223.7440049648285,
+          "tflops": null,
+          "bandwidth_gbps": null
+        },
+        "optimization": {
+          "action_category": "tiled_fp4_dequantization",
+          "action_description": ""
+        },
+        "iteration_ref": "iteration/1/executor/1_1",
+        "profile_evidence": {
+          "tool_used": "torch.cuda.Event",
+          "strategy": {
+            "child": "1_1",
+            "parent_id": "dec7821d",
+            "action_category": "tiled_fp4_dequantization",
+            "action_description": "Replace scalar per-element FP4 dequantization in the dot-product inner loops with tile-level decode. Use a 16-entry e2m1 lookup table or branchless nibble decode, vectorized uint32/uint4 packed loads where alignment allows, and decode one K tile at a time while reusing each loaded block scale for all FP4 values covered by scale_vec_size. Keep the existing two-stage algorithm and output order unchanged; only change how FP4 weights and scales are loaded/dequantized inside each dot.",
+            "evidence_chain": "The baseline helper load_fp4_scaled loads one byte, extracts one nibble, calls a switch-based e2m1 decoder, loads a scale, and multiplies for every scalar weight. Stage1 calls it twice per H element for every (token, topk, I), and stage2 calls it once per I element for every (token, topk, H). On the smoke profile this is about 988,160 arithmetic FLOPs but 527.008 us, around 0.0019 TFLOPS, so instruction overhead and scalar memory traffic dominate. gpu-wiki compute capability data shows CC 8.9 supports BF16/FP8 tensor cores but not FP4 tensor cores, so this target needs software FP4 dequantization. New finding: the NVFP4 reference recommends wide vectorized loads for FP4 because packed FP4 has only 0.5 byte per element, and the FlashInfer block-scaled references separate scale-factor movement from MMA/accumulation.",
+            "expected_impact": "Medium to high for both smoke and larger shapes by removing switch-heavy scalar decode, reducing scale reloads, and improving memory instruction efficiency without changing the algorithmic structure. This is the lowest-risk path to speed up the current scalar CUDA baseline.",
+            "risks": "Vectorized loads require alignment and bounds handling for small H/I. Larger decode tiles can increase register pressure or shared-memory use. FP4 scale_vec_size must be derived from tensor shape, not hard-coded, to preserve correctness across smoke, qwen_micro, and TP2 metadata."
+          },
+          "executor_result": {
+            "child": "1_1",
+            "parent_id": "dec7821d",
+            "candidate_code": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_agentic/iteration/1/executor/1_1/kernel.py",
+            "action_category": "tiled_fp4_dequantization",
+            "action_description": "Replaced scalar per-element FP4 load/decode in the staged CUDA dot-product loops with scale-tiled FP4 decode helpers using a 16-entry E2M1 lookup table, per-scale-vector scale reuse, and aligned uint32 packed loads with byte/nibble fallbacks.",
+            "self_check": "ok",
+            "history_path": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_agentic/iteration/1/executor/1_1/history.md"
+          },
+          "status": "PASS",
+          "latency_us": 223.7440049648285,
+          "max_rel": 0.0,
+          "result_file": "iteration/1/executor/1_1/result.json"
+        },
+        "MAP_Elite_feature": "2-2-3"
+      }
+    },
+    "f1aa1c2d": {
+      "solution_id": "f1aa1c2d",
+      "parent_id": "dec7821d",
+      "generate_plan": "Replace the one-output-per-thread serial dot loops with CTA-level grouped GEMM tiles. Treat the routed rows as M = T * TOPK grouped by local expert, compute gate/up as grouped GEMM [M_e, H] x [2I, H]^T with a BM x BN tile such as 8x16 or 16x16 for the smoke path, and compute down projection as [M_e, I] x [H, I]^T. Use cooperative K-split within a CTA and warp/block reductions for each output tile; keep FP32 accumulation and the same SwiGLU/final weighted sum semantics.",
+      "island_id": 0,
+      "iteration": 1,
+      "generation": 1,
+      "timestamp": 1782810000.3709455,
+      "sample_cnt": 2,
+      "sample_weight": 0.0,
+      "score": 2.1299792391677745,
+      "evaluation": "PASS; latency_us=247.42400646209717; strategy=grouped_gemm_tiling",
+      "summary": "",
+      "solution": "database/solutions/f1aa1c2d/kernel.py",
+      "metadata": {
+        "lang": "cuda",
+        "code_sha256": "73a4354d6aea3091974c48a20eb0c185096b9d85abec6050050b833eb06f2765",
+        "correctness": {
+          "rel_err": 0.0,
+          "status": "PASS"
+        },
+        "performance": {
+          "latency_us": 247.42400646209717,
+          "tflops": null,
+          "bandwidth_gbps": null
+        },
+        "optimization": {
+          "action_category": "grouped_gemm_tiling",
+          "action_description": ""
+        },
+        "iteration_ref": "iteration/1/executor/1_2",
+        "profile_evidence": {
+          "tool_used": "torch.cuda.Event",
+          "strategy": {
+            "child": "1_2",
+            "parent_id": "dec7821d",
+            "action_category": "grouped_gemm_tiling",
+            "action_description": "Replace the one-output-per-thread serial dot loops with CTA-level grouped GEMM tiles. Treat the routed rows as M = T * TOPK grouped by local expert, compute gate/up as grouped GEMM [M_e, H] x [2I, H]^T with a BM x BN tile such as 8x16 or 16x16 for the smoke path, and compute down projection as [M_e, I] x [H, I]^T. Use cooperative K-split within a CTA and warp/block reductions for each output tile; keep FP32 accumulation and the same SwiGLU/final weighted sum semantics.",
+            "evidence_chain": "Baseline stage1 assigns one thread to one (route, I) output and loops over all H serially; stage2 assigns one thread to one (token, H) output and loops over TOPK and I serially. This is the naive GEMM pattern identified in gpu-wiki: each thread independently reads whole rows/columns, has low compute-to-memory ratio, and repeats global reads. The GEMM guide shows shared-memory tiling can reduce global read volume versus naive by roughly the tile reuse factor, and the grouped GEMM wiki/reference material identifies MoE as the direct use case where multiple expert GEMMs share N/K and differ in M. New finding: FlashInfer's blockscaled grouped MoE kernels use persistent tile scheduling, expert tile maps, and fused SwiGLU/finalize epilogues; for this CUDA baseline, a smaller CUDA-core CTA micro-GEMM is the architecture-compatible first step.",
+            "expected_impact": "Highest upside on qwen_micro and TP2-like dimensions because it changes the dominant serial O(K) dot loops into cooperative tiled GEMM work with data reuse. On smoke, it may still help if launch count stays at two and tile sizes are tuned for T * TOPK <= 40.",
+            "risks": "Largest implementation risk: reductions and scatter-add semantics can introduce numerical-order differences, and small M per expert can underutilize CTAs. It may depend on grouped route metadata; if implemented standalone, it should include a minimal local grouping path or fall back to raw route rows. Roll back to the staged scalar kernels if correctness or occupancy is poor."
+          },
+          "executor_result": {
+            "child": "1_2",
+            "parent_id": "dec7821d",
+            "candidate_code": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_agentic/iteration/1/executor/1_2/kernel.py",
+            "action_category": "grouped_gemm_tiling",
+            "action_description": "Replaced the staged one-output-per-thread serial dot loops with a local-route grouped CUDA path and CTA-level tiled GEMM-style kernels. Routes are compacted by local expert, stage 1 computes gate/up FP4 dot products over 8x16 route/intermediate tiles with 4-way cooperative K-split reductions and applies SwiGLU in FP32, and stage 2 computes down-projection tiles with the same cooperative split into a FP32 accumulation buffer before bf16 finalization.",
+            "self_check": "ok",
+            "history_path": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_agentic/iteration/1/executor/1_2/history.md"
+          },
+          "status": "PASS",
+          "latency_us": 247.42400646209717,
+          "max_rel": 0.0,
+          "result_file": "iteration/1/executor/1_2/result.json"
+        },
+        "MAP_Elite_feature": "2-2-3"
+      }
+    },
+    "84326ad4": {
+      "solution_id": "84326ad4",
+      "parent_id": "d660c1aa",
+      "generate_plan": "Keep the d660c1aa scale-tiled FP4 decode path, but test grouped expert scheduling without the generation-1 standalone compaction launch. Re-map stage1 to an expert-major, on-the-fly route traversal: each CTA owns a local expert and an I tile, scans the small M = T * TOPK route list in registers/shared memory to find routes for that expert, writes mid by the original route index, and leaves stage2 output order unchanged. Do not allocate global expert_counts/expert_offsets/grouped_route_ids for the smoke/qwen_micro path.",
+      "island_id": 0,
+      "iteration": 2,
+      "generation": 2,
+      "timestamp": 1782813832.5873039,
+      "sample_cnt": 0,
+      "sample_weight": 0.0,
+      "score": 2.1035891426990987,
+      "evaluation": "PASS; latency_us=250.5280077457428; strategy=grouped_expert_scheduling_inline",
+      "summary": "",
+      "solution": "database/solutions/84326ad4/kernel.py",
+      "metadata": {
+        "lang": "cuda",
+        "code_sha256": "73a4354d6aea3091974c48a20eb0c185096b9d85abec6050050b833eb06f2765",
+        "correctness": {
+          "rel_err": 0.0,
+          "status": "PASS"
+        },
+        "performance": {
+          "latency_us": 250.5280077457428,
+          "tflops": null,
+          "bandwidth_gbps": null
+        },
+        "optimization": {
+          "action_category": "grouped_expert_scheduling_inline",
+          "action_description": ""
+        },
+        "iteration_ref": "iteration/2/executor/2_0",
+        "profile_evidence": {
+          "tool_used": "torch.cuda.Event",
+          "strategy": {
+            "child": "2_0",
+            "parent_id": "d660c1aa",
+            "action_category": "grouped_expert_scheduling_inline",
+            "action_description": "Keep the d660c1aa scale-tiled FP4 decode path, but test grouped expert scheduling without the generation-1 standalone compaction launch. Re-map stage1 to an expert-major, on-the-fly route traversal: each CTA owns a local expert and an I tile, scans the small M = T * TOPK route list in registers/shared memory to find routes for that expert, writes mid by the original route index, and leaves stage2 output order unchanged. Do not allocate global expert_counts/expert_offsets/grouped_route_ids for the smoke/qwen_micro path.",
+            "evidence_chain": "d660c1aa is the current best parent at 223.744 us, while the generation-1 grouped_expert_scheduling candidate took 330.816 us because it added global route metadata, FP32 out_accum, atomics, and finalize work before any GEMM rewrite. The smoke shape has only M=20 routes, so a separate scheduler launch is unlikely to amortize. New finding: the SM120 MoE data-prep reference explicitly separates small-route single-CTA behavior from large-route multi-CTA behavior and warns that global scatter/atomic machinery can dominate; FlashInfer grouped kernels still consume expert/tile maps, so the scheduling question should be isolated from global metadata overhead.",
+            "expected_impact": "Low to medium on the T=2 smoke benchmark, but high diagnostic value: it tests whether expert-contiguous weight access helps once the failed extra launch and global route arrays are removed. If useful, it becomes a cheap scheduling primitive for later grouped GEMM children.",
+            "risks": "Repeated per-CTA scans over topk_ids can waste work, and launching CTAs for empty experts can hurt small shapes. Route ordering must continue to write mid by original route id so final FlashInfer top_k accumulation remains unchanged. Roll back by restoring d660c1aa raw topk traversal."
+          },
+          "executor_result": {
+            "child": "2_0",
+            "parent_id": "d660c1aa",
+            "candidate_code": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_agentic/iteration/2/executor/2_0/kernel.py",
+            "action_category": "grouped_expert_scheduling_inline",
+            "action_description": "Kept the d660c1aa scale-tiled FP4 decode path and changed only stage1 scheduling to expert-major CTAs. Each CTA owns one local expert and one I tile, scans the T * TOPK route list on the fly, writes mid by the original route index, and leaves stage2 output order unchanged without adding global route metadata or a compaction launch.",
+            "self_check": "ok",
+            "history_path": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_agentic/iteration/2/executor/2_0/history.md"
+          },
+          "status": "PASS",
+          "latency_us": 250.5280077457428,
+          "max_rel": 0.0,
+          "flashinfer_us": null,
+          "target_status": "BLOCKED",
+          "target_speedup_vs_flashinfer": null,
+          "flashinfer": {
+            "status": "ERROR",
+            "version": "0.6.9",
+            "operator": "flashinfer.trtllm_fp4_block_scale_moe",
+            "max_abs": 0.0,
+            "max_rel": 0.0,
+            "mean_latency_us": null,
+            "rows": [
+              {
+                "tokens": 2,
+                "preset": "smoke",
+                "shape": {
+                  "hidden_size": 128,
+                  "intermediate_size": 64,
+                  "num_experts": 512,
+                  "top_k": 10,
+                  "local_expert_offset": 0,
+                  "local_num_experts": 16,
+                  "routing_method_type": 0
+                },
+                "status": "ERROR",
+                "error": "RuntimeError: Error in function 'getValidConfigIndices' at /dashscope/caches/workspace/tao/flashinfer/csrc/trtllm_batched_gemm_runner.cu:417: No valid config found for the given problem shape"
+              }
+            ]
+          },
+          "result_file": "iteration/2/executor/2_0/result.json"
+        },
+        "MAP_Elite_feature": "2-2-3"
+      }
+    },
+    "a093b0ba": {
+      "solution_id": "a093b0ba",
+      "parent_id": "f1aa1c2d",
+      "generate_plan": "Use f1aa1c2d as the grouped-GEMM parent, but change only FP4 load/dequant inside its stage1_grouped_gemm_kernel and stage2_grouped_gemm_kernel. Replace the switch-based scalar load_fp4_scaled path with d660c1aa-style scale-tiled helpers: one scale load per scale vector, constant/LUT or branchless e2m1 decode, aligned packed uint32/uint4 loads with byte fallbacks, and K-split-safe handling when a cooperative lane begins inside a scale tile. Preserve the existing route grouping, 8x16 tiles, 4-way K split, atomics, and output semantics.",
+      "island_id": 0,
+      "iteration": 2,
+      "generation": 2,
+      "timestamp": 1782814495.7795506,
+      "sample_cnt": 1,
+      "sample_weight": 0.0,
+      "score": 2.5105182306035574,
+      "evaluation": "PASS; latency_us=209.9200040102005; strategy=tiled_fp4_dequantization_grouped_gemm",
+      "summary": "",
+      "solution": "database/solutions/a093b0ba/kernel.py",
+      "metadata": {
+        "lang": "cuda",
+        "code_sha256": "73a4354d6aea3091974c48a20eb0c185096b9d85abec6050050b833eb06f2765",
+        "correctness": {
+          "rel_err": 0.0,
+          "status": "PASS"
+        },
+        "performance": {
+          "latency_us": 209.9200040102005,
+          "tflops": null,
+          "bandwidth_gbps": null
+        },
+        "optimization": {
+          "action_category": "tiled_fp4_dequantization_grouped_gemm",
+          "action_description": ""
+        },
+        "iteration_ref": "iteration/2/executor/2_1",
+        "profile_evidence": {
+          "tool_used": "torch.cuda.Event",
+          "strategy": {
+            "child": "2_1",
+            "parent_id": "f1aa1c2d",
+            "action_category": "tiled_fp4_dequantization_grouped_gemm",
+            "action_description": "Use f1aa1c2d as the grouped-GEMM parent, but change only FP4 load/dequant inside its stage1_grouped_gemm_kernel and stage2_grouped_gemm_kernel. Replace the switch-based scalar load_fp4_scaled path with d660c1aa-style scale-tiled helpers: one scale load per scale vector, constant/LUT or branchless e2m1 decode, aligned packed uint32/uint4 loads with byte fallbacks, and K-split-safe handling when a cooperative lane begins inside a scale tile. Preserve the existing route grouping, 8x16 tiles, 4-way K split, atomics, and output semantics.",
+            "evidence_chain": "The grouped GEMM parent already improved the scalar baseline to 247.424 us, but its kernel still calls a scalar switch decoder for every FP4 nibble. The d660c1aa dequant-only parent cut latency to 223.744 us by replacing scalar per-element decode with scale-tiled packed loads. New finding: the local wiki vectorized-load guidance calls out FP4's 0.5-byte element size as requiring wide loads, and the compute-capability table says CC 8.9 has BF16/FP8 tensor cores but no FP4 tensor cores, so this CUDA target still needs efficient software FP4 decode inside any grouped GEMM.",
+            "expected_impact": "Medium to high. This is the cleanest combination of the two successful generation-1 ideas: keep f1aa1c2d's additional GEMM parallelism while removing its remaining scalar decode overhead. It should be especially useful if qwen_micro or TP2-like shapes expose more K work per tile.",
+            "risks": "K-split lanes cross scale-vector boundaries, so blindly copying d660c1aa helpers can apply the wrong scale. Wider decode tiles may raise register pressure in the already larger grouped-GEMM kernels. Roll back to f1aa1c2d scalar load_fp4_scaled if occupancy or correctness regresses."
+          },
+          "executor_result": {
+            "child": "2_1",
+            "parent_id": "f1aa1c2d",
+            "candidate_code": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_agentic/iteration/2/executor/2_1/kernel.py",
+            "action_category": "tiled_fp4_dequantization_grouped_gemm",
+            "action_description": "Preserved the f1aa1c2d grouped GEMM structure and changed only FP4 load/dequant in stage1_grouped_gemm_kernel and stage2_grouped_gemm_kernel: scalar switch decoding was replaced with LUT decode plus K-split-safe scale-tiled helpers that use one scale load per scale vector, aligned uint32 packed FP4 loads when safe, and byte fallbacks for unaligned or tail cases.",
+            "self_check": "ok",
+            "history_path": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_agentic/iteration/2/executor/2_1/history.md"
+          },
+          "status": "PASS",
+          "latency_us": 209.9200040102005,
+          "max_rel": 0.0,
+          "flashinfer_us": null,
+          "target_status": "BLOCKED",
+          "target_speedup_vs_flashinfer": null,
+          "flashinfer": {
+            "status": "ERROR",
+            "version": "0.6.9",
+            "operator": "flashinfer.trtllm_fp4_block_scale_moe",
+            "max_abs": 0.0,
+            "max_rel": 0.0,
+            "mean_latency_us": null,
+            "rows": [
+              {
+                "tokens": 2,
+                "preset": "smoke",
+                "shape": {
+                  "hidden_size": 128,
+                  "intermediate_size": 64,
+                  "num_experts": 512,
+                  "top_k": 10,
+                  "local_expert_offset": 0,
+                  "local_num_experts": 16,
+                  "routing_method_type": 0
+                },
+                "status": "ERROR",
+                "error": "RuntimeError: Error in function 'getValidConfigIndices' at /dashscope/caches/workspace/tao/flashinfer/csrc/trtllm_batched_gemm_runner.cu:417: No valid config found for the given problem shape"
+              }
+            ]
+          },
+          "result_file": "iteration/2/executor/2_1/result.json"
+        },
+        "MAP_Elite_feature": "2-2-3"
+      }
+    },
+    "8642a1b0": {
+      "solution_id": "8642a1b0",
+      "parent_id": "d660c1aa",
+      "generate_plan": "Keep d660c1aa stage1 exactly as the current best tiled-dequant implementation, and replace only stage2_output_kernel with a route-parallel grouped down-projection tile. Treat each valid local route as an M row, use CTAs over route tiles x hidden-column tiles with a cooperative split over I, reuse the d660c1aa scale-tiled FP4 decode for gemm2 weights, multiply by topk_weights, atomicAdd into a FP32 out_accum buffer, and finalize to bf16. Avoid changing gate/up stage1 in this child so the effect is attributable to the down-projection grouped GEMM boundary.",
+      "island_id": 0,
+      "iteration": 2,
+      "generation": 2,
+      "timestamp": 1782815018.4276235,
+      "sample_cnt": 0,
+      "sample_weight": 0.0,
+      "score": 2.751712520880843,
+      "evaluation": "PASS; latency_us=191.52000546455383; strategy=grouped_gemm_down_projection",
+      "summary": "",
+      "solution": "database/solutions/8642a1b0/kernel.py",
+      "metadata": {
+        "lang": "cuda",
+        "code_sha256": "73a4354d6aea3091974c48a20eb0c185096b9d85abec6050050b833eb06f2765",
+        "correctness": {
+          "rel_err": 0.0,
+          "status": "PASS"
+        },
+        "performance": {
+          "latency_us": 191.52000546455383,
+          "tflops": null,
+          "bandwidth_gbps": null
+        },
+        "optimization": {
+          "action_category": "grouped_gemm_down_projection",
+          "action_description": ""
+        },
+        "iteration_ref": "iteration/2/executor/2_2",
+        "profile_evidence": {
+          "tool_used": "torch.cuda.Event",
+          "strategy": {
+            "child": "2_2",
+            "parent_id": "d660c1aa",
+            "action_category": "grouped_gemm_down_projection",
+            "action_description": "Keep d660c1aa stage1 exactly as the current best tiled-dequant implementation, and replace only stage2_output_kernel with a route-parallel grouped down-projection tile. Treat each valid local route as an M row, use CTAs over route tiles x hidden-column tiles with a cooperative split over I, reuse the d660c1aa scale-tiled FP4 decode for gemm2 weights, multiply by topk_weights, atomicAdd into a FP32 out_accum buffer, and finalize to bf16. Avoid changing gate/up stage1 in this child so the effect is attributable to the down-projection grouped GEMM boundary.",
+            "evidence_chain": "In d660c1aa, stage2 still launches only T*H output threads and each thread serially loops over TOPK and I, giving only 256 output threads for the smoke shape before serial work. The generation-1 full grouped-GEMM child reached 247.424 us but changed both stages, added scalar decode, and paid route compaction overhead. New finding: the FlashInfer reference material has a separate blockscaled contiguous grouped GEMM finalize-fusion kernel using tile_idx_to_expert_idx/token_id_mapping, which supports testing the down/finalize boundary independently instead of rewriting the whole MoE mainloop at once.",
+            "expected_impact": "Medium. This should increase stage2 parallelism by using M=T*TOPK route rows instead of serial TOPK work per token/output column, while preserving the fastest known stage1. It is also a focused stepping stone toward full FlashInfer-style grouped GEMM finalize fusion.",
+            "risks": "The FP32 out_accum memset, atomicAdd traffic, and finalize launch can erase the benefit for T=2. Atomic accumulation order may change bf16 rounding, although the prior grouped-GEMM child passed exact smoke correctness. Roll back by restoring d660c1aa stage2_output_kernel."
+          },
+          "executor_result": {
+            "child": "2_2",
+            "parent_id": "d660c1aa",
+            "candidate_code": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_agentic/iteration/2/executor/2_2/kernel.py",
+            "action_category": "grouped_gemm_down_projection",
+            "action_description": "Kept the d660c1aa stage1 gate/up path unchanged and replaced only the down-projection/output stage with a route-parallel grouped GEMM-style kernel over T*TOPK route rows, hidden-column tiles, and split-I scale tiles. The grouped kernel reuses the existing FP4 scale-tiled decode, applies topk_weights, atomically accumulates into an FP32 out_accum buffer, and a finalize kernel converts to bf16 output.",
+            "self_check": "ok",
+            "history_path": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_agentic/iteration/2/executor/2_2/history.md"
+          },
+          "status": "PASS",
+          "latency_us": 191.52000546455383,
+          "max_rel": 0.0,
+          "flashinfer_us": null,
+          "target_status": "BLOCKED",
+          "target_speedup_vs_flashinfer": null,
+          "flashinfer": {
+            "status": "ERROR",
+            "version": "0.6.9",
+            "operator": "flashinfer.trtllm_fp4_block_scale_moe",
+            "max_abs": 0.0,
+            "max_rel": 0.0,
+            "mean_latency_us": null,
+            "rows": [
+              {
+                "tokens": 2,
+                "preset": "smoke",
+                "shape": {
+                  "hidden_size": 128,
+                  "intermediate_size": 64,
+                  "num_experts": 512,
+                  "top_k": 10,
+                  "local_expert_offset": 0,
+                  "local_num_experts": 16,
+                  "routing_method_type": 0
+                },
+                "status": "ERROR",
+                "error": "RuntimeError: Error in function 'getValidConfigIndices' at /dashscope/caches/workspace/tao/flashinfer/csrc/trtllm_batched_gemm_runner.cu:417: No valid config found for the given problem shape"
+              }
+            ]
+          },
+          "result_file": "iteration/2/executor/2_2/result.json"
+        },
+        "MAP_Elite_feature": "2-2-3"
+      }
+    }
+  },
+  "islands": [
+    [
+      "dec7821d",
+      "8642a1b0"
+    ],
+    [],
+    []
+  ],
+  "island_feature_maps": [
+    {
+      "2-0-2": "dec7821d",
+      "2-2-3": "8642a1b0"
+    },
+    {},
+    {}
+  ],
+  "island_best": [
+    "8642a1b0",
+    null,
+    null
+  ],
+  "elites": [
+    "8642a1b0",
+    "a093b0ba",
+    "d660c1aa",
+    "f1aa1c2d",
+    "84326ad4",
+    "333db3e8",
+    "dec7821d"
+  ],
+  "feature_stats": {
+    "complexity": {
+      "min": 5154.0,
+      "max": 5154.0,
+      "values": [
+        5154.0,
+        5154.0,
+        5154.0,
+        5154.0,
+        5154.0,
+        5154.0,
+        5154.0
+      ]
+    },
+    "score": {
+      "min": 1.0,
+      "max": 2.751712520880843,
+      "values": [
+        1.0,
+        1.593054737137402,
+        2.3554061129764055,
+        2.1299792391677745,
+        2.1035891426990987,
+        2.5105182306035574,
+        2.751712520880843
+      ]
+    },
+    "diversity": {
+      "min": 0.0,
+      "max": 0.0,
+      "values": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ]
+    }
+  },
+  "current_island": 0,
+  "current_island_counter": 6,
+  "last_migration_generation": 0,
+  "best_solution_id": "8642a1b0",
+  "best_score": 2.751712520880843,
+  "baseline": {
+    "solution_id": "dec7821d",
+    "latency_us": 527.0079970359802
+  },
+  "history": [
+    {
+      "generation": 0,
+      "best_score": 1.0,
+      "best_solution_id": "dec7821d"
+    },
+    {
+      "generation": 1,
+      "best_score": 2.3554061129764055,
+      "best_solution_id": "d660c1aa"
+    },
+    {
+      "generation": 2,
+      "best_score": 2.751712520880843,
+      "best_solution_id": "8642a1b0"
+    }
+  ],
+  "convergence": {
+    "no_improve_streak": 0,
+    "stopped": false,
+    "stop_reason": null
+  }
+}

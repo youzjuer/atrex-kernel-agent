@@ -1,0 +1,30 @@
+{
+  "workspace_path": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_agentic",
+  "repo_root": "/home/youchunbo/code/atrex-kernel-agent",
+  "generation": 1,
+  "child": "1_0",
+  "strategy": {
+    "child": "1_0",
+    "parent_id": "dec7821d",
+    "action_category": "grouped_expert_scheduling",
+    "action_description": "Add a lightweight CUDA data-prep/scheduling path that converts local top-k routes into expert-contiguous metadata: expert_counts/expert_offsets, grouped_route_ids holding t * TOPK + k in expert order, and an inverse grouped_to_route map. For the smoke path, start with a single-CTA shared-memory histogram and scatter over T * TOPK route slots; keep invalid/non-local experts mapped to empty groups. Feed stage1/stage2 from grouped_route_ids so consecutive CTAs work on the same expert before any GEMM rewrite.",
+    "evidence_chain": "Baseline profile is correct but slow for the smoke shape: 527.008 us at T=2,H=128,I=64,top_k=10. The baseline kernels process raw top-k order and branch per route in both stage1 and stage2, so expert weights are accessed in router order rather than expert-contiguous order. FlashInfer/CUTLASS reference MoE data prep builds expert_offsets, problem_sizes, a_map/c_map from topk_ids, and the FlashInfer grouped kernels consume token_id_mapping plus tile_idx_to_expert_idx for expert-contiguous work. New finding: the local reference data-prep V9 uses shared-memory histogram/scatter with per-CTA base offsets and avoids global atomics in the scatter hot path.",
+    "expected_impact": "Medium near-term impact on smoke because T * TOPK is tiny and the scheduling launch adds overhead, but high strategic value: it creates the metadata needed for expert-local weight reuse and later grouped GEMM. It should improve locality when multiple routes hit the same local expert and eliminate repeated topk branch work in the compute kernels.",
+    "risks": "Extra temporary tensors and an added launch can regress the T=2 smoke benchmark. Route ordering changes require careful inverse mapping so final accumulation still matches FlashInfer top_k semantics. Roll back by restoring raw topk traversal if scheduling overhead dominates."
+  },
+  "parent_id": "dec7821d",
+  "parent_workspace": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_agentic/database/solutions/dec7821d",
+  "candidate_dir": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_agentic/iteration/1/executor/1_0",
+  "candidate_code": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_agentic/iteration/1/executor/1_0/kernel.py",
+  "candidate_src": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_agentic/iteration/1/executor/1_0/src",
+  "output_result_json": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_agentic/iteration/1/executor/1_0/executor_result.json",
+  "operator_surface": "flashinfer.trtllm_fp4_block_scale_moe",
+  "application_profile": "Qwen3_5-Plus_prefill_TP2",
+  "constraints": [
+    "Edit only files under candidate_dir.",
+    "Do not generate FlyDSL.",
+    "Preserve the FlashInfer-compatible run(...) signature.",
+    "Apply exactly one optimization category.",
+    "Do not run the evaluator; this runner evaluates after executor returns."
+  ]
+}

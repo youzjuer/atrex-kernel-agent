@@ -1,0 +1,87 @@
+{
+  "solution_id": "84326ad4",
+  "parent_id": "d660c1aa",
+  "generate_plan": "Keep the d660c1aa scale-tiled FP4 decode path, but test grouped expert scheduling without the generation-1 standalone compaction launch. Re-map stage1 to an expert-major, on-the-fly route traversal: each CTA owns a local expert and an I tile, scans the small M = T * TOPK route list in registers/shared memory to find routes for that expert, writes mid by the original route index, and leaves stage2 output order unchanged. Do not allocate global expert_counts/expert_offsets/grouped_route_ids for the smoke/qwen_micro path.",
+  "island_id": 0,
+  "iteration": 2,
+  "generation": 2,
+  "timestamp": 1782813832.5873039,
+  "sample_cnt": 0,
+  "sample_weight": 0.0,
+  "score": 2.1035891426990987,
+  "evaluation": "PASS; latency_us=250.5280077457428; strategy=grouped_expert_scheduling_inline",
+  "summary": "",
+  "solution": "database/solutions/84326ad4/kernel.py",
+  "metadata": {
+    "lang": "cuda",
+    "code_sha256": "73a4354d6aea3091974c48a20eb0c185096b9d85abec6050050b833eb06f2765",
+    "correctness": {
+      "rel_err": 0.0,
+      "status": "PASS"
+    },
+    "performance": {
+      "latency_us": 250.5280077457428,
+      "tflops": null,
+      "bandwidth_gbps": null
+    },
+    "optimization": {
+      "action_category": "grouped_expert_scheduling_inline",
+      "action_description": ""
+    },
+    "iteration_ref": "iteration/2/executor/2_0",
+    "profile_evidence": {
+      "tool_used": "torch.cuda.Event",
+      "strategy": {
+        "child": "2_0",
+        "parent_id": "d660c1aa",
+        "action_category": "grouped_expert_scheduling_inline",
+        "action_description": "Keep the d660c1aa scale-tiled FP4 decode path, but test grouped expert scheduling without the generation-1 standalone compaction launch. Re-map stage1 to an expert-major, on-the-fly route traversal: each CTA owns a local expert and an I tile, scans the small M = T * TOPK route list in registers/shared memory to find routes for that expert, writes mid by the original route index, and leaves stage2 output order unchanged. Do not allocate global expert_counts/expert_offsets/grouped_route_ids for the smoke/qwen_micro path.",
+        "evidence_chain": "d660c1aa is the current best parent at 223.744 us, while the generation-1 grouped_expert_scheduling candidate took 330.816 us because it added global route metadata, FP32 out_accum, atomics, and finalize work before any GEMM rewrite. The smoke shape has only M=20 routes, so a separate scheduler launch is unlikely to amortize. New finding: the SM120 MoE data-prep reference explicitly separates small-route single-CTA behavior from large-route multi-CTA behavior and warns that global scatter/atomic machinery can dominate; FlashInfer grouped kernels still consume expert/tile maps, so the scheduling question should be isolated from global metadata overhead.",
+        "expected_impact": "Low to medium on the T=2 smoke benchmark, but high diagnostic value: it tests whether expert-contiguous weight access helps once the failed extra launch and global route arrays are removed. If useful, it becomes a cheap scheduling primitive for later grouped GEMM children.",
+        "risks": "Repeated per-CTA scans over topk_ids can waste work, and launching CTAs for empty experts can hurt small shapes. Route ordering must continue to write mid by original route id so final FlashInfer top_k accumulation remains unchanged. Roll back by restoring d660c1aa raw topk traversal."
+      },
+      "executor_result": {
+        "child": "2_0",
+        "parent_id": "d660c1aa",
+        "candidate_code": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_agentic/iteration/2/executor/2_0/kernel.py",
+        "action_category": "grouped_expert_scheduling_inline",
+        "action_description": "Kept the d660c1aa scale-tiled FP4 decode path and changed only stage1 scheduling to expert-major CTAs. Each CTA owns one local expert and one I tile, scans the T * TOPK route list on the fly, writes mid by the original route index, and leaves stage2 output order unchanged without adding global route metadata or a compaction launch.",
+        "self_check": "ok",
+        "history_path": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_agentic/iteration/2/executor/2_0/history.md"
+      },
+      "status": "PASS",
+      "latency_us": 250.5280077457428,
+      "max_rel": 0.0,
+      "flashinfer_us": null,
+      "target_status": "BLOCKED",
+      "target_speedup_vs_flashinfer": null,
+      "flashinfer": {
+        "status": "ERROR",
+        "version": "0.6.9",
+        "operator": "flashinfer.trtllm_fp4_block_scale_moe",
+        "max_abs": 0.0,
+        "max_rel": 0.0,
+        "mean_latency_us": null,
+        "rows": [
+          {
+            "tokens": 2,
+            "preset": "smoke",
+            "shape": {
+              "hidden_size": 128,
+              "intermediate_size": 64,
+              "num_experts": 512,
+              "top_k": 10,
+              "local_expert_offset": 0,
+              "local_num_experts": 16,
+              "routing_method_type": 0
+            },
+            "status": "ERROR",
+            "error": "RuntimeError: Error in function 'getValidConfigIndices' at /dashscope/caches/workspace/tao/flashinfer/csrc/trtllm_batched_gemm_runner.cu:417: No valid config found for the given problem shape"
+          }
+        ]
+      },
+      "result_file": "iteration/2/executor/2_0/result.json"
+    },
+    "MAP_Elite_feature": "2-2-3"
+  }
+}

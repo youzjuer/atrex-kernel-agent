@@ -1,0 +1,30 @@
+{
+  "workspace_path": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_agentic",
+  "repo_root": "/home/youchunbo/code/atrex-kernel-agent",
+  "generation": 2,
+  "child": "2_1",
+  "strategy": {
+    "child": "2_1",
+    "parent_id": "f1aa1c2d",
+    "action_category": "tiled_fp4_dequantization_grouped_gemm",
+    "action_description": "Use f1aa1c2d as the grouped-GEMM parent, but change only FP4 load/dequant inside its stage1_grouped_gemm_kernel and stage2_grouped_gemm_kernel. Replace the switch-based scalar load_fp4_scaled path with d660c1aa-style scale-tiled helpers: one scale load per scale vector, constant/LUT or branchless e2m1 decode, aligned packed uint32/uint4 loads with byte fallbacks, and K-split-safe handling when a cooperative lane begins inside a scale tile. Preserve the existing route grouping, 8x16 tiles, 4-way K split, atomics, and output semantics.",
+    "evidence_chain": "The grouped GEMM parent already improved the scalar baseline to 247.424 us, but its kernel still calls a scalar switch decoder for every FP4 nibble. The d660c1aa dequant-only parent cut latency to 223.744 us by replacing scalar per-element decode with scale-tiled packed loads. New finding: the local wiki vectorized-load guidance calls out FP4's 0.5-byte element size as requiring wide loads, and the compute-capability table says CC 8.9 has BF16/FP8 tensor cores but no FP4 tensor cores, so this CUDA target still needs efficient software FP4 decode inside any grouped GEMM.",
+    "expected_impact": "Medium to high. This is the cleanest combination of the two successful generation-1 ideas: keep f1aa1c2d's additional GEMM parallelism while removing its remaining scalar decode overhead. It should be especially useful if qwen_micro or TP2-like shapes expose more K work per tile.",
+    "risks": "K-split lanes cross scale-vector boundaries, so blindly copying d660c1aa helpers can apply the wrong scale. Wider decode tiles may raise register pressure in the already larger grouped-GEMM kernels. Roll back to f1aa1c2d scalar load_fp4_scaled if occupancy or correctness regresses."
+  },
+  "parent_id": "f1aa1c2d",
+  "parent_workspace": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_agentic/database/solutions/f1aa1c2d",
+  "candidate_dir": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_agentic/iteration/2/executor/2_1",
+  "candidate_code": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_agentic/iteration/2/executor/2_1/kernel.py",
+  "candidate_src": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_agentic/iteration/2/executor/2_1/src",
+  "output_result_json": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_agentic/iteration/2/executor/2_1/executor_result.json",
+  "operator_surface": "flashinfer.trtllm_fp4_block_scale_moe",
+  "application_profile": "Qwen3_5-Plus_prefill_TP2",
+  "constraints": [
+    "Edit only files under candidate_dir.",
+    "Do not generate FlyDSL.",
+    "Preserve the FlashInfer-compatible run(...) signature.",
+    "Apply exactly one optimization category.",
+    "Do not run the evaluator; this runner evaluates after executor returns."
+  ]
+}

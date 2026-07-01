@@ -1,0 +1,9 @@
+{
+  "child": "1_1",
+  "parent_id": "dec7821d",
+  "candidate_code": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_agentic/iteration/1/executor/1_1/kernel.py",
+  "action_category": "tiled_fp4_dequantization",
+  "action_description": "Replaced scalar per-element FP4 load/decode in the staged CUDA dot-product loops with scale-tiled FP4 decode helpers using a 16-entry E2M1 lookup table, per-scale-vector scale reuse, and aligned uint32 packed loads with byte/nibble fallbacks.",
+  "self_check": "ok",
+  "history_path": "/home/youchunbo/code/atrex-kernel-agent/kernel_opt_fused_moe_cuda_pes/moe_run_agentic/iteration/1/executor/1_1/history.md"
+}
