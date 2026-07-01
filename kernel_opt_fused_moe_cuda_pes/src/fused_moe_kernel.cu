@@ -1406,6 +1406,161 @@ __global__ void routing_topk_softmax_type1_pack_f32_kernel(
   }
 }
 
+__device__ __forceinline__ int unpack_packed_expert_idx(int32_t packed) {
+  const uint32_t raw = static_cast<uint32_t>(packed);
+  return static_cast<int>(static_cast<int16_t>((raw >> 16) & 0xFFFFu));
+}
+
+__global__ void routing_metadata_chunk_ranks_counts_kernel(
+    const int32_t* __restrict__ topk_packed,
+    int32_t* __restrict__ expanded_idx_to_permuted_idx,
+    int32_t* __restrict__ chunk_counts,
+    int total_slots,
+    int num_experts,
+    int local_expert_offset,
+    int local_num_experts) {
+  extern __shared__ int smem[];
+  int* counts = smem;
+  int* chunk_experts = smem + local_num_experts;
+  const int tid = threadIdx.x;
+  const int chunk_idx = blockIdx.x;
+  const int slot = chunk_idx * blockDim.x + tid;
+
+  for (int local_expert = tid; local_expert < local_num_experts; local_expert += blockDim.x) {
+    counts[local_expert] = 0;
+  }
+  __syncthreads();
+
+  int local_expert = -1;
+  if (slot < total_slots) {
+    const int expert = unpack_packed_expert_idx(topk_packed[slot]);
+    local_expert = expert - local_expert_offset;
+    if (expert < 0 || expert >= num_experts || local_expert < 0 ||
+        local_expert >= local_num_experts) {
+      local_expert = -1;
+    }
+  }
+  chunk_experts[tid] = local_expert;
+  __syncthreads();
+
+  if (slot < total_slots) {
+    if (local_expert >= 0) {
+      int rank_in_chunk = 0;
+      for (int prev = 0; prev < tid; ++prev) {
+        rank_in_chunk += (chunk_experts[prev] == local_expert);
+      }
+      expanded_idx_to_permuted_idx[slot] = rank_in_chunk;
+      atomicAdd(counts + local_expert, 1);
+    } else {
+      expanded_idx_to_permuted_idx[slot] = -1;
+    }
+  }
+  __syncthreads();
+
+  int32_t* chunk_counts_row =
+      chunk_counts + static_cast<int64_t>(chunk_idx) * local_num_experts;
+  for (int local_idx = tid; local_idx < local_num_experts; local_idx += blockDim.x) {
+    chunk_counts_row[local_idx] = counts[local_idx];
+  }
+}
+
+__global__ void routing_metadata_chunk_prefix_kernel(
+    const int32_t* __restrict__ chunk_counts,
+    int32_t* __restrict__ chunk_offsets,
+    int32_t* __restrict__ expert_counts,
+    int num_chunks,
+    int local_num_experts) {
+  const int local_expert = blockIdx.x * blockDim.x + threadIdx.x;
+  if (local_expert >= local_num_experts) {
+    return;
+  }
+
+  int running = 0;
+  for (int chunk = 0; chunk < num_chunks; ++chunk) {
+    const int64_t offset = static_cast<int64_t>(chunk) * local_num_experts + local_expert;
+    const int count = chunk_counts[offset];
+    chunk_offsets[offset] = running;
+    running += count;
+  }
+  expert_counts[local_expert] = running;
+}
+
+__global__ void routing_metadata_prefix_kernel(
+    const int32_t* __restrict__ expert_counts,
+    int32_t* __restrict__ expert_padded_offsets,
+    int32_t* __restrict__ cta_idx_xy_to_batch_idx,
+    int32_t* __restrict__ cta_idx_xy_to_mn_limit,
+    int32_t* __restrict__ num_non_exiting_ctas,
+    int32_t* __restrict__ total_num_padded_tokens,
+    int local_num_experts,
+    int tile_tokens_dim) {
+  if (blockIdx.x != 0 || threadIdx.x != 0) {
+    return;
+  }
+
+  int padded_running = 0;
+  int cta_running = 0;
+  for (int local_expert = 0; local_expert < local_num_experts; ++local_expert) {
+    const int count = expert_counts[local_expert];
+    const int ctas = (count + tile_tokens_dim - 1) / tile_tokens_dim;
+    expert_padded_offsets[local_expert] = padded_running;
+
+    for (int cta = 0; cta < ctas; ++cta) {
+      const int cta_idx = cta_running + cta;
+      cta_idx_xy_to_batch_idx[cta_idx] = local_expert;
+      const int padded_cta_limit = (cta_idx + 1) * tile_tokens_dim;
+      const int expert_real_limit = padded_running + count;
+      cta_idx_xy_to_mn_limit[cta_idx] =
+          padded_cta_limit < expert_real_limit ? padded_cta_limit : expert_real_limit;
+    }
+
+    padded_running += ctas * tile_tokens_dim;
+    cta_running += ctas;
+  }
+  expert_padded_offsets[local_num_experts] = padded_running;
+  num_non_exiting_ctas[0] = cta_running;
+  total_num_padded_tokens[0] = padded_running;
+}
+
+__global__ void routing_metadata_scatter_kernel(
+    const int32_t* __restrict__ topk_packed,
+    int32_t* __restrict__ expanded_idx_to_permuted_idx,
+    int32_t* __restrict__ permuted_idx_to_token_idx,
+    const int32_t* __restrict__ expert_padded_offsets,
+    const int32_t* __restrict__ chunk_offsets,
+    int total_slots,
+    int TOPK,
+    int rank_chunk_size,
+    int num_experts,
+    int local_expert_offset,
+    int local_num_experts) {
+  const int slot = blockIdx.x * blockDim.x + threadIdx.x;
+  if (slot >= total_slots) {
+    return;
+  }
+
+  const int rank_in_chunk = expanded_idx_to_permuted_idx[slot];
+  if (rank_in_chunk < 0) {
+    return;
+  }
+
+  const int expert = unpack_packed_expert_idx(topk_packed[slot]);
+  const int local_expert = expert - local_expert_offset;
+  if (expert < 0 || expert >= num_experts || local_expert < 0 ||
+      local_expert >= local_num_experts) {
+    expanded_idx_to_permuted_idx[slot] = -1;
+    return;
+  }
+
+  const int chunk_idx = slot / rank_chunk_size;
+  const int global_rank =
+      chunk_offsets[static_cast<int64_t>(chunk_idx) * local_num_experts + local_expert] +
+      rank_in_chunk;
+  const int permuted_idx = expert_padded_offsets[local_expert] + global_rank;
+  expanded_idx_to_permuted_idx[slot] = permuted_idx;
+  permuted_idx_to_token_idx[permuted_idx] = slot / TOPK;
+}
+
 }  // namespace
 
 void routing_topk_softmax_type1_cuda(torch::Tensor routing_logits, torch::Tensor topk_ids,
@@ -1450,6 +1605,74 @@ void routing_topk_softmax_type1_pack_cuda(torch::Tensor routing_logits,
         scale);
   }
   C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+void routing_metadata_from_packed_cuda(
+    torch::Tensor topk_packed, torch::Tensor expanded_idx_to_permuted_idx,
+    torch::Tensor permuted_idx_to_token_idx, torch::Tensor cta_idx_xy_to_batch_idx,
+    torch::Tensor cta_idx_xy_to_mn_limit, torch::Tensor num_non_exiting_ctas,
+    torch::Tensor total_num_padded_tokens, torch::Tensor expert_counts,
+    torch::Tensor expert_padded_offsets, torch::Tensor chunk_counts,
+    torch::Tensor chunk_offsets, int64_t num_experts, int64_t local_expert_offset,
+    int64_t local_num_experts, int64_t tile_tokens_dim) {
+  const int T = static_cast<int>(topk_packed.size(0));
+  const int TOPK = static_cast<int>(topk_packed.size(1));
+  const int total_slots = T * TOPK;
+  const auto stream = at::cuda::getCurrentCUDAStream();
+
+  C10_CUDA_CHECK(cudaMemsetAsync(expert_counts.data_ptr<int32_t>(), 0,
+                                 expert_counts.numel() * sizeof(int32_t),
+                                 stream.stream()));
+  C10_CUDA_CHECK(cudaMemsetAsync(expanded_idx_to_permuted_idx.data_ptr<int32_t>(), 0xFF,
+                                 expanded_idx_to_permuted_idx.numel() * sizeof(int32_t),
+                                 stream.stream()));
+  C10_CUDA_CHECK(cudaMemsetAsync(permuted_idx_to_token_idx.data_ptr<int32_t>(), 0xFF,
+                                 permuted_idx_to_token_idx.numel() * sizeof(int32_t),
+                                 stream.stream()));
+  C10_CUDA_CHECK(cudaMemsetAsync(cta_idx_xy_to_batch_idx.data_ptr<int32_t>(), 0xFF,
+                                 cta_idx_xy_to_batch_idx.numel() * sizeof(int32_t),
+                                 stream.stream()));
+  C10_CUDA_CHECK(cudaMemsetAsync(cta_idx_xy_to_mn_limit.data_ptr<int32_t>(), 0xFF,
+                                 cta_idx_xy_to_mn_limit.numel() * sizeof(int32_t),
+                                 stream.stream()));
+
+  constexpr int block = 256;
+  const int rank_shared_bytes =
+      (static_cast<int>(local_num_experts) + block) * static_cast<int>(sizeof(int32_t));
+  const int num_rank_chunks = static_cast<int>(chunk_counts.size(0));
+  if (num_rank_chunks > 0) {
+    routing_metadata_chunk_ranks_counts_kernel<<<num_rank_chunks, block, rank_shared_bytes,
+                                                  stream>>>(
+        topk_packed.data_ptr<int32_t>(), expanded_idx_to_permuted_idx.data_ptr<int32_t>(),
+        chunk_counts.data_ptr<int32_t>(), total_slots, static_cast<int>(num_experts),
+        static_cast<int>(local_expert_offset), static_cast<int>(local_num_experts));
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+  }
+
+  constexpr int prefix_block = 128;
+  const int prefix_grid =
+      (static_cast<int>(local_num_experts) + prefix_block - 1) / prefix_block;
+  routing_metadata_chunk_prefix_kernel<<<prefix_grid, prefix_block, 0, stream>>>(
+      chunk_counts.data_ptr<int32_t>(), chunk_offsets.data_ptr<int32_t>(),
+      expert_counts.data_ptr<int32_t>(), num_rank_chunks, static_cast<int>(local_num_experts));
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+
+  routing_metadata_prefix_kernel<<<1, 1, 0, stream>>>(
+      expert_counts.data_ptr<int32_t>(), expert_padded_offsets.data_ptr<int32_t>(),
+      cta_idx_xy_to_batch_idx.data_ptr<int32_t>(), cta_idx_xy_to_mn_limit.data_ptr<int32_t>(),
+      num_non_exiting_ctas.data_ptr<int32_t>(), total_num_padded_tokens.data_ptr<int32_t>(),
+      static_cast<int>(local_num_experts), static_cast<int>(tile_tokens_dim));
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+
+  if (total_slots > 0) {
+    const int grid = (total_slots + block - 1) / block;
+    routing_metadata_scatter_kernel<<<grid, block, 0, stream>>>(
+        topk_packed.data_ptr<int32_t>(), expanded_idx_to_permuted_idx.data_ptr<int32_t>(),
+        permuted_idx_to_token_idx.data_ptr<int32_t>(), expert_padded_offsets.data_ptr<int32_t>(),
+        chunk_offsets.data_ptr<int32_t>(), total_slots, TOPK, block, static_cast<int>(num_experts),
+        static_cast<int>(local_expert_offset), static_cast<int>(local_num_experts));
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+  }
 }
 
 void fused_moe_forward_cuda(torch::Tensor hidden_states, torch::Tensor hidden_states_scale,

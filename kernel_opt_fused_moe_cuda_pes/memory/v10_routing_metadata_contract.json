@@ -1,0 +1,61 @@
+{
+  "version": "v10_routing_metadata_contract",
+  "masked": false,
+  "timestamp": "2026-07-02T01:59:00Z",
+  "operator": "flashinfer.trtllm_fp4_block_scale_moe",
+  "application_profile": "Qwen3_5-Plus_prefill_TP1_G11",
+  "input_contract": "packed_nvfp4_activation_flashinfer_prepared_weights",
+  "optimization": {
+    "action_category": "moe_specific_routing_metadata",
+    "action_description": "Add an in-repo CUDA extension path that converts TRT-LLM PackedScoreIdx<bf16> top-k routing into the MoE grouped-GEMM metadata consumed by FlashInfer/TensorRT-LLM: expanded_idx_to_permuted_idx, permuted_idx_to_token_idx, cta_idx_xy_to_batch_idx, cta_idx_xy_to_mn_limit, num_non_exiting_ctas, total_num_padded_tokens, and expert counts/offsets.",
+    "implementation": "Use chunk-parallel deterministic rank generation. Each 256-slot chunk computes in-chunk ranks and per-expert counts, a per-expert prefix over chunks produces global ranks, and scatter adds padded expert offsets to match FlashInfer's expert-major permuted token order.",
+    "expected_impact": "This creates the correct metadata contract needed to replace the current scalar FP4 stage kernels with a TensorRT-LLM-style grouped GEMM path. It does not yet make the full candidate faster than FlashInfer."
+  },
+  "correctness": {
+    "status": "PASS",
+    "reference": "probe_routing_metadata.py Python reproduction of FlashInfer block routing rules for PackedScoreIdx<bf16>",
+    "validated_invariants": [
+      "expanded_idx_to_permuted_idx",
+      "permuted_idx_to_token_idx",
+      "cta_idx_xy_to_batch_idx active prefix",
+      "cta_idx_xy_to_mn_limit active prefix",
+      "expert_counts",
+      "expert_padded_offsets",
+      "num_non_exiting_ctas",
+      "total_num_padded_tokens"
+    ],
+    "g11_tokens_8_mismatches": 0,
+    "g11_full_mismatches": 0
+  },
+  "performance": {
+    "profiles": [
+      "profiles/routing_metadata_t8.json",
+      "profiles/routing_metadata_g11_full.json"
+    ],
+    "g11_tokens_8": {
+      "tile_tokens_dim": 8,
+      "routing_pack_type1_us": 124.60800260305405,
+      "routing_metadata_from_packed_us": 109.56799983978271,
+      "routing_pack_plus_metadata_us": 218.27200055122375
+    },
+    "g11_full": {
+      "tokens": 9500,
+      "tile_tokens_dim": 256,
+      "num_non_exiting_ctas": 512,
+      "total_num_padded_tokens": 131072,
+      "routing_pack_type1_us": 238.43200504779816,
+      "routing_metadata_from_packed_us": 151.93599462509155,
+      "routing_pack_plus_metadata_us": 374.65599179267883
+    },
+    "comparison_to_previous_ordered_rank": "The first deterministic single-block rank implementation passed correctness but measured about 1023.68 us on full G11 metadata. The chunk-parallel implementation reduced full G11 metadata latency to about 151.94 us while preserving zero mismatches."
+  },
+  "quality_gate": {
+    "result": "PARTIAL_PROGRESS",
+    "reason": "The routing metadata contract is now correct and reasonably cheap, but the end-to-end candidate still uses scalar/software FP4 stage1/stage2 kernels and remains slower than flashinfer.trtllm_fp4_block_scale_moe."
+  },
+  "next_step": {
+    "action_category": "grouped_gemm_tensor_core_path",
+    "description": "Use the validated metadata to drive a grouped/tiled FP4 GEMM path for stage1, followed by SwiGLU+NVFP4 quantization and grouped stage2 finalize/scatter. The next proof point should replace one scalar stage with a tensor-core path without calling flashinfer.trtllm_fp4_block_scale_moe."
+  },
+  "git_commit_hash": "pending"
+}

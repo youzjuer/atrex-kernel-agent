@@ -129,6 +129,32 @@ def _use_cuda_type1_routing(
 
 
 @torch.no_grad()
+def routing_metadata_from_packed(
+    topk_packed: torch.Tensor,
+    *,
+    num_experts: int,
+    local_expert_offset: int,
+    local_num_experts: int,
+    tile_tokens_dim: int,
+) -> list[torch.Tensor]:
+    """Build TensorRT-LLM MoE routing metadata from PackedScoreIdx<bf16> top-k."""
+    if topk_packed.dtype != torch.int32:
+        raise TypeError("topk_packed must be torch.int32")
+    if topk_packed.ndim != 2:
+        raise ValueError("topk_packed must have shape [T, top_k]")
+    ext = _load_ext()
+    return list(
+        ext.routing_metadata_from_packed(
+            topk_packed.contiguous(),
+            int(num_experts),
+            int(local_expert_offset),
+            int(local_num_experts),
+            int(tile_tokens_dim),
+        )
+    )
+
+
+@torch.no_grad()
 def run(
     routing_logits: torch.Tensor,
     routing_bias: Optional[torch.Tensor],

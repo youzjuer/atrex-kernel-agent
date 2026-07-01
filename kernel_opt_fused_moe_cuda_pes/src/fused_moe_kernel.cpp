@@ -1,6 +1,10 @@
 #include <torch/extension.h>
+#include <pybind11/stl.h>
 
+#include <algorithm>
+#include <limits>
 #include <stdexcept>
+#include <vector>
 
 void fused_moe_forward_cuda(torch::Tensor hidden_states, torch::Tensor hidden_states_scale,
                             torch::Tensor gemm1_weights, torch::Tensor gemm1_weights_scale,
@@ -19,9 +23,32 @@ void routing_topk_softmax_type1_pack_cuda(torch::Tensor routing_logits,
                                           torch::Tensor topk_packed, int64_t top_k,
                                           double routed_scaling_factor);
 
+void routing_metadata_from_packed_cuda(
+    torch::Tensor topk_packed, torch::Tensor expanded_idx_to_permuted_idx,
+    torch::Tensor permuted_idx_to_token_idx, torch::Tensor cta_idx_xy_to_batch_idx,
+    torch::Tensor cta_idx_xy_to_mn_limit, torch::Tensor num_non_exiting_ctas,
+    torch::Tensor total_num_padded_tokens, torch::Tensor expert_counts,
+    torch::Tensor expert_padded_offsets, torch::Tensor chunk_counts,
+    torch::Tensor chunk_offsets, int64_t num_experts, int64_t local_expert_offset,
+    int64_t local_num_experts, int64_t tile_tokens_dim);
+
 static void check_tensor(const torch::Tensor& tensor, const char* name) {
   TORCH_CHECK(tensor.is_cuda(), name, " must be a CUDA tensor");
   TORCH_CHECK(tensor.is_contiguous(), name, " must be contiguous");
+}
+
+static int64_t get_max_num_ctas_in_batch_dim(int64_t num_tokens, int64_t top_k,
+                                             int64_t num_experts,
+                                             int64_t tile_tokens_dim) {
+  int64_t num_remaining_tokens = num_tokens * top_k;
+  int64_t max_num_ctas = 0;
+  const int64_t num_experts_filled = std::min(num_experts, num_remaining_tokens);
+  max_num_ctas += num_experts_filled;
+  num_remaining_tokens -= num_experts_filled;
+  if (num_remaining_tokens > 0) {
+    max_num_ctas += num_remaining_tokens / tile_tokens_dim;
+  }
+  return max_num_ctas;
 }
 
 torch::Tensor fused_moe_forward(torch::Tensor hidden_states, torch::Tensor hidden_states_scale,
@@ -158,6 +185,66 @@ torch::Tensor routing_pack_type1(torch::Tensor routing_logits, int64_t top_k,
   return topk_packed;
 }
 
+std::vector<torch::Tensor> routing_metadata_from_packed(
+    torch::Tensor topk_packed, int64_t num_experts, int64_t local_expert_offset,
+    int64_t local_num_experts, int64_t tile_tokens_dim) {
+  check_tensor(topk_packed, "topk_packed");
+  TORCH_CHECK(topk_packed.scalar_type() == torch::kInt32, "topk_packed must be int32");
+  TORCH_CHECK(topk_packed.dim() == 2, "topk_packed must have shape [T, top_k]");
+  TORCH_CHECK(num_experts > 0, "num_experts must be positive");
+  TORCH_CHECK(local_num_experts > 0, "local_num_experts must be positive");
+  TORCH_CHECK(local_expert_offset >= 0, "local_expert_offset must be non-negative");
+  TORCH_CHECK(num_experts >= local_expert_offset + local_num_experts,
+              "num_experts must cover the local expert range");
+  TORCH_CHECK(tile_tokens_dim > 0, "tile_tokens_dim must be positive");
+
+  const int64_t T = topk_packed.size(0);
+  const int64_t top_k = topk_packed.size(1);
+  TORCH_CHECK(top_k > 0, "topk_packed top_k dimension must be positive");
+  TORCH_CHECK(T <= std::numeric_limits<int32_t>::max(), "T exceeds int32 range");
+  TORCH_CHECK(top_k <= std::numeric_limits<int32_t>::max(), "top_k exceeds int32 range");
+  TORCH_CHECK(num_experts <= std::numeric_limits<int32_t>::max(),
+              "num_experts exceeds int32 range");
+  TORCH_CHECK(local_num_experts <= std::numeric_limits<int32_t>::max(),
+              "local_num_experts exceeds int32 range");
+  TORCH_CHECK(tile_tokens_dim <= std::numeric_limits<int32_t>::max(),
+              "tile_tokens_dim exceeds int32 range");
+  TORCH_CHECK(T * top_k <= std::numeric_limits<int32_t>::max(),
+              "expanded token count exceeds int32 range");
+
+  const int64_t max_num_ctas =
+      get_max_num_ctas_in_batch_dim(T, top_k, num_experts, tile_tokens_dim);
+  const int64_t max_num_padded_tokens = max_num_ctas * tile_tokens_dim;
+  TORCH_CHECK(max_num_ctas <= std::numeric_limits<int32_t>::max(),
+              "max_num_ctas exceeds int32 range");
+  TORCH_CHECK(max_num_padded_tokens <= std::numeric_limits<int32_t>::max(),
+              "max_num_padded_tokens exceeds int32 range");
+
+  auto int_options = topk_packed.options().dtype(torch::kInt32);
+  auto expanded_idx_to_permuted_idx = torch::empty({T, top_k}, int_options);
+  auto permuted_idx_to_token_idx = torch::empty({max_num_padded_tokens}, int_options);
+  auto cta_idx_xy_to_batch_idx = torch::empty({max_num_ctas}, int_options);
+  auto cta_idx_xy_to_mn_limit = torch::empty({max_num_ctas}, int_options);
+  auto num_non_exiting_ctas = torch::empty({1}, int_options);
+  auto total_num_padded_tokens = torch::empty({1}, int_options);
+  auto expert_counts = torch::empty({local_num_experts}, int_options);
+  auto expert_padded_offsets = torch::empty({local_num_experts + 1}, int_options);
+  constexpr int64_t rank_chunk_size = 256;
+  const int64_t num_rank_chunks = (T * top_k + rank_chunk_size - 1) / rank_chunk_size;
+  auto chunk_counts = torch::empty({num_rank_chunks, local_num_experts}, int_options);
+  auto chunk_offsets = torch::empty({num_rank_chunks, local_num_experts}, int_options);
+
+  routing_metadata_from_packed_cuda(
+      topk_packed, expanded_idx_to_permuted_idx, permuted_idx_to_token_idx,
+      cta_idx_xy_to_batch_idx, cta_idx_xy_to_mn_limit, num_non_exiting_ctas,
+      total_num_padded_tokens, expert_counts, expert_padded_offsets, chunk_counts,
+      chunk_offsets, num_experts, local_expert_offset, local_num_experts, tile_tokens_dim);
+
+  return {expanded_idx_to_permuted_idx, permuted_idx_to_token_idx,
+          cta_idx_xy_to_batch_idx, cta_idx_xy_to_mn_limit, num_non_exiting_ctas,
+          total_num_padded_tokens, expert_counts, expert_padded_offsets};
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("forward", &fused_moe_forward,
         "FlashInfer-aligned FP4 block-scale MoE staged CUDA baseline");
@@ -165,4 +252,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "FlashInfer-aligned FP4 block-scale MoE with CUDA routing_method_type=1");
   m.def("routing_pack_type1", &routing_pack_type1,
         "Pack routing_method_type=1 TopK as TRT-LLM PackedScoreIdx<bf16>");
+  m.def("routing_metadata_from_packed", &routing_metadata_from_packed,
+        "Build TRT-LLM MoE grouped-GEMM routing metadata from PackedScoreIdx<bf16>");
 }

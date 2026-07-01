@@ -1,0 +1,47 @@
+{
+  "status": "PASS",
+  "operator": "flashinfer.trtllm_fp4_block_scale_moe routing metadata contract",
+  "preset": "g11",
+  "tokens": 8,
+  "shape": {
+    "hidden_states": [
+      8,
+      2048
+    ],
+    "hidden_states_dtype": "torch.uint8",
+    "hidden_states_scale": [
+      8,
+      256
+    ],
+    "hidden_states_scale_dtype": "torch.float8_e4m3fn",
+    "hidden_size": 4096,
+    "intermediate_size": 1024,
+    "num_experts": 512,
+    "local_num_experts": 512,
+    "top_k": 10,
+    "tile_tokens_dim": 8
+  },
+  "metadata": {
+    "num_non_exiting_ctas": 73,
+    "total_num_padded_tokens": 584,
+    "allocated_ctas": 80,
+    "allocated_padded_tokens": 640,
+    "max_expert_count": 3,
+    "nonzero_experts": 73
+  },
+  "mismatches": {
+    "expanded": 0,
+    "permuted_to_token": 0,
+    "cta_batch_active": 0,
+    "cta_mn_limit_active": 0,
+    "expert_counts": 0,
+    "expert_offsets": 0,
+    "num_ctas": 0,
+    "total_padded": 0
+  },
+  "latency_us": {
+    "routing_pack_type1": 124.60800260305405,
+    "routing_metadata_from_packed": 109.56799983978271,
+    "routing_pack_plus_metadata": 218.27200055122375
+  }
+}
