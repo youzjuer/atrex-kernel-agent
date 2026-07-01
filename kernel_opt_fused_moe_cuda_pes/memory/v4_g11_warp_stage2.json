@@ -1,0 +1,51 @@
+{
+  "version": "v4_g11_warp_stage2",
+  "masked": false,
+  "timestamp": "2026-07-02T00:27:38+08:00",
+  "operator": "flashinfer.trtllm_fp4_block_scale_moe",
+  "application_profile": "Qwen3_5-Plus_prefill_TP1_G11",
+  "performance": {
+    "latency_us": 735.7760071754456,
+    "flashinfer_latency_us": 411.296010017395,
+    "speedup_vs_flashinfer": 0.5589962244030086,
+    "comparison_with_previous": {
+      "previous_g11_tokens8_latency_us": 2953.3119201660156,
+      "speedup_vs_previous_g11_tokens8": 4.014565860276766,
+      "note": "Previous number is the FlashInfer-aligned packed NVFP4 scalar staged path before fp8 scale caching and warp stage2."
+    },
+    "scaling_check": {
+      "g11_tokens128_latency_us": 9329.055786132812,
+      "g11_tokens128_flashinfer_latency_us": 841.6640162467957,
+      "g11_tokens128_speedup_vs_flashinfer": 0.09021963589261502
+    }
+  },
+  "optimization": {
+    "action_category": "scale_cache_and_warp_stage2",
+    "action_description": "Cache fp32 conversions of prepared fp8 scales in kernel.py and replace stage2 grouped atomic finalize with a warp-per-output direct top-k finalize path for NVFP4 scale_vec=16.",
+    "expected_impact": "Remove repeated GB-scale fp8->fp32 scale conversions during timed calls, eliminate T-by-H accumulation/completion buffers, and parallelize the stage2 I-dimension reduction across a warp.",
+    "risks_and_rollback": "Scale cache is keyed by tensor identity and assumes prepared weights/scales are immutable across repeated calls. Roll back commit 4c4eff4 if a caller mutates scale tensors in place or if non-G11 routing semantics require the previous grouped finalize."
+  },
+  "profile_evidence": {
+    "tool_used": "torch.cuda.Event + ncu gpu__time_duration.sum",
+    "evidence_summary": "G11 tokens=8 packed NVFP4 PASS: candidate 735.776us vs FlashInfer 411.296us. ncu: stage1_activation_fp4_warp_k_kernel 407.136us, stage2_direct_topk_finalize_warp_kernel 189.344us, quantize_dequant_mid_fp4_kernel 5.600us.",
+    "bottleneck_type": "compute_bound_scalar_fp4",
+    "evidence_chain": "scale conversion cache reduced endpoint latency from 2853us to 1765us; warp stage2 reduced it to 736us; tokens=128 still falls to 0.090x vs FlashInfer, proving scalar FP4 FMA must be replaced by Blackwell FP4 tensor-core grouped GEMM for the real tp=1 target."
+  },
+  "correctness": {
+    "status": "PASS",
+    "max_abs": 0.00390625,
+    "max_rel": 1.3259259462356567,
+    "profiles": [
+      "/tmp/atrex_smoke_warp_stage2.json",
+      "/tmp/atrex_g11_t8_warp_correctness.json",
+      "/tmp/atrex_g11_t8_warp_profile.json",
+      "/tmp/atrex_g11_t128_warp_profile.json",
+      "/tmp/atrex_g11_t8_warp_ncu_correctness.json"
+    ]
+  },
+  "quality_gate": {
+    "result": "PARTIAL_PASS",
+    "failure_reason": "Correctness passes and tokens=8 improved, but the real objective is not met; tokens=128 and projected full G11 require a tensor-core grouped GEMM rewrite."
+  },
+  "git_commit_hash": "4c4eff4"
+}

@@ -148,15 +148,28 @@ available only as a no-op orchestration smoke fallback.
 ## Current Baseline
 
 - `kernel.py`: FlashInfer-compatible Python entrypoint and routing glue.
+  - Caches fp32 views of prepared fp8 scale tensors by tensor identity to avoid converting static
+    G11 weight scales on every timed call.
 - `src/fused_moe_kernel.cpp`: C++ validation and PyTorch binding.
 - `src/fused_moe_kernel.cu`: staged CUDA baseline for packed FP4 block-scale MoE:
-  - `stage1_activation_kernel`: computes `silu(X2) * X1` once for each `(token, topk, I)`.
-  - `stage2_output_kernel`: reuses the intermediate activation for all output columns.
+  - stage1 computes `silu(X2) * X1` once for each `(token, topk, I)`.
+  - packed NVFP4 G11 path mirrors FlashInfer's intermediate FP4 quantize/dequantize behavior.
+  - stage2 has a warp-per-output direct top-k finalize path for `gemm2_scale_vec == 16`; it avoids
+    the previous expert-grouped atomic accumulation buffers and T-by-H completion counters.
 - `reference.py`: FlashInfer-aligned PyTorch oracle and deterministic input generator.
 - `test_kernel.py`: correctness/profile evaluator. Catalog packed-NVFP4 presets use real
   FlashInfer as the correctness oracle; performance target gating is checked only against real
   FlashInfer latency.
 
-This seed implementation is still not a production grouped-GEMM implementation, but it removes the
-largest scalar redundancy from the initial correctness seed and gives PES a better starting point
-for expert grouping and tiled FP4 dequantization. It is not the performance baseline.
+Recent G11 packed-NVFP4 measurements on the real FlashInfer contract:
+
+| case | candidate | FlashInfer | status |
+|---|---:|---:|---|
+| G11 tokens=8 after scale-cache + warp stage2 | 735.776 us | 411.296 us | PASS, `0.559x` |
+| G11 tokens=128 after scale-cache + warp stage2 | 9329.056 us | 841.664 us | PASS, `0.090x` |
+
+`ncu` on G11 tokens=8 attributes the current CUDA time mostly to scalar stage1 (`407.136 us`) and
+warp stage2 (`189.344 us`). The tokens=128 scaling confirms that scalar FP4 FMA is not a viable
+path to the tp=1 G11 target. The next implementation step must replace stage1/stage2 with
+Blackwell FP4 tensor-core grouped GEMM, matching FlashInfer/TensorRT-LLM's routing + shuffled-weight
+block-scale structure.
