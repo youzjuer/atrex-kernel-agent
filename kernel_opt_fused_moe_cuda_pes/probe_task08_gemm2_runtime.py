@@ -35,6 +35,9 @@ from workload_shapes import get_shape
 
 DEFAULT_GEMM2_SYMBOL = V310_SYMBOL
 ATREX_GEMM2_TILEGRID_SPLITCOL_SYMBOL = "atrex_gemm2_tilegrid_splitcolepi"
+ATREX_GEMM2_TILEGRID_SPLITCOL_POSTSYNC_SYMBOL = (
+    "atrex_gemm2_tilegrid_splitcolepi_postsync"
+)
 
 
 def _bench(fn, warmup: int, rep: int) -> float:
@@ -206,6 +209,66 @@ torch::Tensor
       "atrex GEMM2 tile-grid split-column epilogue probe");
 }}
 
+torch::Tensor
+{ATREX_GEMM2_TILEGRID_SPLITCOL_POSTSYNC_SYMBOL}(
+    torch::Tensor a_fp4,
+    torch::Tensor a_scale_swizzled_u8,
+    torch::Tensor w13_fp4,
+    torch::Tensor w13_scale_swizzled_u8,
+    torch::Tensor expert_offsets) {{
+  return up_gate_fp4_sm103_umma_tma_u8_cta2_v142_tmaprefetch_tilegrid_compat_impl<
+      false, // kPrefetchAllTma
+      false, // kPrefetchAbTmaOnly
+      false, // kPrefetchSfTmaOnly
+      false, // kCircularAbDesc
+      false, // kSfPairCadence
+      false, // kSkipSplitScaleTmemFence
+      true,  // kBScaleArriveReady
+      false, // kRank0SelfReadyArrive
+      false, // kSkipEpilogue
+      false, // kLdX32Epilogue
+      false, // kStreamStoreEpilogue
+      false, // kPeerSkipBScaleTma
+      false, // kAfillMma
+      true,  // kSplitColumnEpilogue
+      false, // kSkipInvalidRowsEpilogue
+      false, // kSplitAbSfBarrierImpl
+      false, // kDualLoadArriveImpl
+      false, // kSingleTmaProducerImpl
+      4,
+      false, // kQuadColumnEpilogue
+      kThreads,
+      true,  // kDrainFinalSlotOnlyImpl
+      true,  // kSkipPostTileClusterSyncImpl
+      false, // kPostTileLeaderGateImpl
+      false, // kPostTileConsumerGateOnlyImpl
+      false, // kDualPollReadyBScaleImpl
+      false, // kBScaleWaitBeforeReadyImpl
+      false, // kPostTileMmaConsumerGateOnlyImpl
+      false, // kDelayPostTileMmaGateImpl
+      false, // kDelayPostTileGateBeforeReadyImpl
+      false, // kDelayPostTileGateBeforeScaleImpl
+      false, // kSkipPostEpilogueSyncImpl
+      false, // kOverlapProducerEpilogueImpl
+      false, // kSmemCoalescedEpilogueImpl
+      false, // kTmaStoreRank0EpilogueImpl
+      false, // kTmaStoreRank0DeferredEpilogueImpl
+      false, // kSkipPreEpilogueSyncWhenNoEpilogueImpl
+      false, // kPreEpilogueMmaDoneGateImpl
+      false, // kEpilogueNoStoreDiagImpl
+      false, // kEpilogueZeroStoreDiagImpl
+      false, // kEpilogueCoalescedZeroStoreDiagImpl
+      true,  // kTileGridLaunchImpl
+      false>( // kEpiPipeTmaImmediateEpilogueImpl
+      a_fp4,
+      a_scale_swizzled_u8,
+      w13_fp4,
+      w13_scale_swizzled_u8,
+      expert_offsets,
+      "ATREX_GEMM2_TILEGRID_POSTSYNC_WORKER_CLUSTERS",
+      "atrex GEMM2 tile-grid split-column post-sync epilogue probe");
+}}
+
 """
     text, counts["atrex_tilegrid_splitcol_wrapper"] = _replace_once(
         text,
@@ -216,6 +279,10 @@ torch::Tensor
       "{ATREX_GEMM2_TILEGRID_SPLITCOL_SYMBOL}",
       &{ATREX_GEMM2_TILEGRID_SPLITCOL_SYMBOL},
       "atrex generated task08 GEMM2 tile-grid split-column epilogue probe");
+  m.def(
+      "{ATREX_GEMM2_TILEGRID_SPLITCOL_POSTSYNC_SYMBOL}",
+      &{ATREX_GEMM2_TILEGRID_SPLITCOL_POSTSYNC_SYMBOL},
+      "atrex generated task08 GEMM2 tile-grid split-column post-sync epilogue probe");
 '''
     text, counts["atrex_tilegrid_splitcol_bind"] = _replace_once(
         text,

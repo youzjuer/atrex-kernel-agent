@@ -74,6 +74,16 @@ __device__ __forceinline__ int prepared_gemm2_row(int logical_row,
   return use_prepared_layout ? shuffle32_src_to_dst_row(logical_row) : logical_row;
 }
 
+__device__ __forceinline__ int inverse_prepared_gemm2_row(
+    int physical_row,
+    bool use_prepared_layout) {
+  if (!use_prepared_layout) {
+    return physical_row;
+  }
+  const int in_block = physical_row & 31;
+  return (physical_row & ~31) + ((in_block & 7) << 2) + (in_block >> 3);
+}
+
 __device__ __forceinline__ int64_t scale_offset_128x4(int row, int col, int cols) {
   const int padded_cols = (cols + 3) & ~3;
   const int column_idx_in_group = col & 3;
@@ -1533,7 +1543,7 @@ __global__ void final_scatter_from_bmm_kernel(
     int padded_rows,
     bool use_prepared_output_layout) {
   const int token = blockIdx.x;
-  const int h = blockIdx.y * blockDim.x + threadIdx.x;
+  const int src_h0 = (blockIdx.y * blockDim.x + threadIdx.x) * 2;
   if (token >= T) {
     return;
   }
@@ -1562,12 +1572,15 @@ __global__ void final_scatter_from_bmm_kernel(
   }
   __syncthreads();
 
-  if (h >= H) {
+  if (src_h0 >= H) {
     return;
   }
 
-  const int src_h = prepared_gemm2_row(h, use_prepared_output_layout);
-  float acc = 0.0f;
+  const int src_h1 = src_h0 + 1;
+  const int dst_h0 = inverse_prepared_gemm2_row(src_h0, use_prepared_output_layout);
+  const int dst_h1 = inverse_prepared_gemm2_row(src_h1, use_prepared_output_layout);
+  float acc0 = 0.0f;
+  float acc1 = 0.0f;
 
 #pragma unroll
   for (int k = 0; k < 16; ++k) {
@@ -1578,11 +1591,20 @@ __global__ void final_scatter_from_bmm_kernel(
     if (row < 0) {
       continue;
     }
-    const float value = __bfloat162float(gemm2_out[static_cast<int64_t>(row) * H + src_h]);
-    acc = fmaf(weights[k], value, acc);
+    const int64_t offset = static_cast<int64_t>(row) * H + src_h0;
+    const uint32_t packed = *reinterpret_cast<const uint32_t*>(gemm2_out + offset);
+    const float value0 =
+        __bfloat162float(__ushort_as_bfloat16(static_cast<uint16_t>(packed & 0xFFFFu)));
+    const float value1 =
+        __bfloat162float(__ushort_as_bfloat16(static_cast<uint16_t>(packed >> 16)));
+    acc0 = fmaf(weights[k], value0, acc0);
+    acc1 = fmaf(weights[k], value1, acc1);
   }
 
-  out[static_cast<int64_t>(token) * H + h] = __float2bfloat16(acc);
+  out[static_cast<int64_t>(token) * H + dst_h0] = __float2bfloat16(acc0);
+  if (src_h1 < H) {
+    out[static_cast<int64_t>(token) * H + dst_h1] = __float2bfloat16(acc1);
+  }
 }
 
 __global__ void routing_metadata_chunk_ranks_counts_kernel(
@@ -2092,7 +2114,8 @@ void final_scatter_from_bmm_cuda(torch::Tensor gemm2_out, torch::Tensor topk_pac
   }
 
   constexpr int block = 128;
-  const dim3 grid(T, (H + block - 1) / block, 1);
+  const int h_pairs = (H + 1) / 2;
+  const dim3 grid(T, (h_pairs + block - 1) / block, 1);
   const auto stream = at::cuda::getCurrentCUDAStream();
   final_scatter_from_bmm_kernel<<<grid, block, 0, stream>>>(
       reinterpret_cast<const __nv_bfloat16*>(gemm2_out.data_ptr<at::BFloat16>()),

@@ -15,7 +15,7 @@ import torch
 
 import kernel
 from probe_task08_gemm2_runtime import (
-    ATREX_GEMM2_TILEGRID_SPLITCOL_SYMBOL,
+    ATREX_GEMM2_TILEGRID_SPLITCOL_POSTSYNC_SYMBOL,
     _compile_gemm2_extension,
     _prepare_gemm1_tree,
     _prepare_gemm2_tree,
@@ -98,6 +98,45 @@ def _abs_stats(tensor: torch.Tensor) -> dict[str, float | bool]:
         "finite": bool(torch.isfinite(values).all()),
         "max": float(values.max().item()),
         "mean": float(values.mean().item()),
+    }
+
+
+def _gemm2_row_group_abs_stats(
+    tensor: torch.Tensor,
+    expert_counts: torch.Tensor,
+    padded_rows: int,
+) -> dict[str, dict[str, float | int | bool]]:
+    values = tensor.float().abs()
+    rows = values.shape[0]
+    hidden = values.shape[1]
+    local_num_experts = int(expert_counts.numel())
+    if rows != local_num_experts * int(padded_rows):
+        return {
+            "valid_rows": {"finite": False, "rows": 0, "max": float("nan"), "mean": float("nan")},
+            "padding_rows": {"finite": False, "rows": 0, "max": float("nan"), "mean": float("nan")},
+        }
+
+    row_max = values.amax(dim=1)
+    row_sum = values.sum(dim=1)
+    row_idx = torch.arange(int(padded_rows), device=tensor.device, dtype=expert_counts.dtype)
+    valid_mask = (row_idx.unsqueeze(0) < expert_counts.unsqueeze(1)).reshape(-1)
+
+    def summarize(mask: torch.Tensor) -> dict[str, float | int | bool]:
+        row_count = int(mask.sum().item())
+        if row_count == 0:
+            return {"finite": True, "rows": 0, "max": 0.0, "mean": 0.0}
+        selected_max = row_max[mask]
+        selected_sum = row_sum[mask]
+        return {
+            "finite": bool(torch.isfinite(selected_max).all() and torch.isfinite(selected_sum).all()),
+            "rows": row_count,
+            "max": float(selected_max.max().item()),
+            "mean": float((selected_sum.sum() / (row_count * hidden)).item()),
+        }
+
+    return {
+        "valid_rows": summarize(valid_mask),
+        "padding_rows": summarize(~valid_mask),
     }
 
 
@@ -287,6 +326,9 @@ def run_probe(args: argparse.Namespace) -> dict:
     candidate = _run_task08_pipeline(case, gemm1_fn, gemm2_fn, args)
     torch.cuda.synchronize()
     gemm2_abs = _abs_stats(candidate["gemm2_out"])
+    gemm2_row_group_abs = _gemm2_row_group_abs_stats(
+        candidate["gemm2_out"], case["expert_counts"], int(args.mpad)
+    )
 
     _trace(args, "run FlashInfer reference")
     import flashinfer
@@ -441,6 +483,7 @@ def run_probe(args: argparse.Namespace) -> dict:
             "errors_vs_flashinfer": errors,
             "direct_layout_errors_vs_flashinfer": direct_layout_errors,
             "gemm2_out_abs": gemm2_abs,
+            "gemm2_row_group_abs": gemm2_row_group_abs,
             "thresholds": {"max_abs": args.max_abs, "max_rel": args.max_rel},
         },
         "latency_us": {
@@ -463,7 +506,7 @@ def main() -> int:
     parser.add_argument("--task08-root", default=DEFAULT_TASK08_ROOT)
     parser.add_argument("--mpad", type=int, default=238)
     parser.add_argument("--tile-tokens-dim", type=int)
-    parser.add_argument("--gemm2-symbol", default=ATREX_GEMM2_TILEGRID_SPLITCOL_SYMBOL)
+    parser.add_argument("--gemm2-symbol", default=ATREX_GEMM2_TILEGRID_SPLITCOL_POSTSYNC_SYMBOL)
     parser.add_argument("--max-abs", type=float, default=0.75)
     parser.add_argument("--max-rel", type=float, default=8.0)
     parser.add_argument("--target-speedup", type=float, default=1.0)
