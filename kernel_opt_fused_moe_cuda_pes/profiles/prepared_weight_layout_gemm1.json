@@ -1,0 +1,87 @@
+{
+  "status": "PASS",
+  "operator": "FlashInfer/TRT-LLM prepared FP4 MoE weight layout",
+  "preset": "g11",
+  "epilogue_tile_m": 128,
+  "shape": {
+    "hidden_size": 4096,
+    "intermediate_size": 1024,
+    "num_experts": 512,
+    "local_num_experts": 512,
+    "top_k": 10,
+    "dtype": "nvfp4"
+  },
+  "layout": {
+    "gemm1": "row permutation = gated w3/w1 row interleave followed by block32 shuffle; scales then use NVFP4 128x4 swizzle",
+    "gemm2": "row permutation = block32 shuffle; scales then use NVFP4 128x4 swizzle"
+  },
+  "rows": [
+    {
+      "stage": "gemm1",
+      "rows": 2048,
+      "packed_cols": 2048,
+      "scale_cols": 256,
+      "row_indices_head": [
+        0,
+        2,
+        4,
+        6,
+        8,
+        10,
+        12,
+        14,
+        1024,
+        1026,
+        1028,
+        1030,
+        1032,
+        1034,
+        1036,
+        1038,
+        1,
+        3,
+        5,
+        7,
+        9,
+        11,
+        13,
+        15,
+        1025,
+        1027,
+        1029,
+        1031,
+        1033,
+        1035,
+        1037,
+        1039
+      ],
+      "weight_row_indices_compare": {
+        "status": "PASS",
+        "mismatches": 0,
+        "numel": 2048
+      },
+      "scale_row_indices_compare": {
+        "status": "PASS",
+        "mismatches": 0,
+        "numel": 2048
+      },
+      "weights_compare": {
+        "status": "PASS",
+        "mismatches": 0,
+        "numel": 2147483648,
+        "shape": "(512, 2048, 2048)",
+        "dtype": "torch.uint8"
+      },
+      "scales_compare": {
+        "status": "PASS",
+        "mismatches": 0,
+        "numel": 268435456,
+        "shape": "(512, 2048, 256)",
+        "dtype": "torch.float8_e4m3fn"
+      },
+      "latency_us": {
+        "local_scale_swizzle_after_row_permute": 1949.023962020874
+      }
+    }
+  ]
+}

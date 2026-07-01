@@ -1,0 +1,52 @@
+{
+  "version": "v13_prepared_weight_layout_contract",
+  "masked": false,
+  "timestamp": "2026-07-02T02:39:30Z",
+  "operator": "flashinfer.trtllm_fp4_block_scale_moe",
+  "application_profile": "Qwen3_5-Plus_prefill_TP1_G11",
+  "input_contract": "packed_nvfp4_activation_flashinfer_prepared_weights",
+  "optimization": {
+    "action_category": "prepared_weight_layout_contract",
+    "action_description": "Add a repo-side verifier for the vLLM/FlashInfer TRT-LLM prepared FP4 MoE weight layout. The verifier reimplements row permutation locally and uses the in-repo NVFP4 128x4 scale swizzle helper, then compares against FlashInfer row-index helpers and FlashInfer scale interleave byte-for-byte.",
+    "implementation": "GEMM1 prepared rows use gated w3/w1 interleave followed by block32 row shuffle. GEMM2 prepared rows use block32 row shuffle. For both stages, scale rows use the same row permutation before NVFP4 block_scale_interleave. This mirrors prepare_static_weights_for_trtllm_fp4_moe without calling it as the candidate path.",
+    "expected_impact": "This fixes the prepared-layout ambiguity before connecting an own FP4 BMM/grouped GEMM. A custom GEMM consuming the user-required prepared tensors must read rows through this permutation or account for the permuted output row order."
+  },
+  "correctness": {
+    "status": "PASS",
+    "reference": "probe_prepared_weight_layout.py compares local row indices to FlashInfer helpers and compares locally prepared random uint8/fp8 weight tensors against FlashInfer swizzle output.",
+    "gemm1": {
+      "profile": "profiles/prepared_weight_layout_gemm1.json",
+      "weight_row_index_mismatches": 0,
+      "scale_row_index_mismatches": 0,
+      "weight_mismatches": 0,
+      "weight_numel": 2147483648,
+      "scale_mismatches": 0,
+      "scale_numel": 268435456,
+      "row_indices_head": [0, 2, 4, 6, 8, 10, 12, 14, 1024, 1026, 1028, 1030, 1032, 1034, 1036, 1038]
+    },
+    "gemm2": {
+      "profile": "profiles/prepared_weight_layout_gemm2.json",
+      "weight_row_index_mismatches": 0,
+      "scale_row_index_mismatches": 0,
+      "weight_mismatches": 0,
+      "weight_numel": 1073741824,
+      "scale_mismatches": 0,
+      "scale_numel": 134217728,
+      "row_indices_head": [0, 4, 8, 12, 16, 20, 24, 28, 1, 5, 9, 13, 17, 21, 25, 29]
+    }
+  },
+  "performance": {
+    "note": "Prepared weights are static/offline, so these timings are not part of the runtime MoE target. They record the repo-local layout transform cost only.",
+    "gemm1_scale_swizzle_after_row_permute_us": 1949.023962020874,
+    "gemm2_scale_swizzle_after_row_permute_us": 952.1920084953308
+  },
+  "quality_gate": {
+    "result": "PARTIAL_PROGRESS",
+    "reason": "The prepared weight layout contract is now byte-verified for full TP=1 G11 tensor sizes, but end-to-end candidate GEMM still needs to be replaced with an own tensor-core FP4 implementation that beats flashinfer.trtllm_fp4_block_scale_moe."
+  },
+  "next_step": {
+    "action_category": "prepared_layout_bmm_gemm_stage",
+    "description": "Connect the packed hidden BMM activation layout to a custom FP4 GEMM that consumes the prepared row-permuted weights/scales directly, or explicitly compensates for the prepared output row order before SwiGLU/finalize."
+  },
+  "git_commit_hash": "pending"
+}
