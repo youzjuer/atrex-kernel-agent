@@ -1,0 +1,148 @@
+{
+  "status": "PASS",
+  "target_status": "SKIPPED",
+  "operator": "task08 packed-NVFP4 MoE end-to-end candidate",
+  "correctness_oracle": "flashinfer.trtllm_fp4_block_scale_moe",
+  "performance_baseline": "flashinfer.trtllm_fp4_block_scale_moe",
+  "preset": "g11",
+  "tokens": 9500,
+  "task08_root": "/home/youchunbo/code/sumu/omoExplore/proj/proj_019_moe_workload_op_opt/assets/task_08_cuda_fp4_bmm_sm103",
+  "work_roots": {
+    "gemm1": "/tmp/atrex_task08_gemm1_mpad238_src",
+    "gemm2": "/tmp/atrex_task08_gemm2_mpad238_src"
+  },
+  "compiled_symbol": {
+    "gemm1": "up_gate_fp4_sm103_umma_tma_u8_cta2_v310_cta_rank_specialized_tid0_consumer_from_v309",
+    "gemm2": "atrex_gemm2_tilegrid_splitcolepi_postsync"
+  },
+  "patch_counts": {
+    "gemm1": {
+      "comment_mpad": 1,
+      "flattened_rows_comment": 1,
+      "rows_const": 1,
+      "rows_per_expert_const": 1,
+      "fixed_mpad_static_assert": 1
+    },
+    "gemm2": {
+      "comment_shape": 1,
+      "flattened_rows_comment": 1,
+      "rows_const": 1,
+      "rows_per_expert_const": 1,
+      "kbytes_const": 1,
+      "kscale_const": 1,
+      "output_cols_const": 1,
+      "fixed_mpad_static_assert": 1,
+      "atrex_tilegrid_splitcol_wrapper": 1,
+      "atrex_tilegrid_splitcol_bind": 1
+    }
+  },
+  "shape": {
+    "hidden_size": 4096,
+    "intermediate_size": 1024,
+    "num_experts": 512,
+    "local_num_experts": 512,
+    "top_k": 10,
+    "tile_tokens_dim": 256,
+    "padded_rows": 238,
+    "hidden_states": [
+      9500,
+      2048
+    ],
+    "hidden_states_scale": [
+      9500,
+      256
+    ],
+    "a_fp4": [
+      121856,
+      2048
+    ],
+    "a_scale_swizzled_u8": [
+      512,
+      65536
+    ],
+    "gemm1_out": [
+      121856,
+      2048
+    ],
+    "mid_q": [
+      512,
+      238,
+      512
+    ],
+    "mid_scale": [
+      512,
+      238,
+      64
+    ],
+    "mid_scale_swizzled": [
+      512,
+      16384
+    ],
+    "gemm2_out": [
+      121856,
+      4096
+    ],
+    "out": [
+      9500,
+      4096
+    ]
+  },
+  "swiglu_requant_path": "metadata_valid_slots_padding_zero",
+  "expert_counts": {
+    "min": 141,
+    "max": 238,
+    "mean": 185.546875,
+    "nonzero": 512,
+    "total": 95000
+  },
+  "checks": {
+    "correctness": "PASS",
+    "prepared_output_layout": true,
+    "errors_vs_flashinfer": {
+      "finite": true,
+      "max_abs": 0.046875,
+      "mean_abs": 0.0049148076213896275,
+      "max_rel": 36.90338134765625,
+      "mean_rel": 0.11049167066812515
+    },
+    "direct_layout_errors_vs_flashinfer": {
+      "finite": true,
+      "max_abs": 1.89453125,
+      "mean_abs": 0.24385122954845428,
+      "max_rel": 1132.5892333984375,
+      "mean_rel": 4.145475387573242
+    },
+    "gemm2_out_abs": {
+      "finite": true,
+      "max": 4.75,
+      "mean": 0.45188283920288086
+    },
+    "gemm2_row_group_abs": {
+      "valid_rows": {
+        "finite": true,
+        "rows": 95000,
+        "max": 4.75,
+        "mean": 0.5796277523040771
+      },
+      "padding_rows": {
+        "finite": true,
+        "rows": 26856,
+        "max": 0.0,
+        "mean": 0.0
+      }
+    },
+    "thresholds": {
+      "max_abs": 0.75,
+      "max_rel": 8.0
+    }
+  },
+  "latency_us": {
+    "candidate_total": NaN,
+    "flashinfer_trtllm_fp4_block_scale_moe": NaN,
+    "speedup_vs_flashinfer": null,
+    "target_speedup": 1.0,
+    "stages": {}
+  },
+  "elapsed_s": 159.3044344270602,
+  "next_step": "Integrate the verified pipeline into the main candidate entrypoint."
+}

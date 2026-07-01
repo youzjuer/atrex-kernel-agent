@@ -1,0 +1,50 @@
+{
+  "version": "v17_swiglu_padding_zero_negative",
+  "date_utc": "2026-07-02",
+  "head_at_save": "533b22b Record GEMM2 warp-shuffle instability",
+  "goal": "Improve TP=1 G11 packed-NVFP4 end-to-end latency versus flashinfer.trtllm_fp4_block_scale_moe.",
+  "baseline_kept": {
+    "source_state": "reverted to committed best source",
+    "default_swiglu_requant_path": "metadata_valid_slots",
+    "best_committed_profile": "kernel_opt_fused_moe_cuda_pes/profiles/task08_end_to_end_g11_bench_scatter_oct_metadata_swiglu.json",
+    "best_committed_candidate_total_us": 2832.0000171661377,
+    "best_committed_swiglu_requant_us": 393.72798800468445,
+    "best_committed_flashinfer_us": 1403.007984161377
+  },
+  "experiment": {
+    "name": "SwiGLU/requant padding-only zero fast path",
+    "source_status": "reverted",
+    "idea": "Avoid full cudaMemset of mid_packed, mid_scale, and mid_scale_swizzled by zeroing only rows where row_in_expert >= expert_counts[expert], then computing valid routed rows exactly as the metadata_valid_slots path.",
+    "profiles": {
+      "correctness": "kernel_opt_fused_moe_cuda_pes/profiles/task08_end_to_end_g11_correctness_swiglu_padding_zero.json",
+      "bench": "kernel_opt_fused_moe_cuda_pes/profiles/task08_end_to_end_g11_bench_swiglu_padding_zero.json"
+    },
+    "correctness_result": {
+      "status": "PASS",
+      "max_abs_vs_flashinfer": 0.046875,
+      "gemm2_padding_rows_max_abs": 0.0
+    },
+    "bench_result": {
+      "status": "PASS",
+      "target_status": "MISS",
+      "candidate_total_us": 2841.0239219665527,
+      "flashinfer_us": 1384.160041809082,
+      "speedup_vs_flashinfer": 0.4872046416458783,
+      "stage_us": {
+        "gemm1_bmm": 679.9039840698242,
+        "swiglu_requant": 410.40000319480896,
+        "gemm2_bmm": 982.4000000953674,
+        "final_scatter": 222.3999947309494
+      }
+    },
+    "conclusion": "Rejected. Correctness was stable for the tested run, but the row-wise padding zero kernel cost more than the saved full memsets. End-to-end latency regressed slightly and swiglu_requant regressed by about 16.7us versus the current best profile.",
+    "do_not_repeat": [
+      "Do not replace the full memset path with one-thread-per-padding-row zeroing.",
+      "If revisiting this area, zero padding with a more bandwidth-coalesced kernel or remove mid_scale output entirely instead of serial row loops."
+    ]
+  },
+  "recommended_next_focus": [
+    "A larger gain likely requires reducing BMM work or eliminating the GEMM2-out/final-scatter memory round trip.",
+    "Micro-optimizing padding zero for SwiGLU/requant is not enough to close the FlashInfer gap."
+  ]
+}
