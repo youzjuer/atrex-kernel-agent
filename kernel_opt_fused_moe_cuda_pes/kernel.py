@@ -65,6 +65,15 @@ def _empty_optional_like(tensor: torch.Tensor, *, dtype: torch.dtype) -> torch.T
     return torch.empty((0,), device=tensor.device, dtype=dtype)
 
 
+def _use_prepared_weight_layout(hidden_states: torch.Tensor) -> bool:
+    value = os.environ.get("FUSED_MOE_PREPARED_WEIGHT_LAYOUT", "auto").strip().lower()
+    if value in {"1", "true", "yes", "on", "prepared"}:
+        return True
+    if value in {"0", "false", "no", "off", "linear"}:
+        return False
+    return hidden_states.dtype == torch.uint8
+
+
 @torch.no_grad()
 def run(
     routing_logits: torch.Tensor,
@@ -101,7 +110,6 @@ def run(
     routing_replay_out: Optional[torch.Tensor] = None,
 ) -> list[torch.Tensor]:
     del (
-        hidden_states_scale,
         gemm1_alpha,
         gemm1_beta,
         gemm1_clamp_limit,
@@ -117,8 +125,10 @@ def run(
         raise NotImplementedError("candidate currently returns finalized output only")
     if activation_type != 3:
         raise NotImplementedError("candidate currently supports activation_type=3 (SwiGLU) only")
-    if hidden_states.dtype != torch.bfloat16:
-        raise NotImplementedError("candidate currently supports bf16 hidden_states only")
+    if hidden_states.dtype not in (torch.bfloat16, torch.uint8):
+        raise NotImplementedError("candidate currently supports bf16 or packed uint8 hidden_states")
+    if hidden_states.dtype == torch.uint8 and hidden_states_scale is None:
+        raise ValueError("hidden_states_scale is required for packed uint8 hidden_states")
     if local_num_experts != gemm1_weights.shape[0]:
         raise ValueError("local_num_experts must match gemm1_weights.shape[0]")
 
@@ -135,10 +145,16 @@ def run(
 
     ext = _load_ext()
     empty_bias = _empty_optional_like(hidden_states, dtype=torch.float32)
+    hidden_states_scale_arg = (
+        empty_bias
+        if hidden_states_scale is None
+        else hidden_states_scale.to(torch.float32).contiguous()
+    )
     gemm1_bias_arg = empty_bias if gemm1_bias is None else gemm1_bias.to(torch.float32).contiguous()
     gemm2_bias_arg = empty_bias if gemm2_bias is None else gemm2_bias.to(torch.float32).contiguous()
     out = ext.forward(
         hidden_states.contiguous(),
+        hidden_states_scale_arg,
         gemm1_weights.contiguous(),
         gemm1_weights_scale.to(torch.float32).contiguous(),
         gemm1_bias_arg,
@@ -150,6 +166,7 @@ def run(
         int(num_experts),
         int(local_expert_offset),
         int(intermediate_size),
+        bool(_use_prepared_weight_layout(hidden_states)),
     )
     if output is not None:
         output.copy_(out)

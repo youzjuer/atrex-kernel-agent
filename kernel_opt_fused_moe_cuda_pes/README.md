@@ -3,6 +3,9 @@
 ## Target
 
 - API contract: `flashinfer.trtllm_fp4_block_scale_moe`
+- performance baseline: the real `flashinfer.trtllm_fp4_block_scale_moe` operator. The local
+  `reference.py` implementation is only a PyTorch correctness oracle and must not be used as the
+  performance baseline.
 - **performance target profile: tp=1** — `G11` (active P0) and `G8`, sourced from the proj_019
   workload catalog (see *Performance Shapes* below). The legacy `qwen_tp2` preset is kept only as a
   reference/interface profile, not the perf target.
@@ -54,17 +57,21 @@ The candidate `kernel.py::run` matches the FlashInfer signature:
 
 - `routing_logits`: `[T, num_experts]`, bf16/fp32
 - `routing_bias`: optional `[num_experts]`
-- `hidden_states`: `[T, H]` bf16 in the current CUDA baseline
-- `hidden_states_scale`: accepted for API parity; unused for bf16 hidden states
+- true G11 FlashInfer target: `hidden_states` is packed NVFP4 `[T, H // 2]` uint8 and
+  `hidden_states_scale` is `[T, H // 16]` fp8; the evaluator constructs this path with
+  FlashInfer `fp4_quantize`
+- local smoke oracle path: `hidden_states` is `[T, H]` bf16 in the current CUDA baseline
 - `gemm1_weights`: `[E_local, 2 * I, H // 2]`, packed e2m1 FP4 in uint8
-- `gemm1_weights_scale`: `[E_local, 2 * I, H // 32]`, fp8 block scale
+- true G11 FlashInfer target: weights/scales are passed through
+  `prepare_static_weights_for_trtllm_fp4_moe` before the op call
+- local smoke oracle path: `gemm1_weights_scale`: `[E_local, 2 * I, H // 32]`, fp8 block scale
 - `gemm2_weights`: `[E_local, H, I // 2]`, packed e2m1 FP4 in uint8
 - `gemm2_weights_scale`: `[E_local, H, I // 32]`, fp8 block scale
 - `local_expert_offset`, `local_num_experts`, `routed_scaling_factor`, `routing_method_type`
 
-The reference implements FlashInfer's documented semantics: unpack e2m1 FP4, apply block scales,
-route from logits, use TRT-LLM SwiGLU convention `silu(X2) * X1`, and scatter-add local expert
-outputs into `[T, H]` bf16.
+The local PyTorch oracle in `reference.py` implements FlashInfer's documented semantics: unpack
+e2m1 FP4, apply block scales, route from logits, use TRT-LLM SwiGLU convention `silu(X2) * X1`,
+and scatter-add local expert outputs into `[T, H]` bf16. It exists for correctness checks only.
 
 ## Commands
 
@@ -75,14 +82,21 @@ python test_kernel.py --mode profile --preset smoke --tokens 2
 python test_kernel.py --mode correctness --preset qwen_micro --tokens 1
 ```
 
-Performance test on the tp=1 target shapes (tokens default to the catalog buckets; omit `--tokens`):
+Performance test on the tp=1 target shapes (tokens default to the catalog buckets; omit `--tokens`).
+The `--compare-flashinfer` flag benchmarks the real FlashInfer operator and reports
+`speedup_vs_flashinfer`; `--require-flashinfer` fails the run instead of accepting a blocked target:
 
 ```bash
 # G11 (active P0): tokens=9500, H=4096, I=1024, E=512, top_k=10, tp=1
-python test_kernel.py --mode profile --preset g11 --compare-flashinfer
-# G8: tokens 7680,8064,8320,8576 (same tp=1 dims)
-python test_kernel.py --mode profile --preset g8 --compare-flashinfer
+python test_kernel.py --mode profile --preset g11 --compare-flashinfer --require-flashinfer
+# G8 is mxfp4 and needs a separate real-input builder before it should be used as a target gate.
 ```
+
+For the G11 catalog preset, correctness is checked against the real FlashInfer output under the
+packed NVFP4 contract. The seed `kernel.py` consumes `hidden_states` `[T, H // 2]` plus
+`hidden_states_scale` `[T, H // 16]`, reads FlashInfer prepared weights/scales, and mirrors the
+FP4 intermediate quantize/dequantize step. The implementation is still scalar/two-stage and is not
+expected to be competitive with FlashInfer until the GEMM stages are parallelized.
 
 For a full metadata allocation smoke, override token count and local experts carefully:
 
@@ -139,8 +153,10 @@ available only as a no-op orchestration smoke fallback.
   - `stage1_activation_kernel`: computes `silu(X2) * X1` once for each `(token, topk, I)`.
   - `stage2_output_kernel`: reuses the intermediate activation for all output columns.
 - `reference.py`: FlashInfer-aligned PyTorch oracle and deterministic input generator.
-- `test_kernel.py`: correctness/profile evaluator comparing candidate output to the aligned oracle.
+- `test_kernel.py`: correctness/profile evaluator. Catalog packed-NVFP4 presets use real
+  FlashInfer as the correctness oracle; performance target gating is checked only against real
+  FlashInfer latency.
 
-This baseline is still not a production grouped-GEMM implementation, but it removes the largest
-scalar redundancy from the initial correctness baseline and gives PES a better starting point for
-expert grouping and tiled FP4 dequantization.
+This seed implementation is still not a production grouped-GEMM implementation, but it removes the
+largest scalar redundancy from the initial correctness seed and gives PES a better starting point
+for expert grouping and tiled FP4 dequantization. It is not the performance baseline.

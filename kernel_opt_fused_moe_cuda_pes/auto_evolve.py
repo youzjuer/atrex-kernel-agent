@@ -206,6 +206,15 @@ def target_speedup(result: dict[str, Any]) -> float | None:
     return None if val is None else float(val)
 
 
+def flashinfer_score(result: dict[str, Any]) -> float | None:
+    score = target_speedup(result)
+    if score is not None:
+        return score
+    if "flashinfer" in result:
+        return 0.0
+    return None
+
+
 def ensure_seed(repo_root: Path, run_dir: Path, baseline_result: dict[str, Any]) -> str:
     state_path = run_dir / "database" / "state.json"
     state = parse_json(state_path)
@@ -242,6 +251,43 @@ def ensure_seed(repo_root: Path, run_dir: Path, baseline_result: dict[str, Any])
     seed_id = json.loads(out)["solution_id"]
     snapshot_solution_src(run_dir, seed_id, run_dir / "src")
     return seed_id
+
+
+def align_db_baseline_to_flashinfer(run_dir: Path, seed_id: str, baseline_result: dict[str, Any]) -> None:
+    """Use real FlashInfer latency as the score denominator when available.
+
+    The seed implementation remains the first local CUDA candidate, but the
+    performance baseline is the external operator we are trying to beat:
+    ``flashinfer.trtllm_fp4_block_scale_moe``.  If FlashInfer is unavailable or
+    blocked, candidate scores are kept at 0 instead of silently falling back to
+    local-baseline speedup.
+    """
+    state_path = run_dir / "database" / "state.json"
+    if not state_path.exists():
+        return
+    state = parse_json(state_path)
+    flash_us = flashinfer_latency(baseline_result)
+    seed_us = first_latency(baseline_result)
+    state["baseline"] = {
+        "solution_id": seed_id,
+        "latency_us": flash_us,
+        "source": "flashinfer.trtllm_fp4_block_scale_moe",
+        "seed_candidate_latency_us": seed_us,
+        "status": (baseline_result.get("flashinfer") or {}).get("status"),
+    }
+    sol = (state.get("solutions") or {}).get(seed_id)
+    if sol:
+        score = flash_us / seed_us if flash_us and seed_us else 0.0
+        sol["score"] = score
+        metadata = sol.setdefault("metadata", {})
+        perf = metadata.setdefault("performance", {})
+        perf["latency_us"] = seed_us
+        perf["flashinfer_latency_us"] = flash_us
+        perf["score_metric"] = "speedup_vs_flashinfer"
+        metadata["performance_baseline"] = state["baseline"]
+    state["best_solution_id"] = seed_id
+    state["best_score"] = (state.get("solutions") or {}).get(seed_id, {}).get("score", 0.0)
+    write_json(state_path, state)
 
 
 def snapshot_solution_src(run_dir: Path, solution_id: str, src_dir: Path) -> None:
@@ -783,7 +829,11 @@ def add_candidate(
     latency = first_latency(result)
     correctness = "PASS" if result.get("status") == "PASS" else "FAIL"
     rel = max_rel(result)
-    evaluation = f"{correctness}; latency_us={latency}; strategy={strategy.action_category}"
+    score = flashinfer_score(result)
+    evaluation = (
+        f"{correctness}; latency_us={latency}; flashinfer_us={flashinfer_latency(result)}; "
+        f"speedup_vs_flashinfer={score}; strategy={strategy.action_category}"
+    )
     cmd = [
         sys.executable,
         str(repo_root / "tools" / "evolution_db.py"),
@@ -816,6 +866,8 @@ def add_candidate(
         cmd += ["--latency-us", str(latency)]
     if rel is not None:
         cmd += ["--rel-err", str(rel)]
+    if score is not None:
+        cmd += ["--score", str(score)]
     out = run_capture(cmd, cwd=repo_root)
     solution_id = json.loads(out)["solution_id"]
     snapshot_solution_src(
@@ -976,6 +1028,7 @@ def main() -> int:
     baseline_json = run_dir / "profiles" / "auto_baseline.json"
     baseline = profile_kernel(run_dir, run_dir / "kernel.py", baseline_json, args)
     seed_id = ensure_seed(repo_root, run_dir, baseline)
+    align_db_baseline_to_flashinfer(run_dir, seed_id, baseline)
     print(f"[Atrex] seed solution: {seed_id}")
 
     for _ in range(args.generations):

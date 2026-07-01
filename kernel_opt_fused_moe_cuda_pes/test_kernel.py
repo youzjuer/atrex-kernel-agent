@@ -12,9 +12,16 @@ import sys
 import tempfile
 from pathlib import Path
 
+os.environ["VLLM_FUSE_QKNORM_ROPE_AND_KVCACHE_WRITE"] = "0"
+os.environ["VLLM_FUSE_QKNORM_AND_ROPE"] = "0"
+
 import torch
 
 from reference import ARG_NAMES, make_inputs, run_reference
+
+
+_VLLM_CONFIG = None
+_VLLM_WORKSPACE_READY = False
 
 
 def _load_candidate(path: Path):
@@ -70,8 +77,21 @@ def _case_kwargs(args, tokens: int):
 
 
 def _shape_from_inputs(inputs) -> dict[str, int]:
+    hidden_states = inputs[2]
+    hidden_scale = inputs[3]
+    hidden_size = hidden_states.shape[1]
+    if hidden_states.dtype == torch.uint8:
+        hidden_size *= 2
     return {
-        "hidden_size": inputs[2].shape[1],
+        "hidden_size": hidden_size,
+        "hidden_states_shape": tuple(hidden_states.shape),
+        "hidden_states_dtype": str(hidden_states.dtype),
+        "hidden_states_scale_shape": None if hidden_scale is None else tuple(hidden_scale.shape),
+        "hidden_states_scale_dtype": None if hidden_scale is None else str(hidden_scale.dtype),
+        "gemm1_weights_shape": tuple(inputs[4].shape),
+        "gemm1_weights_scale_shape": tuple(inputs[5].shape),
+        "gemm2_weights_shape": tuple(inputs[10].shape),
+        "gemm2_weights_scale_shape": tuple(inputs[11].shape),
         "intermediate_size": inputs[20],
         "num_experts": inputs[16],
         "top_k": inputs[17],
@@ -95,6 +115,195 @@ def _disable_core_dumps() -> None:
         pass
 
 
+def _shape_seed_offset(shape_id: str) -> int:
+    try:
+        return int(shape_id)
+    except ValueError:
+        return sum(ord(ch) for ch in shape_id)
+
+
+def _is_catalog_preset(preset: str) -> bool:
+    from workload_shapes import is_catalog_preset
+
+    return is_catalog_preset(preset)
+
+
+def _init_vllm_flashinfer_runtime():
+    """Initialize the vLLM context expected by FlashInfer's TRT-LLM MoE wrapper."""
+    global _VLLM_CONFIG, _VLLM_WORKSPACE_READY
+    if not _VLLM_WORKSPACE_READY:
+        from vllm.v1.worker.workspace import init_workspace_manager
+
+        init_workspace_manager(torch.device("cuda"))
+        _VLLM_WORKSPACE_READY = True
+    if _VLLM_CONFIG is None:
+        from vllm.config import VllmConfig
+
+        _VLLM_CONFIG = VllmConfig()
+    return _VLLM_CONFIG
+
+
+def _make_real_nvfp4_flashinfer_inputs(args, tokens: int) -> tuple:
+    """Build the true G11-style packed-NVFP4 FlashInfer input contract."""
+    from flashinfer import fp4_quantize
+    from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
+        prepare_static_weights_for_trtllm_fp4_moe,
+    )
+    from workload_shapes import get_shape
+
+    shape = get_shape(args.preset)
+    if shape["dtype"] != "nvfp4":
+        raise NotImplementedError(
+            f"real FlashInfer input builder currently supports nvfp4 only; "
+            f"preset {args.preset!r} has dtype={shape['dtype']!r}"
+        )
+    hidden_size = int(shape["hidden_size"])
+    intermediate_size = int(shape["intermediate_size"])
+    num_experts = int(shape["num_experts"])
+    local_num_experts = int(shape["local_num_experts"])
+    top_k = int(shape["top_k"])
+    if args.hidden_size is not None and args.hidden_size != hidden_size:
+        raise ValueError("hidden-size override would no longer match the real catalog shape")
+    if args.intermediate_size is not None and args.intermediate_size != intermediate_size:
+        raise ValueError("intermediate-size override would no longer match the real catalog shape")
+    if args.local_num_experts is not None and args.local_num_experts != local_num_experts:
+        raise ValueError("local-num-experts override would no longer match the real catalog shape")
+    if args.local_expert_offset != 0:
+        raise ValueError("local-expert-offset override would no longer match the tp=1 catalog shape")
+    if local_num_experts != num_experts:
+        raise ValueError("real tp=1 FlashInfer target expects all experts to be local")
+
+    _init_vllm_flashinfer_runtime()
+    device = "cuda"
+    sf_vec_size = 16
+    torch.manual_seed(int(args.seed) + _shape_seed_offset(str(shape["group"])))
+    one = torch.tensor(1.0, device=device)
+
+    x = torch.randn(tokens, hidden_size, device=device, dtype=torch.bfloat16) / 10
+    w13 = (
+        torch.randn(
+            num_experts,
+            2 * intermediate_size,
+            hidden_size,
+            device=device,
+            dtype=torch.bfloat16,
+        )
+        / 10
+    )
+    w2 = (
+        torch.randn(
+            num_experts,
+            hidden_size,
+            intermediate_size,
+            device=device,
+            dtype=torch.bfloat16,
+        )
+        / 10
+    )
+    routing_logits = torch.rand(tokens, num_experts, dtype=torch.bfloat16, device=device)
+
+    hidden_states, hidden_states_scale = fp4_quantize(
+        x,
+        one,
+        sf_vec_size=sf_vec_size,
+        sf_use_ue8m0=False,
+        is_sf_swizzled_layout=False,
+    )
+    w13q, w13s = fp4_quantize(
+        w13.reshape(num_experts * 2 * intermediate_size, hidden_size),
+        one,
+        sf_vec_size=sf_vec_size,
+        sf_use_ue8m0=False,
+        is_sf_swizzled_layout=False,
+    )
+    w13q = w13q.reshape(num_experts, 2 * intermediate_size, hidden_size // 2)
+    w13s = w13s.reshape(num_experts, 2 * intermediate_size, hidden_size // sf_vec_size)
+    w2q, w2s = fp4_quantize(
+        w2.reshape(num_experts * hidden_size, intermediate_size),
+        one,
+        sf_vec_size=sf_vec_size,
+        sf_use_ue8m0=False,
+        is_sf_swizzled_layout=False,
+    )
+    w2q = w2q.reshape(num_experts, hidden_size, intermediate_size // 2)
+    w2s = w2s.reshape(num_experts, hidden_size, intermediate_size // sf_vec_size)
+    gemm1_weights, gemm1_weights_scale, gemm2_weights, gemm2_weights_scale = (
+        prepare_static_weights_for_trtllm_fp4_moe(
+            w13q,
+            w2q,
+            w13s,
+            w2s,
+            hidden_size,
+            intermediate_size,
+            num_experts,
+        )
+    )
+    one_per_expert = torch.ones((num_experts,), device=device, dtype=torch.float32)
+
+    return (
+        routing_logits,
+        None,
+        hidden_states,
+        hidden_states_scale.view(torch.float8_e4m3fn),
+        gemm1_weights,
+        gemm1_weights_scale,
+        None,
+        None,
+        None,
+        None,
+        gemm2_weights,
+        gemm2_weights_scale,
+        None,
+        one_per_expert,
+        one_per_expert,
+        one_per_expert,
+        num_experts,
+        top_k,
+        0,
+        0,
+        intermediate_size,
+        0,
+        local_num_experts,
+        None,
+        1,
+        True,
+        None,
+        3,
+        None,
+        max(tokens, 8192),
+        True,
+        None,
+    )
+
+
+def _make_inputs_for_case(args, tokens: int) -> tuple:
+    if _is_catalog_preset(args.preset):
+        return _make_real_nvfp4_flashinfer_inputs(args, tokens)
+    return make_inputs(**_case_kwargs(args, tokens))
+
+
+def _uses_real_packed_nvfp4(inputs: tuple) -> bool:
+    return inputs[2].dtype == torch.uint8 and inputs[3] is not None
+
+
+def _call_flashinfer(fn, inputs: tuple):
+    if _uses_real_packed_nvfp4(inputs):
+        from vllm.config import set_current_vllm_config
+
+        with set_current_vllm_config(_init_vllm_flashinfer_runtime()):
+            return fn(*inputs)
+    return fn(*inputs)
+
+
+def _flashinfer_reference(inputs: tuple):
+    import flashinfer
+
+    fn = getattr(flashinfer, "trtllm_fp4_block_scale_moe", None)
+    if fn is None:
+        raise RuntimeError("flashinfer.trtllm_fp4_block_scale_moe is not available")
+    return _call_flashinfer(fn, inputs)
+
+
 def _bench_flashinfer_in_worker(token_values, warmup: int, rep: int, args) -> dict:
     try:
         import flashinfer
@@ -110,34 +319,40 @@ def _bench_flashinfer_in_worker(token_values, warmup: int, rep: int, args) -> di
         }
 
     rows = []
-    max_abs = 0.0
-    max_rel = 0.0
+    max_abs = None
+    max_rel = None
     latencies = []
     for tokens in token_values:
-        inputs = make_inputs(**_case_kwargs(args, tokens))
+        inputs = _make_inputs_for_case(args, tokens)
         row = {
             "tokens": tokens,
             "preset": args.preset,
             "shape": _shape_from_inputs(inputs),
+            "input_contract": (
+                "packed_nvfp4_flashinfer" if _uses_real_packed_nvfp4(inputs) else "local_oracle"
+            ),
         }
         try:
-            ref = _first(run_reference(*inputs))
-            out = _first(fn(*inputs))
-            torch.cuda.synchronize()
-            diff = (out.float() - ref.float()).abs()
-            abs_err = float(diff.max().item())
-            rel_err = float((diff / ref.float().abs().clamp_min(1e-3)).max().item())
-            max_abs = max(max_abs, abs_err)
-            max_rel = max(max_rel, rel_err)
-            row["max_abs"] = abs_err
-            row["max_rel"] = rel_err
-            if abs_err > args.atol and rel_err > args.rtol:
-                row["status"] = "FAIL"
+            if args.check_flashinfer_correctness and not _uses_real_packed_nvfp4(inputs):
+                ref = _first(run_reference(*inputs))
+                out = _first(_call_flashinfer(fn, inputs))
+                torch.cuda.synchronize()
+                diff = (out.float() - ref.float()).abs()
+                abs_err = float(diff.max().item())
+                rel_err = float((diff / ref.float().abs().clamp_min(1e-3)).max().item())
+                max_abs = abs_err if max_abs is None else max(max_abs, abs_err)
+                max_rel = rel_err if max_rel is None else max(max_rel, rel_err)
+                row["max_abs"] = abs_err
+                row["max_rel"] = rel_err
+                if abs_err > args.atol and rel_err > args.rtol:
+                    row["status"] = "FAIL"
+                else:
+                    row["status"] = "PASS"
             else:
                 row["status"] = "PASS"
-                if args.mode == "profile":
-                    row["flashinfer_us"] = _bench(lambda: fn(*inputs), warmup, rep)
-                    latencies.append(row["flashinfer_us"])
+            if row["status"] == "PASS" and args.mode == "profile":
+                row["flashinfer_us"] = _bench(lambda: _call_flashinfer(fn, inputs), warmup, rep)
+                latencies.append(row["flashinfer_us"])
         except Exception as exc:
             row["status"] = "ERROR"
             row["error"] = _error_text(exc)
@@ -187,6 +402,8 @@ def _run_flashinfer_worker(token_values, warmup: int, rep: int, args) -> dict:
         "--json-out",
         str(tmp_path),
     ]
+    if args.check_flashinfer_correctness:
+        cmd += ["--check-flashinfer-correctness"]
     if args.hidden_size is not None:
         cmd += ["--hidden-size", str(args.hidden_size)]
     if args.intermediate_size is not None:
@@ -246,8 +463,19 @@ def _attach_flashinfer_gate(result: dict, flashinfer_result: dict, target_speedu
             speedups.append(row["speedup_vs_flashinfer"])
 
     if not speedups:
-        result["target_status"] = "BLOCKED"
-        result["target_reason"] = "FlashInfer did not produce comparable latency rows"
+        candidate_errors = [
+            row.get("error")
+            for row in result["rows"]
+            if row.get("status") == "ERROR" and row.get("error")
+        ]
+        if candidate_errors:
+            result["target_status"] = "MISS"
+            result["target_reason"] = (
+                "Candidate did not produce comparable latency rows: " + candidate_errors[0]
+            )
+        else:
+            result["target_status"] = "BLOCKED"
+            result["target_reason"] = "No comparable candidate/FlashInfer latency rows"
         return
     result["target_speedup_vs_flashinfer"] = sum(speedups) / len(speedups)
     result["target_status"] = (
@@ -265,23 +493,37 @@ def evaluate(candidate_path: Path, token_values, warmup: int, rep: int, args):
     rows = []
     max_abs = 0.0
     max_rel = 0.0
+    used_real_flashinfer_oracle = False
     for tokens in token_values:
-        inputs = make_inputs(**_case_kwargs(args, tokens))
-        ref = _first(run_reference(*inputs))
-        out = _first(cand.run(*inputs))
-        torch.cuda.synchronize()
-        diff = (out.float() - ref.float()).abs()
-        abs_err = float(diff.max().item())
-        rel_err = float((diff / ref.float().abs().clamp_min(1e-3)).max().item())
-        max_abs = max(max_abs, abs_err)
-        max_rel = max(max_rel, rel_err)
+        inputs = _make_inputs_for_case(args, tokens)
+        real_inputs = _uses_real_packed_nvfp4(inputs)
         row = {
             "tokens": tokens,
             "preset": args.preset,
             "shape": _shape_from_inputs(inputs),
-            "max_abs": abs_err,
-            "max_rel": rel_err,
+            "input_contract": "packed_nvfp4_flashinfer" if real_inputs else "local_oracle",
         }
+        try:
+            if real_inputs:
+                used_real_flashinfer_oracle = True
+                ref = _first(_flashinfer_reference(inputs))
+            else:
+                ref = _first(run_reference(*inputs))
+            out = _first(cand.run(*inputs))
+            torch.cuda.synchronize()
+            diff = (out.float() - ref.float()).abs()
+            abs_err = float(diff.max().item())
+            rel_err = float((diff / ref.float().abs().clamp_min(1e-3)).max().item())
+            max_abs = max(max_abs, abs_err)
+            max_rel = max(max_rel, rel_err)
+            row["max_abs"] = abs_err
+            row["max_rel"] = rel_err
+        except Exception as exc:
+            row["status"] = "ERROR"
+            row["error"] = _error_text(exc)
+            rows.append(row)
+            continue
+
         if abs_err > args.atol and rel_err > args.rtol:
             row["status"] = "FAIL"
             rows.append(row)
@@ -290,25 +532,46 @@ def evaluate(candidate_path: Path, token_values, warmup: int, rep: int, args):
         row["status"] = "PASS"
         if args.mode == "profile":
             row["candidate_us"] = _bench(lambda: cand.run(*inputs), warmup, rep)
-            row["reference_us"] = _bench(
-                lambda: run_reference(*inputs), max(1, warmup // 2), max(3, rep // 3)
-            )
-            row["speedup_vs_reference"] = (
-                row["reference_us"] / row["candidate_us"] if row["candidate_us"] > 0 else 0.0
-            )
+            if args.bench_torch_oracle:
+                row["torch_oracle_us"] = _bench(
+                    lambda: run_reference(*inputs), max(1, warmup // 2), max(3, rep // 3)
+                )
+                row["speedup_vs_torch_oracle"] = (
+                    row["torch_oracle_us"] / row["candidate_us"]
+                    if row["candidate_us"] > 0
+                    else 0.0
+                )
         rows.append(row)
 
-    status = "PASS" if all(row["status"] == "PASS" for row in rows) else "FAIL"
+    if all(row["status"] == "PASS" for row in rows):
+        status = "PASS"
+    elif any(row["status"] == "ERROR" for row in rows):
+        status = "ERROR"
+    else:
+        status = "FAIL"
     latency_rows = [row["candidate_us"] for row in rows if row.get("candidate_us") is not None]
     result = {
         "status": status,
         "operator": "flashinfer.trtllm_fp4_block_scale_moe",
+        "correctness_oracle": (
+            "flashinfer.trtllm_fp4_block_scale_moe (real packed NVFP4 contract)"
+            if used_real_flashinfer_oracle
+            else "reference.run_reference (PyTorch oracle)"
+        ),
+        "performance_baseline": (
+            "flashinfer.trtllm_fp4_block_scale_moe" if args.compare_flashinfer else None
+        ),
         "arg_names": ARG_NAMES,
         "max_abs": max_abs,
         "max_rel": max_rel,
         "mean_latency_us": sum(latency_rows) / len(latency_rows) if latency_rows else None,
         "rows": rows,
     }
+    try:
+        del inputs
+    except UnboundLocalError:
+        pass
+    torch.cuda.empty_cache()
     if args.mode == "profile" and args.compare_flashinfer:
         flashinfer_result = _run_flashinfer_worker(token_values, warmup, rep, args)
         _attach_flashinfer_gate(result, flashinfer_result, args.flashinfer_target_speedup)
@@ -345,6 +608,16 @@ def main():
     parser.add_argument("--compare-flashinfer", action="store_true")
     parser.add_argument("--require-flashinfer", action="store_true")
     parser.add_argument("--flashinfer-worker", action="store_true")
+    parser.add_argument(
+        "--check-flashinfer-correctness",
+        action="store_true",
+        help="Also compare FlashInfer output against the PyTorch oracle inside the worker.",
+    )
+    parser.add_argument(
+        "--bench-torch-oracle",
+        action="store_true",
+        help="Also time the slow PyTorch correctness oracle; never used as the performance baseline.",
+    )
     parser.add_argument("--flashinfer-target-speedup", type=float, default=1.0)
     parser.add_argument("--flashinfer-timeout-s", type=float, default=120.0)
     parser.add_argument("--json-out")
