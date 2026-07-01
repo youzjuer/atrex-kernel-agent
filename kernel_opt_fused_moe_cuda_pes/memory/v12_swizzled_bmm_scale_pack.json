@@ -1,0 +1,60 @@
+{
+  "version": "v12_swizzled_bmm_scale_pack",
+  "masked": false,
+  "timestamp": "2026-07-02T02:26:30Z",
+  "operator": "flashinfer.trtllm_fp4_block_scale_moe",
+  "application_profile": "Qwen3_5-Plus_prefill_TP1_G11",
+  "input_contract": "packed_nvfp4_activation_flashinfer_prepared_weights",
+  "optimization": {
+    "action_category": "bmm_layout_pack",
+    "action_description": "Add in-repo CUDA helpers for FlashInfer/SM100 NVFP4 scale swizzling and for directly packing hidden_states uint8 [T,H/2] plus hidden_states_scale fp8 [T,H/16] into expert-major BMM hidden rows with swizzled scale layout.",
+    "implementation": "nvfp4_block_scale_interleave reproduces the 128-row x 4-scale-column swizzled scale layout used by FlashInfer direct FP4 BMM. pack_hidden_bmm_swizzled_from_metadata uses topk_packed, expanded_idx_to_permuted_idx, and expert_padded_offsets to write active routed hidden rows and scale bytes directly into [local_expert, rank] / [local_expert, swizzled_offset].",
+    "swizzled_offset_formula": "offset(row,col)=floor(row/128)*ceil(cols/4)*512 + floor(col/4)*512 + (row%32)*16 + floor((row%128)/32)*4 + (col%4)",
+    "expected_impact": "This removes a separate linear-scale-to-swizzled-scale conversion from the future BMM pipeline and keeps the activation path independent of flashinfer.nvfp4_block_scale_interleave."
+  },
+  "correctness": {
+    "status": "PASS",
+    "reference": "probe_bmm_swizzled_pack_layout.py checks active routed slots against original hidden_states and hidden_states_scale bytes; optional FlashInfer comparison verifies nvfp4_block_scale_interleave byte-for-byte.",
+    "g11_tokens_8": {
+      "checked_slots": 80,
+      "hidden_mismatches": 0,
+      "swizzled_scale_mismatches": 0,
+      "flashinfer_interleave_mismatches": 0,
+      "swizzled_bytes_per_expert": 32768
+    },
+    "g11_full": {
+      "tokens": 9500,
+      "checked_slots": 4096,
+      "hidden_mismatches": 0,
+      "swizzled_scale_mismatches": 0,
+      "flashinfer_interleave_mismatches": 0,
+      "padded_rows": 238,
+      "swizzled_bytes_per_expert": 65536
+    }
+  },
+  "performance": {
+    "profiles": [
+      "profiles/bmm_swizzled_pack_t8.json",
+      "profiles/bmm_swizzled_pack_g11_full.json"
+    ],
+    "g11_tokens_8": {
+      "pack_hidden_bmm_swizzled_from_metadata_us": 20.287999883294106,
+      "nvfp4_block_scale_interleave_linear_scale_us": 17.59999990463257,
+      "metadata_plus_swizzled_pack_us": 109.6000000834465
+    },
+    "g11_full": {
+      "pack_hidden_bmm_swizzled_from_metadata_us": 125.59999525547028,
+      "nvfp4_block_scale_interleave_linear_scale_us": 144.44799721240997,
+      "metadata_plus_swizzled_pack_us": 262.30400800704956
+    }
+  },
+  "quality_gate": {
+    "result": "PARTIAL_PROGRESS",
+    "reason": "The candidate can now create correct expert-major BMM hidden rows and FlashInfer-compatible swizzled activation scales in CUDA, but the end-to-end run path still uses scalar FP4 GEMM stages and has not exceeded flashinfer.trtllm_fp4_block_scale_moe."
+  },
+  "next_step": {
+    "action_category": "bmm_gemm_stage",
+    "description": "Connect the packed hidden + swizzled scale layout to an own FP4 grouped/BMM GEMM stage. Task08 provides a hand-written SM103 BMM route for logical FlashInfer BMM layout; the remaining gap is adapting or replacing that route while preserving the user's required FlashInfer prepared weight layout contract."
+  },
+  "git_commit_hash": "pending"
+}

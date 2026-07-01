@@ -189,6 +189,51 @@ def pack_hidden_bmm_from_metadata(
 
 
 @torch.no_grad()
+def nvfp4_block_scale_interleave(scale: torch.Tensor) -> torch.Tensor:
+    """Interleave linear NVFP4 block scales into FlashInfer/SM100 BMM scale layout."""
+    if scale.dtype not in (torch.float8_e4m3fn, torch.uint8):
+        raise TypeError("scale must be torch.float8_e4m3fn or torch.uint8")
+    if scale.ndim != 3:
+        raise ValueError("scale must have shape [B, rows, K/16]")
+    ext = _load_ext()
+    return ext.nvfp4_block_scale_interleave(scale.contiguous())
+
+
+@torch.no_grad()
+def pack_hidden_bmm_swizzled_from_metadata(
+    topk_packed: torch.Tensor,
+    expanded_idx_to_permuted_idx: torch.Tensor,
+    expert_padded_offsets: torch.Tensor,
+    hidden_states: torch.Tensor,
+    hidden_states_scale: torch.Tensor,
+    *,
+    num_experts: int,
+    local_expert_offset: int,
+    local_num_experts: int,
+    padded_rows: int,
+) -> list[torch.Tensor]:
+    """Pack hidden FP4 rows and swizzled NVFP4 scales to expert-major BMM layout."""
+    if hidden_states.dtype != torch.uint8:
+        raise TypeError("hidden_states must be torch.uint8")
+    if hidden_states_scale.dtype not in (torch.float8_e4m3fn, torch.uint8):
+        raise TypeError("hidden_states_scale must be torch.float8_e4m3fn or torch.uint8")
+    ext = _load_ext()
+    return list(
+        ext.pack_hidden_bmm_swizzled_from_metadata(
+            topk_packed.contiguous(),
+            expanded_idx_to_permuted_idx.contiguous(),
+            expert_padded_offsets.contiguous(),
+            hidden_states.contiguous(),
+            hidden_states_scale.contiguous(),
+            int(num_experts),
+            int(local_expert_offset),
+            int(local_num_experts),
+            int(padded_rows),
+        )
+    )
+
+
+@torch.no_grad()
 def run(
     routing_logits: torch.Tensor,
     routing_bias: Optional[torch.Tensor],

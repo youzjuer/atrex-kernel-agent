@@ -1612,6 +1612,105 @@ __global__ void pack_hidden_bmm_from_metadata_kernel(
   }
 }
 
+__device__ __forceinline__ int nvfp4_swizzled_scale_offset(int row, int scale_col,
+                                                           int groups_k) {
+  return (row / 128) * groups_k * 512 + (scale_col / 4) * 512 +
+         (row % 32) * 16 + ((row % 128) / 32) * 4 + (scale_col % 4);
+}
+
+__global__ void nvfp4_block_scale_interleave_kernel(
+    const uint8_t* __restrict__ scale,
+    uint8_t* __restrict__ swizzled,
+    int batches,
+    int rows,
+    int scale_cols,
+    int groups_k,
+    int swizzled_bytes_per_batch) {
+  const int64_t total = static_cast<int64_t>(batches) * rows * scale_cols;
+  const int64_t linear = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (linear >= total) {
+    return;
+  }
+
+  const int scale_col = static_cast<int>(linear % scale_cols);
+  const int row = static_cast<int>((linear / scale_cols) % rows);
+  const int batch = static_cast<int>(linear / (static_cast<int64_t>(rows) * scale_cols));
+  const int dst = batch * swizzled_bytes_per_batch +
+                  nvfp4_swizzled_scale_offset(row, scale_col, groups_k);
+  swizzled[dst] = scale[linear];
+}
+
+__global__ void pack_hidden_bmm_swizzled_from_metadata_kernel(
+    const int32_t* __restrict__ topk_packed,
+    const int32_t* __restrict__ expanded_idx_to_permuted_idx,
+    const int32_t* __restrict__ expert_padded_offsets,
+    const uint4* __restrict__ hidden_q,
+    const uint4* __restrict__ hidden_scale,
+    uint4* __restrict__ hidden_q_bmm,
+    uint32_t* __restrict__ hidden_scale_swizzled,
+    int total_slots,
+    int TOPK,
+    int q_chunks_per_row,
+    int scale_chunks_per_row,
+    int scale_cols,
+    int groups_k,
+    int swizzled_bytes_per_expert,
+    int num_experts,
+    int local_expert_offset,
+    int local_num_experts,
+    int padded_rows) {
+  const int64_t total = static_cast<int64_t>(total_slots) * q_chunks_per_row;
+  const int64_t linear = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (linear >= total) {
+    return;
+  }
+
+  const int chunk = static_cast<int>(linear % q_chunks_per_row);
+  const int slot = static_cast<int>(linear / q_chunks_per_row);
+  const int permuted_idx = expanded_idx_to_permuted_idx[slot];
+  if (permuted_idx < 0) {
+    return;
+  }
+
+  const int expert = unpack_packed_expert_idx(topk_packed[slot]);
+  const int local_expert = expert - local_expert_offset;
+  if (expert < 0 || expert >= num_experts || local_expert < 0 ||
+      local_expert >= local_num_experts) {
+    return;
+  }
+
+  const int rank = permuted_idx - expert_padded_offsets[local_expert];
+  if (rank < 0 || rank >= padded_rows) {
+    return;
+  }
+
+  const int token = slot / TOPK;
+  const int64_t dst_row = static_cast<int64_t>(local_expert) * padded_rows + rank;
+  hidden_q_bmm[dst_row * q_chunks_per_row + chunk] =
+      hidden_q[static_cast<int64_t>(token) * q_chunks_per_row + chunk];
+
+  if (chunk < scale_chunks_per_row) {
+    const uint4 scale_vec =
+        hidden_scale[static_cast<int64_t>(token) * scale_chunks_per_row + chunk];
+    const int scale_col = chunk * 16;
+    const int expert_base_u32 = (local_expert * swizzled_bytes_per_expert) / 4;
+    const int dst0 =
+        expert_base_u32 + nvfp4_swizzled_scale_offset(rank, scale_col, groups_k) / 4;
+    const int dst1 =
+        expert_base_u32 + nvfp4_swizzled_scale_offset(rank, scale_col + 4, groups_k) / 4;
+    const int dst2 =
+        expert_base_u32 + nvfp4_swizzled_scale_offset(rank, scale_col + 8, groups_k) / 4;
+    const int dst3 =
+        expert_base_u32 + nvfp4_swizzled_scale_offset(rank, scale_col + 12, groups_k) / 4;
+    if (scale_col + 12 < scale_cols) {
+      hidden_scale_swizzled[dst0] = scale_vec.x;
+      hidden_scale_swizzled[dst1] = scale_vec.y;
+      hidden_scale_swizzled[dst2] = scale_vec.z;
+      hidden_scale_swizzled[dst3] = scale_vec.w;
+    }
+  }
+}
+
 }  // namespace
 
 void routing_topk_softmax_type1_cuda(torch::Tensor routing_logits, torch::Tensor topk_ids,
@@ -1755,6 +1854,64 @@ void pack_hidden_bmm_from_metadata_cuda(
       reinterpret_cast<uint4*>(hidden_scale_bmm.data_ptr()), total_slots, TOPK, q_chunks_per_row,
       scale_chunks_per_row, static_cast<int>(num_experts), static_cast<int>(local_expert_offset),
       static_cast<int>(local_num_experts), static_cast<int>(padded_rows));
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+void nvfp4_block_scale_interleave_cuda(torch::Tensor scale, torch::Tensor swizzled) {
+  const int batches = static_cast<int>(scale.size(0));
+  const int rows = static_cast<int>(scale.size(1));
+  const int scale_cols = static_cast<int>(scale.size(2));
+  const int groups_k = (scale_cols + 3) / 4;
+  const int swizzled_bytes_per_batch = static_cast<int>(swizzled.size(1));
+  const int64_t total = static_cast<int64_t>(batches) * rows * scale_cols;
+  if (total == 0) {
+    return;
+  }
+  constexpr int block = 256;
+  const int grid = static_cast<int>((total + block - 1) / block);
+  const auto stream = at::cuda::getCurrentCUDAStream();
+  C10_CUDA_CHECK(cudaMemsetAsync(swizzled.data_ptr(), 0, swizzled.numel(),
+                                 stream.stream()));
+  nvfp4_block_scale_interleave_kernel<<<grid, block, 0, stream>>>(
+      reinterpret_cast<const uint8_t*>(scale.data_ptr()),
+      reinterpret_cast<uint8_t*>(swizzled.data_ptr()), batches, rows, scale_cols, groups_k,
+      swizzled_bytes_per_batch);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+void pack_hidden_bmm_swizzled_from_metadata_cuda(
+    torch::Tensor topk_packed, torch::Tensor expanded_idx_to_permuted_idx,
+    torch::Tensor expert_padded_offsets, torch::Tensor hidden_states,
+    torch::Tensor hidden_states_scale, torch::Tensor hidden_packed_bmm,
+    torch::Tensor hidden_scale_swizzled, int64_t num_experts,
+    int64_t local_expert_offset, int64_t local_num_experts, int64_t padded_rows) {
+  const int T = static_cast<int>(topk_packed.size(0));
+  const int TOPK = static_cast<int>(topk_packed.size(1));
+  const int total_slots = T * TOPK;
+  const int q_chunks_per_row = static_cast<int>(hidden_states.size(1) / 16);
+  const int scale_cols = static_cast<int>(hidden_states_scale.size(1));
+  const int scale_chunks_per_row = static_cast<int>(scale_cols / 16);
+  const int groups_k = (scale_cols + 3) / 4;
+  const int swizzled_bytes_per_expert = static_cast<int>(hidden_scale_swizzled.size(1));
+  const int64_t total_chunks = static_cast<int64_t>(total_slots) * q_chunks_per_row;
+  if (total_chunks == 0) {
+    return;
+  }
+
+  constexpr int block = 256;
+  const int grid = static_cast<int>((total_chunks + block - 1) / block);
+  const auto stream = at::cuda::getCurrentCUDAStream();
+  pack_hidden_bmm_swizzled_from_metadata_kernel<<<grid, block, 0, stream>>>(
+      topk_packed.data_ptr<int32_t>(), expanded_idx_to_permuted_idx.data_ptr<int32_t>(),
+      expert_padded_offsets.data_ptr<int32_t>(),
+      reinterpret_cast<const uint4*>(hidden_states.data_ptr<uint8_t>()),
+      reinterpret_cast<const uint4*>(hidden_states_scale.data_ptr()),
+      reinterpret_cast<uint4*>(hidden_packed_bmm.data_ptr<uint8_t>()),
+      reinterpret_cast<uint32_t*>(hidden_scale_swizzled.data_ptr()), total_slots, TOPK,
+      q_chunks_per_row, scale_chunks_per_row, scale_cols, groups_k,
+      swizzled_bytes_per_expert, static_cast<int>(num_experts),
+      static_cast<int>(local_expert_offset), static_cast<int>(local_num_experts),
+      static_cast<int>(padded_rows));
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 

@@ -1,0 +1,59 @@
+{
+  "status": "PASS",
+  "operator": "G11 hidden FP4 expert-major BMM pack with swizzled NVFP4 scales",
+  "preset": "g11",
+  "tokens": 9500,
+  "shape": {
+    "hidden_states": [
+      9500,
+      2048
+    ],
+    "hidden_states_dtype": "torch.uint8",
+    "hidden_states_scale": [
+      9500,
+      256
+    ],
+    "hidden_states_scale_dtype": "torch.float8_e4m3fn",
+    "hidden_bmm": [
+      512,
+      238,
+      2048
+    ],
+    "hidden_scale_linear": [
+      512,
+      238,
+      256
+    ],
+    "hidden_scale_swizzled": [
+      512,
+      65536
+    ],
+    "hidden_size": 4096,
+    "num_experts": 512,
+    "local_num_experts": 512,
+    "top_k": 10,
+    "tile_tokens_dim": 256,
+    "padded_rows": 238,
+    "max_expert_count": 238
+  },
+  "verification": {
+    "checked_slots": 4096,
+    "hidden_mismatches": 0,
+    "swizzled_scale_mismatches": 0,
+    "rank_min": 0,
+    "rank_max": 225,
+    "swizzled_bytes_per_expert": 65536
+  },
+  "flashinfer_interleave_compare": {
+    "status": "PASS",
+    "mismatches": 0,
+    "numel": 33554432,
+    "shape": "(512, 65536)",
+    "dtype": "torch.uint8"
+  },
+  "latency_us": {
+    "pack_hidden_bmm_swizzled_from_metadata": 125.59999525547028,
+    "nvfp4_block_scale_interleave_linear_scale": 144.44799721240997,
+    "metadata_plus_swizzled_pack": 262.30400800704956
+  }
+}

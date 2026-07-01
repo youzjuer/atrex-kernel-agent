@@ -39,6 +39,15 @@ void pack_hidden_bmm_from_metadata_cuda(
     torch::Tensor hidden_scale_bmm, int64_t num_experts, int64_t local_expert_offset,
     int64_t local_num_experts, int64_t padded_rows);
 
+void nvfp4_block_scale_interleave_cuda(torch::Tensor scale, torch::Tensor swizzled);
+
+void pack_hidden_bmm_swizzled_from_metadata_cuda(
+    torch::Tensor topk_packed, torch::Tensor expanded_idx_to_permuted_idx,
+    torch::Tensor expert_padded_offsets, torch::Tensor hidden_states,
+    torch::Tensor hidden_states_scale, torch::Tensor hidden_packed_bmm,
+    torch::Tensor hidden_scale_swizzled, int64_t num_experts,
+    int64_t local_expert_offset, int64_t local_num_experts, int64_t padded_rows);
+
 static void check_tensor(const torch::Tensor& tensor, const char* name) {
   TORCH_CHECK(tensor.is_cuda(), name, " must be a CUDA tensor");
   TORCH_CHECK(tensor.is_contiguous(), name, " must be contiguous");
@@ -309,6 +318,95 @@ std::vector<torch::Tensor> pack_hidden_bmm_from_metadata(
   return {hidden_packed_bmm, hidden_scale_bmm};
 }
 
+torch::Tensor nvfp4_block_scale_interleave(torch::Tensor scale) {
+  check_tensor(scale, "scale");
+  TORCH_CHECK(scale.scalar_type() == torch::kFloat8_e4m3fn ||
+                  scale.scalar_type() == torch::kUInt8,
+              "scale must be fp8_e4m3fn or raw uint8");
+  TORCH_CHECK(scale.dim() == 3, "scale must have shape [B, rows, K/16]");
+  TORCH_CHECK(scale.element_size() == 1, "scale element size must be one byte");
+  const int64_t batches = scale.size(0);
+  const int64_t rows = scale.size(1);
+  const int64_t scale_cols = scale.size(2);
+  TORCH_CHECK(rows > 0, "scale rows must be positive");
+  TORCH_CHECK(scale_cols > 0, "scale columns must be positive");
+  TORCH_CHECK(scale_cols <= std::numeric_limits<int32_t>::max(),
+              "scale columns exceed int32 range");
+  const int64_t row_blocks = (rows + 127) / 128;
+  const int64_t groups_k = (scale_cols + 3) / 4;
+  const int64_t swizzled_bytes = row_blocks * groups_k * 512;
+  TORCH_CHECK(swizzled_bytes <= std::numeric_limits<int32_t>::max(),
+              "swizzled scale bytes per batch exceed int32 range");
+  auto swizzled = torch::empty({batches, swizzled_bytes}, scale.options());
+  nvfp4_block_scale_interleave_cuda(scale, swizzled);
+  return swizzled;
+}
+
+std::vector<torch::Tensor> pack_hidden_bmm_swizzled_from_metadata(
+    torch::Tensor topk_packed, torch::Tensor expanded_idx_to_permuted_idx,
+    torch::Tensor expert_padded_offsets, torch::Tensor hidden_states,
+    torch::Tensor hidden_states_scale, int64_t num_experts, int64_t local_expert_offset,
+    int64_t local_num_experts, int64_t padded_rows) {
+  check_tensor(topk_packed, "topk_packed");
+  check_tensor(expanded_idx_to_permuted_idx, "expanded_idx_to_permuted_idx");
+  check_tensor(expert_padded_offsets, "expert_padded_offsets");
+  check_tensor(hidden_states, "hidden_states");
+  check_tensor(hidden_states_scale, "hidden_states_scale");
+  TORCH_CHECK(topk_packed.scalar_type() == torch::kInt32, "topk_packed must be int32");
+  TORCH_CHECK(expanded_idx_to_permuted_idx.scalar_type() == torch::kInt32,
+              "expanded_idx_to_permuted_idx must be int32");
+  TORCH_CHECK(expert_padded_offsets.scalar_type() == torch::kInt32,
+              "expert_padded_offsets must be int32");
+  TORCH_CHECK(hidden_states.scalar_type() == torch::kUInt8,
+              "hidden_states must be packed fp4 uint8");
+  TORCH_CHECK(hidden_states_scale.scalar_type() == torch::kFloat8_e4m3fn ||
+                  hidden_states_scale.scalar_type() == torch::kUInt8,
+              "hidden_states_scale must be fp8_e4m3fn or raw uint8");
+  TORCH_CHECK(hidden_states_scale.element_size() == 1,
+              "hidden_states_scale element size must be one byte");
+  TORCH_CHECK(topk_packed.dim() == 2, "topk_packed must have shape [T, top_k]");
+  TORCH_CHECK(expanded_idx_to_permuted_idx.sizes() == topk_packed.sizes(),
+              "expanded_idx_to_permuted_idx shape mismatch");
+  TORCH_CHECK(hidden_states.dim() == 2, "hidden_states must have shape [T, H/2]");
+  TORCH_CHECK(hidden_states_scale.dim() == 2,
+              "hidden_states_scale must have shape [T, H/16]");
+  TORCH_CHECK(hidden_states.size(0) == topk_packed.size(0), "hidden_states T mismatch");
+  TORCH_CHECK(hidden_states_scale.size(0) == topk_packed.size(0),
+              "hidden_states_scale T mismatch");
+  TORCH_CHECK(hidden_states.size(1) % 16 == 0, "hidden row bytes must be 16-byte aligned");
+  TORCH_CHECK(hidden_states_scale.size(1) % 16 == 0,
+              "hidden scale row bytes must be 16-byte aligned");
+  TORCH_CHECK(num_experts > 0, "num_experts must be positive");
+  TORCH_CHECK(local_num_experts > 0, "local_num_experts must be positive");
+  TORCH_CHECK(local_expert_offset >= 0, "local_expert_offset must be non-negative");
+  TORCH_CHECK(num_experts >= local_expert_offset + local_num_experts,
+              "num_experts must cover the local expert range");
+  TORCH_CHECK(padded_rows > 0, "padded_rows must be positive");
+  TORCH_CHECK(expert_padded_offsets.numel() >= local_num_experts + 1,
+              "expert_padded_offsets must have at least local_num_experts + 1 elements");
+  TORCH_CHECK(topk_packed.numel() <= std::numeric_limits<int32_t>::max(),
+              "expanded token count exceeds int32 range");
+
+  const int64_t scale_cols = hidden_states_scale.size(1);
+  const int64_t row_blocks = (padded_rows + 127) / 128;
+  const int64_t groups_k = (scale_cols + 3) / 4;
+  const int64_t swizzled_bytes = row_blocks * groups_k * 512;
+  TORCH_CHECK(swizzled_bytes <= std::numeric_limits<int32_t>::max(),
+              "swizzled scale bytes per expert exceed int32 range");
+
+  auto hidden_packed_bmm =
+      torch::empty({local_num_experts, padded_rows, hidden_states.size(1)},
+                   hidden_states.options().dtype(torch::kUInt8));
+  auto hidden_scale_swizzled =
+      torch::empty({local_num_experts, swizzled_bytes}, hidden_states_scale.options());
+
+  pack_hidden_bmm_swizzled_from_metadata_cuda(
+      topk_packed, expanded_idx_to_permuted_idx, expert_padded_offsets, hidden_states,
+      hidden_states_scale, hidden_packed_bmm, hidden_scale_swizzled, num_experts,
+      local_expert_offset, local_num_experts, padded_rows);
+  return {hidden_packed_bmm, hidden_scale_swizzled};
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("forward", &fused_moe_forward,
         "FlashInfer-aligned FP4 block-scale MoE staged CUDA baseline");
@@ -320,4 +418,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Build TRT-LLM MoE grouped-GEMM routing metadata from PackedScoreIdx<bf16>");
   m.def("pack_hidden_bmm_from_metadata", &pack_hidden_bmm_from_metadata,
         "Pack G11 hidden FP4 rows into expert-major BMM layout using routing metadata");
+  m.def("nvfp4_block_scale_interleave", &nvfp4_block_scale_interleave,
+        "Interleave linear NVFP4 block scales into FlashInfer/SM100 BMM layout");
+  m.def("pack_hidden_bmm_swizzled_from_metadata", &pack_hidden_bmm_swizzled_from_metadata,
+        "Pack G11 hidden FP4 rows and swizzled scales using routing metadata");
 }
