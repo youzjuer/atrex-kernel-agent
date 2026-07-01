@@ -1,0 +1,56 @@
+{
+  "version": "v5_g11_full_profile",
+  "masked": false,
+  "timestamp": "2026-07-01T16:45:20Z",
+  "operator": "flashinfer.trtllm_fp4_block_scale_moe",
+  "application_profile": "Qwen3_5-Plus_prefill_TP1_G11",
+  "input_contract": "packed_nvfp4_flashinfer",
+  "catalog_shape": {
+    "tokens": 9500,
+    "hidden_size": 4096,
+    "intermediate_size": 1024,
+    "num_experts": 512,
+    "local_num_experts": 512,
+    "top_k": 10,
+    "routing_method_type": 1,
+    "hidden_states": {
+      "dtype": "torch.uint8",
+      "shape": [9500, 2048]
+    },
+    "hidden_states_scale": {
+      "dtype": "torch.float8_e4m3fn",
+      "shape": [9500, 256]
+    },
+    "gemm1_weights_shape": [512, 2048, 2048],
+    "gemm1_weights_scale_shape": [512, 2048, 256],
+    "gemm2_weights_shape": [512, 4096, 512],
+    "gemm2_weights_scale_shape": [512, 4096, 64]
+  },
+  "performance": {
+    "latency_us": 680466.064453125,
+    "flashinfer_latency_us": 1636.415958404541,
+    "speedup_vs_flashinfer": 0.002404845801854485,
+    "beats_flashinfer": false
+  },
+  "correctness": {
+    "status": "PASS",
+    "correctness_oracle": "flashinfer.trtllm_fp4_block_scale_moe (real packed NVFP4 contract)",
+    "max_abs": 0.0078125,
+    "max_rel": 2.559661626815796
+  },
+  "profile_evidence": {
+    "tool_used": "torch.cuda.Event",
+    "command": "CUDA_VISIBLE_DEVICES=6 PROJ019_ROOT=/home/youchunbo/code/sumu/omoExplore/proj/proj_019_moe_workload_op_opt python kernel_opt_fused_moe_cuda_pes/test_kernel.py --kernel kernel_opt_fused_moe_cuda_pes/kernel.py --mode profile --preset g11 --warmup 1 --rep 1 --compare-flashinfer --require-flashinfer --flashinfer-timeout-s 300 --json-out /tmp/atrex_g11_full_current_profile.json",
+    "profile_json": "/tmp/atrex_g11_full_current_profile.json",
+    "evidence_summary": "Full G11 packed NVFP4 PASS: candidate 680466.064us vs FlashInfer 1636.416us, speedup_vs_flashinfer 0.0024x."
+  },
+  "quality_gate": {
+    "result": "MISS",
+    "failure_reason": "Correctness is aligned with FlashInfer on the real TP1 G11 packed NVFP4 shape, but scalar FP4 FMA stages are roughly 416x slower than FlashInfer. Further scalar tuning is not a viable path to the objective."
+  },
+  "next_step": {
+    "action_category": "blackwell_fp4_tensor_core_grouped_gemm",
+    "description": "Replace scalar stage1/stage2 with a custom SM103 NVFP4 tensor-core grouped GEMM path that matches FlashInfer/TensorRT-LLM prepared weight layout, routing permutation, intermediate FP4 quantize/dequantize semantics, and finalize behavior."
+  },
+  "git_commit_hash": "1b5ff2d"
+}

@@ -167,9 +167,12 @@ Recent G11 packed-NVFP4 measurements on the real FlashInfer contract:
 |---|---:|---:|---|
 | G11 tokens=8 after scale-cache + warp stage2 | 735.776 us | 411.296 us | PASS, `0.559x` |
 | G11 tokens=128 after scale-cache + warp stage2 | 9329.056 us | 841.664 us | PASS, `0.090x` |
+| G11 full catalog after CUDA routing fast path (`T=9500`) | 680466.064 us | 1636.416 us | PASS, `0.0024x` |
 
 `ncu` on G11 tokens=8 attributes the current CUDA time mostly to scalar stage1 (`407.136 us`) and
 warp stage2 (`189.344 us`). The tokens=128 scaling confirms that scalar FP4 FMA is not a viable
 path to the tp=1 G11 target. The next implementation step must replace stage1/stage2 with
 Blackwell FP4 tensor-core grouped GEMM, matching FlashInfer/TensorRT-LLM's routing + shuffled-weight
-block-scale structure.
+block-scale structure. The full G11 profile confirms the same conclusion on the actual target
+shape: the implementation is functionally aligned with FlashInfer but misses the performance
+objective by roughly 416x.
