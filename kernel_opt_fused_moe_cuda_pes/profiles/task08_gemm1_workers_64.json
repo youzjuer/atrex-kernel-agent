@@ -1,0 +1,69 @@
+{
+  "status": "PASS",
+  "operator": "generated task08 SM103 FP4 GEMM1 BMM runtime smoke",
+  "preset": "g11",
+  "tokens": 9500,
+  "task08_root": "/home/youchunbo/code/sumu/omoExplore/proj/proj_019_moe_workload_op_opt/assets/task_08_cuda_fp4_bmm_sm103",
+  "work_root": "/tmp/task08_mpad238_tjspk4xk",
+  "compiled_symbol": "up_gate_fp4_sm103_umma_tma_u8_cta2_v310_cta_rank_specialized_tid0_consumer_from_v309",
+  "patch_counts": {
+    "comment_mpad": 1,
+    "flattened_rows_comment": 1,
+    "rows_const": 1,
+    "rows_per_expert_const": 1,
+    "fixed_mpad_static_assert": 1
+  },
+  "shape": {
+    "hidden_size": 4096,
+    "intermediate_size": 1024,
+    "num_experts": 512,
+    "local_num_experts": 512,
+    "top_k": 10,
+    "tile_tokens_dim": 256,
+    "padded_rows": 238,
+    "a_fp4": [
+      121856,
+      2048
+    ],
+    "a_scale_swizzled_u8": [
+      512,
+      65536
+    ],
+    "w13_fp4": [
+      512,
+      2048,
+      2048
+    ],
+    "w13_scale_swizzled_u8": [
+      512,
+      524288
+    ],
+    "expert_offsets": [
+      513
+    ],
+    "out": [
+      121856,
+      2048
+    ],
+    "out_dtype": "torch.bfloat16"
+  },
+  "expert_counts": {
+    "min": 141,
+    "max": 238,
+    "mean": 185.546875,
+    "nonzero": 512,
+    "total": 95000
+  },
+  "checks": {
+    "out_shape_dtype": "PASS",
+    "finite_valid_rows_sample": "PASS",
+    "checked_valid_rows": 4096,
+    "finite_sample_count": 262144,
+    "finite_sample_numel": 262144
+  },
+  "latency_us": {
+    "task08_v310_gemm1_bmm_only": 753.9520263671875
+  },
+  "elapsed_s": 117.46447004098445,
+  "next_step": "Add prepared-row-aware SwiGLU/requant epilogue and wire GEMM2/final scatter before using this as a full flashinfer.trtllm_fp4_block_scale_moe replacement."
+}

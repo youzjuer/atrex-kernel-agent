@@ -1,0 +1,86 @@
+{
+  "version": "v20_worker_tuning_and_scatter_x16_negative",
+  "date_utc": "2026-07-02",
+  "head_at_experiment_start": "593d401 Record slots2 pack negative experiment",
+  "goal": "Improve real TP=1 G11 packed-NVFP4 MoE latency versus flashinfer.trtllm_fp4_block_scale_moe.",
+  "source_state": {
+    "status": "reverted to stable source after experiments",
+    "tracked_diff_after_revert": "none"
+  },
+  "baseline_kept": {
+    "best_profile": "kernel_opt_fused_moe_cuda_pes/profiles/task08_end_to_end_g11_bench_scatter_oct_metadata_swiglu.json",
+    "candidate_total_us": 2832.0000171661377,
+    "flashinfer_us": 1403.007984161377,
+    "stage_us": {
+      "gemm1_bmm": 675.9999990463257,
+      "swiglu_requant": 393.72798800468445,
+      "gemm2_bmm": 984.4480156898499,
+      "final_scatter": 223.87200593948364
+    }
+  },
+  "worker_cluster_sweep": {
+    "result": "rejected",
+    "gemm2_env": "ATREX_GEMM2_TILEGRID_POSTSYNC_WORKER_CLUSTERS",
+    "gemm2_profiles": {
+      "64": {
+        "profile": "kernel_opt_fused_moe_cuda_pes/profiles/task08_gemm2_workers_64.json",
+        "latency_us": 986.6560101509094
+      },
+      "96": {
+        "profile": "kernel_opt_fused_moe_cuda_pes/profiles/task08_gemm2_workers_96.json",
+        "latency_us": 984.063982963562
+      },
+      "120": {
+        "profile": "kernel_opt_fused_moe_cuda_pes/profiles/task08_gemm2_workers_120.json",
+        "latency_us": 1000.4479885101318
+      },
+      "132": {
+        "profile": "kernel_opt_fused_moe_cuda_pes/profiles/task08_gemm2_workers_132.json",
+        "latency_us": 991.3280010223389
+      }
+    },
+    "gemm1_env": "TASK08_V310_WORKER_CLUSTERS",
+    "gemm1_profiles": {
+      "64": {
+        "profile": "kernel_opt_fused_moe_cuda_pes/profiles/task08_gemm1_workers_64.json",
+        "latency_us": 753.9520263671875
+      },
+      "96": {
+        "profile": "kernel_opt_fused_moe_cuda_pes/profiles/task08_gemm1_workers_96.json",
+        "latency_us": 970.687985420227
+      },
+      "120": {
+        "profile": "kernel_opt_fused_moe_cuda_pes/profiles/task08_gemm1_workers_120.json",
+        "latency_us": 800.5759716033936
+      },
+      "132": {
+        "profile": "kernel_opt_fused_moe_cuda_pes/profiles/task08_gemm1_workers_132.json",
+        "latency_us": 748.4480142593384
+      }
+    },
+    "conclusion": "No useful worker-cluster override found. GEMM2 workers=96 was only noise-level equal to default, while GEMM1 overrides were all slower than the current ~676us stage."
+  },
+  "final_scatter_x16_experiment": {
+    "result": "rejected",
+    "idea": "Change final scatter from 8 bf16 elements per thread to 16 bf16 elements per thread, reducing each token from 4 H-blocks to 2 H-blocks and reusing top-k metadata over more columns.",
+    "source_status": "reverted",
+    "profiles": {
+      "initial_correctness_fail": "kernel_opt_fused_moe_cuda_pes/profiles/task08_end_to_end_g11_correctness_scatter_x16.json",
+      "correctness_rerun_pass": "kernel_opt_fused_moe_cuda_pes/profiles/task08_end_to_end_g11_correctness_scatter_x16_rerun.json",
+      "bench": "kernel_opt_fused_moe_cuda_pes/profiles/task08_end_to_end_g11_bench_scatter_x16.json"
+    },
+    "bench_result": {
+      "status": "PASS",
+      "candidate_total_us": 2845.952033996582,
+      "flashinfer_us": 1377.1840333938599,
+      "speedup_vs_flashinfer": 0.4839097837709776,
+      "final_scatter_us": 226.49599611759186
+    },
+    "conclusion": "Correctness was not stable on the first run and the passing benchmark was slower than the existing oct-load scatter. The extra per-thread work/register pressure outweighed the lower block count."
+  },
+  "recommended_next_steps": [
+    "Do not use worker-cluster environment overrides for the current GEMM1/GEMM2 defaults.",
+    "Keep the final scatter oct-load implementation unless moving to a true GEMM2-finalize fusion.",
+    "Further single-stage micro-optimizations are unlikely to close the ~2x FlashInfer gap; focus on eliminating intermediate memory traffic or fixing a faster GEMM2 epilogue with full-output validation."
+  ]
+}
