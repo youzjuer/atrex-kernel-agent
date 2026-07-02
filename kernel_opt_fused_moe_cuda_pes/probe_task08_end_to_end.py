@@ -16,6 +16,7 @@ import torch
 import kernel
 from probe_task08_gemm2_runtime import (
     ATREX_GEMM2_TILEGRID_SPLITCOL_POSTSYNC_SYMBOL,
+    DIAG_GEMM2_SYMBOLS,
     _compile_gemm2_extension,
     _prepare_gemm1_tree,
     _prepare_gemm2_tree,
@@ -275,8 +276,18 @@ def _run_task08_pipeline(case: dict, gemm1_fn, gemm2_fn, args: argparse.Namespac
         case["w2_scale_swizzled_u8"],
         case["affine_expert_offsets"],
     )
+    if args.sync_before_final_scatter:
+        torch.cuda.synchronize()
+    gemm2_pre_scatter_abs = None
+    gemm2_pre_scatter_row_group_abs = None
+    if args.capture_gemm2_pre_scatter_stats:
+        gemm2_pre_scatter_abs = _abs_stats(gemm2_out)
+        gemm2_pre_scatter_row_group_abs = _gemm2_row_group_abs_stats(
+            gemm2_out, case["expert_counts"], int(args.mpad)
+        )
+    scatter_gemm2_out = gemm2_out.clone() if args.clone_gemm2_before_final_scatter else gemm2_out
     out = kernel.final_scatter_from_bmm(
-        gemm2_out,
+        scatter_gemm2_out,
         case["topk_packed"],
         case["expanded"],
         case["expert_padded_offsets"],
@@ -291,6 +302,9 @@ def _run_task08_pipeline(case: dict, gemm1_fn, gemm2_fn, args: argparse.Namespac
         "mid_scale": mid_scale,
         "mid_scale_swizzled": mid_scale_swizzled,
         "gemm2_out": gemm2_out,
+        "scatter_gemm2_out": scatter_gemm2_out,
+        "gemm2_pre_scatter_abs": gemm2_pre_scatter_abs,
+        "gemm2_pre_scatter_row_group_abs": gemm2_pre_scatter_row_group_abs,
     }
 
 
@@ -298,8 +312,18 @@ def _compile_task08(args: argparse.Namespace):
     task08_root = Path(args.task08_root).resolve()
     gemm1_root, gemm1_patch_counts = _prepare_gemm1_tree(task08_root, args.mpad)
     gemm1_module = _compile_extension(gemm1_root, args.mpad, args.verbose_build)
-    gemm2_root, gemm2_patch_counts = _prepare_gemm2_tree(task08_root, args.mpad)
-    gemm2_module = _compile_gemm2_extension(gemm2_root, args.mpad, args.verbose_build)
+    include_diag_symbols = args.gemm2_symbol in DIAG_GEMM2_SYMBOLS
+    gemm2_root, gemm2_patch_counts = _prepare_gemm2_tree(
+        task08_root,
+        args.mpad,
+        include_diag_symbols=include_diag_symbols,
+    )
+    gemm2_module = _compile_gemm2_extension(
+        gemm2_root,
+        args.mpad,
+        args.verbose_build,
+        extension_tag="diag" if include_diag_symbols else "",
+    )
     if not hasattr(gemm1_module, V310_SYMBOL):
         raise RuntimeError(f"compiled GEMM1 module missing symbol {V310_SYMBOL}")
     if not hasattr(gemm2_module, args.gemm2_symbol):
@@ -337,8 +361,20 @@ def run_probe(args: argparse.Namespace) -> dict:
     candidate = _run_task08_pipeline(case, gemm1_fn, gemm2_fn, args)
     torch.cuda.synchronize()
     gemm2_abs = _abs_stats(candidate["gemm2_out"])
+    scatter_gemm2_abs = (
+        None
+        if candidate["scatter_gemm2_out"] is candidate["gemm2_out"]
+        else _abs_stats(candidate["scatter_gemm2_out"])
+    )
     gemm2_row_group_abs = _gemm2_row_group_abs_stats(
         candidate["gemm2_out"], case["expert_counts"], int(args.mpad)
+    )
+    scatter_gemm2_row_group_abs = (
+        None
+        if candidate["scatter_gemm2_out"] is candidate["gemm2_out"]
+        else _gemm2_row_group_abs_stats(
+            candidate["scatter_gemm2_out"], case["expert_counts"], int(args.mpad)
+        )
     )
 
     _trace(args, "run FlashInfer reference")
@@ -506,8 +542,12 @@ def run_probe(args: argparse.Namespace) -> dict:
             "prepared_output_layout": not args.no_prepared_output_layout,
             "errors_vs_flashinfer": errors,
             "direct_layout_errors_vs_flashinfer": direct_layout_errors,
+            "gemm2_pre_scatter_abs": candidate["gemm2_pre_scatter_abs"],
+            "gemm2_pre_scatter_row_group_abs": candidate["gemm2_pre_scatter_row_group_abs"],
             "gemm2_out_abs": gemm2_abs,
+            "scatter_gemm2_out_abs": scatter_gemm2_abs,
             "gemm2_row_group_abs": gemm2_row_group_abs,
+            "scatter_gemm2_row_group_abs": scatter_gemm2_row_group_abs,
             "thresholds": {"max_abs": args.max_abs, "max_rel": args.max_rel},
         },
         "latency_us": {
@@ -542,6 +582,9 @@ def main() -> int:
     parser.add_argument("--compare-direct-layout", action="store_true")
     parser.add_argument("--no-prepared-output-layout", action="store_true")
     parser.add_argument("--legacy-swiglu-requant", action="store_true")
+    parser.add_argument("--sync-before-final-scatter", action="store_true")
+    parser.add_argument("--clone-gemm2-before-final-scatter", action="store_true")
+    parser.add_argument("--capture-gemm2-pre-scatter-stats", action="store_true")
     parser.add_argument("--verbose-build", action="store_true")
     parser.add_argument("--trace", action="store_true")
     parser.add_argument("--json-out")

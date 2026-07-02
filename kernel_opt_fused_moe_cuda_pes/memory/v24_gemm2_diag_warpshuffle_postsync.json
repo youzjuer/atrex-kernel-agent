@@ -1,0 +1,80 @@
+{
+  "version": "v24_gemm2_diag_warpshuffle_postsync",
+  "date_utc": "2026-07-02",
+  "head_at_experiment_start": "79c05b6 Save G11 diagnostic progress",
+  "goal": "Improve real TP=1 G11 packed-NVFP4 MoE performance versus flashinfer.trtllm_fp4_block_scale_moe.",
+  "source_changes": {
+    "probe_task08_gemm2_runtime.py": [
+      "Added diagnostic-only GEMM2 symbols behind include_diag_symbols so default clean postsync extension is not polluted.",
+      "Added a separate gemm2_diag work root and _diag extension tag for diagnostic GEMM2 variants.",
+      "Added tile-grid split-column warp-shuffle diagnostic wrappers, including a new post-load-sync plus post-epilogue-sync variant."
+    ],
+    "probe_task08_gemm2_diff.py": [
+      "New chunked full-output GEMM2 diff probe. It compares clean reference and diagnostic candidate outputs without materializing a full fp32 diff.",
+      "Reports bad row_flat, local_expert, row_in_expert, column, column groups, and candidate-vs-candidate stability.",
+      "Can run candidate first to expose order-sensitive bugs."
+    ],
+    "probe_task08_end_to_end.py": [
+      "Added diagnostic flags for sync-before-final-scatter, clone-gemm2-before-final-scatter, and pre-scatter GEMM2 abs capture."
+    ]
+  },
+  "important_findings": [
+    {
+      "finding": "metadata_valid_slots SwiGLU path currently produced corrupted GEMM2 inputs in fresh correctness runs, while legacy_count_dense SwiGLU was correct.",
+      "evidence": {
+        "metadata_postsync_fail_profile": "kernel_opt_fused_moe_cuda_pes/profiles/task08_end_to_end_g11_correctness_postsync_clean_after_diag_isolation.json",
+        "legacy_postsync_pass_profile": "kernel_opt_fused_moe_cuda_pes/profiles/task08_end_to_end_g11_correctness_postsync_clean_legacy_swiglu_check.json"
+      },
+      "action": "Use legacy_count_dense for GEMM2 epilogue diagnostics until metadata SwiGLU instability is isolated."
+    },
+    {
+      "finding": "warp-shuffle post-load-sync without post-epilogue sync can match clean postsync exactly when isolated, but fails intermittently in end-to-end runs.",
+      "evidence": {
+        "full_diff_candidate_first": "kernel_opt_fused_moe_cuda_pes/profiles/task08_gemm2_diff_warpshuffle_postldsync_candidate_first_legacy_swiglu.json",
+        "diff_valid_rows": 95000,
+        "diff_numel": 389120000,
+        "diff_max_abs": 0.0,
+        "e2e_fail_profile": "kernel_opt_fused_moe_cuda_pes/profiles/task08_end_to_end_g11_bench_warpshuffle_postldsync_legacy_swiglu_diag.json",
+        "pre_scatter_capture_pass_profile": "kernel_opt_fused_moe_cuda_pes/profiles/task08_end_to_end_g11_correctness_warpshuffle_postldsync_pre_scatter_capture.json"
+      },
+      "conclusion": "The no-post-epilogue-sync variant is still not safe to promote. A full pre-scatter read can mask the issue, so sample/full GEMM2-only diff is not sufficient proof for this variant."
+    },
+    {
+      "finding": "Adding post-epilogue sync to the warp-shuffle post-load-sync variant restored short-run end-to-end correctness under legacy SwiGLU while preserving the GEMM2 speed gain.",
+      "symbol": "atrex_gemm2_tilegrid_splitcolepi_warpshuffle_postldsync_postsync",
+      "evidence": {
+        "correctness_profile": "kernel_opt_fused_moe_cuda_pes/profiles/task08_end_to_end_g11_correctness_warpshuffle_postldsync_postsync_legacy_swiglu_rerun2.json",
+        "benchmark_profile": "kernel_opt_fused_moe_cuda_pes/profiles/task08_end_to_end_g11_bench_warpshuffle_postldsync_postsync_legacy_swiglu_diag.json"
+      },
+      "latency_us": {
+        "candidate_total": 2747.6160526275635,
+        "flashinfer_trtllm_fp4_block_scale_moe": 1392.2560214996338,
+        "speedup_vs_flashinfer": 0.5067141823429843,
+        "stages": {
+          "gemm1_bmm": 678.5920262336731,
+          "swiglu_requant": 392.67200231552124,
+          "gemm2_bmm": 914.8160219192505,
+          "final_scatter": 223.13599288463593
+        }
+      },
+      "comparison": {
+        "postsync_legacy_gemm2_us_same_session": 983.8079810142517,
+        "gemm2_delta_us": -68.99195909500122
+      },
+      "conclusion": "Useful GEMM2 progress, but still far from beating FlashInfer end to end."
+    }
+  ],
+  "current_status": {
+    "best_verified_candidate_this_round": "atrex_gemm2_tilegrid_splitcolepi_warpshuffle_postldsync_postsync with legacy_count_dense SwiGLU",
+    "correctness": "PASS in repeated skip-bench correctness and one short benchmark process",
+    "target_status": "MISS",
+    "overall_gap": "Candidate total remains about 2.75 ms versus FlashInfer about 1.39 ms.",
+    "default_path": "Not changed to the diagnostic variant. Keep diagnostic symbols explicit until more repeated E2E runs and the metadata SwiGLU instability are resolved."
+  },
+  "recommended_next_steps": [
+    "Localize why metadata_valid_slots SwiGLU can produce corrupted GEMM2/out while legacy_count_dense passes.",
+    "Run more repeated E2E correctness for atrex_gemm2_tilegrid_splitcolepi_warpshuffle_postldsync_postsync under legacy SwiGLU before promotion.",
+    "If stable, make the post-epilogue-sync warp-shuffle variant the selected GEMM2 candidate for further experiments.",
+    "Large remaining gains still require reducing GEMM1/SwiGLU/final-scatter memory traffic or fusing GEMM2 with final scatter."
+  ]
+}

@@ -38,6 +38,26 @@ ATREX_GEMM2_TILEGRID_SPLITCOL_SYMBOL = "atrex_gemm2_tilegrid_splitcolepi"
 ATREX_GEMM2_TILEGRID_SPLITCOL_POSTSYNC_SYMBOL = (
     "atrex_gemm2_tilegrid_splitcolepi_postsync"
 )
+ATREX_GEMM2_TILEGRID_SPLITCOL_WARPSHUFFLE_SYMBOL = (
+    "atrex_gemm2_tilegrid_splitcolepi_warpshuffle"
+)
+ATREX_GEMM2_TILEGRID_SPLITCOL_WARPSHUFFLE_POSTLDSYNC_SYMBOL = (
+    "atrex_gemm2_tilegrid_splitcolepi_warpshuffle_postldsync"
+)
+ATREX_GEMM2_TILEGRID_SPLITCOL_WARPSHUFFLE_POSTLDSYNC_POSTSYNC_SYMBOL = (
+    "atrex_gemm2_tilegrid_splitcolepi_warpshuffle_postldsync_postsync"
+)
+ATREX_GEMM2_TILEGRID_SPLITCOL_LDX32_WARPSHUFFLE_POSTLDSYNC_SYMBOL = (
+    "atrex_gemm2_tilegrid_splitcolldx32_warpshuffle_postldsync"
+)
+DIAG_GEMM2_SYMBOLS = frozenset(
+    {
+        ATREX_GEMM2_TILEGRID_SPLITCOL_WARPSHUFFLE_SYMBOL,
+        ATREX_GEMM2_TILEGRID_SPLITCOL_WARPSHUFFLE_POSTLDSYNC_SYMBOL,
+        ATREX_GEMM2_TILEGRID_SPLITCOL_WARPSHUFFLE_POSTLDSYNC_POSTSYNC_SYMBOL,
+        ATREX_GEMM2_TILEGRID_SPLITCOL_LDX32_WARPSHUFFLE_POSTLDSYNC_SYMBOL,
+    }
+)
 
 
 def _bench(fn, warmup: int, rep: int) -> float:
@@ -79,6 +99,132 @@ def _stable_work_root(kind: str, mpad: int) -> Path:
     return Path(tempfile.gettempdir()) / f"atrex_task08_{kind}_mpad{mpad}_src"
 
 
+def _cpp_bool(value: bool) -> str:
+    return "true" if value else "false"
+
+
+def _gemm2_full_impl_wrapper(
+    *,
+    symbol: str,
+    description: str,
+    worker_env: str,
+    ldx32: bool = False,
+    stream_store: bool = True,
+    post_load_sync: bool = False,
+    x32_post_load_sync: bool = False,
+    skip_post_epilogue_sync: bool = True,
+) -> str:
+    params = [
+        ("false", "kPrefetchAllTma"),
+        ("false", "kPrefetchAbTmaOnly"),
+        ("false", "kPrefetchSfTmaOnly"),
+        ("false", "kCircularAbDesc"),
+        ("false", "kSfPairCadence"),
+        ("false", "kSkipSplitScaleTmemFence"),
+        ("true", "kBScaleArriveReady"),
+        ("false", "kRank0SelfReadyArrive"),
+        ("false", "kSkipEpilogue"),
+        (_cpp_bool(ldx32), "kLdX32Epilogue"),
+        (_cpp_bool(stream_store), "kStreamStoreEpilogue"),
+        ("false", "kPeerSkipBScaleTma"),
+        ("false", "kAfillMma"),
+        ("true", "kSplitColumnEpilogue"),
+        ("false", "kSkipInvalidRowsEpilogue"),
+        ("false", "kSplitAbSfBarrierImpl"),
+        ("false", "kDualLoadArriveImpl"),
+        ("false", "kSingleTmaProducerImpl"),
+        ("4", "kPipeStagesImpl"),
+        ("false", "kQuadColumnEpilogue"),
+        ("kThreads", "kBlockThreadsImpl"),
+        ("true", "kDrainFinalSlotOnlyImpl"),
+        ("true", "kSkipPostTileClusterSyncImpl"),
+        ("false", "kPostTileLeaderGateImpl"),
+        ("false", "kPostTileConsumerGateOnlyImpl"),
+        ("false", "kDualPollReadyBScaleImpl"),
+        ("false", "kBScaleWaitBeforeReadyImpl"),
+        ("false", "kPostTileMmaConsumerGateOnlyImpl"),
+        ("false", "kDelayPostTileMmaGateImpl"),
+        ("false", "kDelayPostTileGateBeforeReadyImpl"),
+        ("false", "kDelayPostTileGateBeforeScaleImpl"),
+        (_cpp_bool(skip_post_epilogue_sync), "kSkipPostEpilogueSyncImpl"),
+        ("false", "kOverlapProducerEpilogueImpl"),
+        ("false", "kSmemCoalescedEpilogueImpl"),
+        ("false", "kTmaStoreRank0EpilogueImpl"),
+        ("false", "kTmaStoreRank0DeferredEpilogueImpl"),
+        ("false", "kSkipPreEpilogueSyncWhenNoEpilogueImpl"),
+        ("false", "kPreEpilogueMmaDoneGateImpl"),
+        ("false", "kEpilogueNoStoreDiagImpl"),
+        ("false", "kEpilogueZeroStoreDiagImpl"),
+        ("false", "kEpilogueCoalescedZeroStoreDiagImpl"),
+        ("false", "kBufferedOverlapEpilogueImpl"),
+        ("false", "kSplitSmemCoalescedEpilogueImpl"),
+        ("false", "kTmaStoreExpertEpilogueImpl"),
+        ("false", "kTmaStoreExpertDeferredEpilogueImpl"),
+        ("false", "kTmaStoreExpertSubtileDbEpilogueImpl"),
+        ("false", "kTmaStoreExpertSubtileDbN128EpilogueImpl"),
+        ("false", "kPreEpilogueWarpLeaderGateImpl"),
+        ("false", "kTmaStoreExpertSubtileDbDelayIssueImpl"),
+        ("false", "kTmaStoreExpertSubtileDbNamedBarrierImpl"),
+        ("false", "kTmaStoreExpertSubtileDbN32EpilogueImpl"),
+        ("false", "kPreEpilogueMmaDoneEpiOnlyGateImpl"),
+        ("false", "kPostEpilogueNamedBarrierImpl"),
+        ("false", "kWarpStagedCoalescedEpilogueImpl"),
+        ("false", "kWarpStagedCoalescedEpilogue2GroupImpl"),
+        ("true", "kWarpShuffleCoalescedEpilogueImpl"),
+        (_cpp_bool(x32_post_load_sync), "kWarpShuffleX32PostLoadSyncImpl"),
+        (_cpp_bool(post_load_sync), "kWarpShufflePostLoadSyncImpl"),
+        ("false", "kWarpShufflePairPostLoadSyncImpl"),
+        ("false", "kWarpShufflePairCoalescedStoreImpl"),
+        ("false", "kWarpShufflePairCoalescedPostStoreSyncImpl"),
+        ("false", "kWarpShufflePairCoalescedFinalSyncImpl"),
+        ("-1", "kWarpShuffleStoreCachePolicyImpl"),
+        ("false", "kWarpShuffleX32Pair16StoreImpl"),
+        ("false", "kWarpShuffleX32Pair16PhaseColumnPairsImpl"),
+        ("false", "kPreEpilogueAfterThreadSyncImpl"),
+        ("false", "kWarpShufflePostStoreSyncImpl"),
+        ("false", "kWarpShuffleFinalPostStoreSyncImpl"),
+        ("false", "kPostTileEpilogueLastWarpGateImpl"),
+        ("false", "kPostTileEpilogueWarpLeaderGateImpl"),
+        ("false", "kPostTileEpilogueWarpLeaderNamedGateImpl"),
+        ("false", "kPostTileEpilogueColumnGroupNamedGateImpl"),
+        ("1", "kDefaultWorkerClusterDivisor"),
+        ("false", "kPostTileRank0OnlyGateImpl"),
+        ("false", "kUpperHalfNoOverlapEpilogueDiagImpl"),
+        ("true", "kTileGridLaunchImpl"),
+        ("false", "kEpiPipeTmaImmediateEpilogueImpl"),
+        ("false", "kFixedM235AffineExpertOffsetsImpl"),
+        ("false", "kWarpUniformTmaProducerElectImpl"),
+        ("false", "kWarpUniformBScaleReadyElectImpl"),
+        ("false", "kCtaRankSpecializedTid0ConsumerImpl"),
+    ]
+    param_lines = []
+    for idx, (value, comment) in enumerate(params):
+        suffix = "," if idx + 1 < len(params) else ">"
+        param_lines.append(f"      {value}{suffix} // {comment}")
+    params_text = "\n".join(param_lines)
+    return f"""
+torch::Tensor
+{symbol}(
+    torch::Tensor a_fp4,
+    torch::Tensor a_scale_swizzled_u8,
+    torch::Tensor w13_fp4,
+    torch::Tensor w13_scale_swizzled_u8,
+    torch::Tensor expert_offsets) {{
+  return up_gate_fp4_sm103_umma_tma_u8_cta2_v142_tmaprefetch_impl<
+{params_text}
+      (
+      a_fp4,
+      a_scale_swizzled_u8,
+      w13_fp4,
+      w13_scale_swizzled_u8,
+      expert_offsets,
+      "{worker_env}",
+      "{description}");
+}}
+
+"""
+
+
 def _prepare_gemm1_tree(task08_root: Path, mpad: int) -> tuple[Path, dict[str, int]]:
     src_header = task08_root / "include" / HEADER_NAME
     src_ext = task08_root / "cuda_bmm" / EXT_SOURCE_NAME
@@ -103,7 +249,12 @@ def _prepare_gemm1_tree(task08_root: Path, mpad: int) -> tuple[Path, dict[str, i
     return work_root, counts
 
 
-def _patch_gemm2_header(text: str, mpad: int) -> tuple[str, dict[str, int]]:
+def _patch_gemm2_header(
+    text: str,
+    mpad: int,
+    *,
+    include_diag_symbols: bool = False,
+) -> tuple[str, dict[str, int]]:
     counts: dict[str, int] = {}
     text, counts["comment_shape"] = _replace_once(
         text,
@@ -270,6 +421,59 @@ torch::Tensor
 }}
 
 """
+    if include_diag_symbols:
+        custom_wrapper += _gemm2_full_impl_wrapper(
+            symbol=ATREX_GEMM2_TILEGRID_SPLITCOL_WARPSHUFFLE_SYMBOL,
+            description=(
+                "atrex GEMM2 diagnostic tile-grid split-column warp-shuffle streaming "
+                "epilogue probe"
+            ),
+            worker_env="ATREX_GEMM2_TILEGRID_WARPSHUFFLE_WORKER_CLUSTERS",
+            ldx32=False,
+            stream_store=True,
+            post_load_sync=False,
+            x32_post_load_sync=False,
+            skip_post_epilogue_sync=True,
+        )
+        custom_wrapper += _gemm2_full_impl_wrapper(
+            symbol=ATREX_GEMM2_TILEGRID_SPLITCOL_WARPSHUFFLE_POSTLDSYNC_SYMBOL,
+            description=(
+                "atrex GEMM2 diagnostic tile-grid split-column warp-shuffle streaming "
+                "epilogue post-load-sync probe"
+            ),
+            worker_env="ATREX_GEMM2_TILEGRID_WARPSHUFFLE_POSTLDSYNC_WORKER_CLUSTERS",
+            ldx32=False,
+            stream_store=True,
+            post_load_sync=True,
+            x32_post_load_sync=False,
+            skip_post_epilogue_sync=True,
+        )
+        custom_wrapper += _gemm2_full_impl_wrapper(
+            symbol=ATREX_GEMM2_TILEGRID_SPLITCOL_LDX32_WARPSHUFFLE_POSTLDSYNC_SYMBOL,
+            description=(
+                "atrex GEMM2 diagnostic tile-grid split-column ldx32 warp-shuffle "
+                "streaming epilogue post-load-sync probe"
+            ),
+            worker_env="ATREX_GEMM2_TILEGRID_LDX32_WARPSHUFFLE_POSTLDSYNC_WORKER_CLUSTERS",
+            ldx32=True,
+            stream_store=True,
+            post_load_sync=False,
+            x32_post_load_sync=True,
+            skip_post_epilogue_sync=True,
+        )
+        custom_wrapper += _gemm2_full_impl_wrapper(
+            symbol=ATREX_GEMM2_TILEGRID_SPLITCOL_WARPSHUFFLE_POSTLDSYNC_POSTSYNC_SYMBOL,
+            description=(
+                "atrex GEMM2 diagnostic tile-grid split-column warp-shuffle streaming "
+                "epilogue with post-load sync and post-epilogue sync probe"
+            ),
+            worker_env="ATREX_GEMM2_TILEGRID_WARPSHUFFLE_POSTLDSYNC_POSTSYNC_WORKER_CLUSTERS",
+            ldx32=False,
+            stream_store=True,
+            post_load_sync=True,
+            x32_post_load_sync=False,
+            skip_post_epilogue_sync=False,
+        )
     text, counts["atrex_tilegrid_splitcol_wrapper"] = _replace_once(
         text,
         "PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {",
@@ -284,6 +488,24 @@ torch::Tensor
       &{ATREX_GEMM2_TILEGRID_SPLITCOL_POSTSYNC_SYMBOL},
       "atrex generated task08 GEMM2 tile-grid split-column post-sync epilogue probe");
 '''
+    if include_diag_symbols:
+        bind += f'''  m.def(
+      "{ATREX_GEMM2_TILEGRID_SPLITCOL_WARPSHUFFLE_SYMBOL}",
+      &{ATREX_GEMM2_TILEGRID_SPLITCOL_WARPSHUFFLE_SYMBOL},
+      "atrex generated task08 GEMM2 diagnostic tile-grid split-column warp-shuffle epilogue probe");
+  m.def(
+      "{ATREX_GEMM2_TILEGRID_SPLITCOL_WARPSHUFFLE_POSTLDSYNC_SYMBOL}",
+      &{ATREX_GEMM2_TILEGRID_SPLITCOL_WARPSHUFFLE_POSTLDSYNC_SYMBOL},
+      "atrex generated task08 GEMM2 diagnostic tile-grid split-column warp-shuffle post-load-sync epilogue probe");
+  m.def(
+      "{ATREX_GEMM2_TILEGRID_SPLITCOL_LDX32_WARPSHUFFLE_POSTLDSYNC_SYMBOL}",
+      &{ATREX_GEMM2_TILEGRID_SPLITCOL_LDX32_WARPSHUFFLE_POSTLDSYNC_SYMBOL},
+      "atrex generated task08 GEMM2 diagnostic tile-grid split-column ldx32 warp-shuffle post-load-sync epilogue probe");
+  m.def(
+      "{ATREX_GEMM2_TILEGRID_SPLITCOL_WARPSHUFFLE_POSTLDSYNC_POSTSYNC_SYMBOL}",
+      &{ATREX_GEMM2_TILEGRID_SPLITCOL_WARPSHUFFLE_POSTLDSYNC_POSTSYNC_SYMBOL},
+      "atrex generated task08 GEMM2 diagnostic tile-grid split-column warp-shuffle post-load-sync post-sync epilogue probe");
+'''
     text, counts["atrex_tilegrid_splitcol_bind"] = _replace_once(
         text,
         "PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {\n",
@@ -292,7 +514,12 @@ torch::Tensor
     return text, counts
 
 
-def _prepare_gemm2_tree(task08_root: Path, mpad: int) -> tuple[Path, dict[str, int]]:
+def _prepare_gemm2_tree(
+    task08_root: Path,
+    mpad: int,
+    *,
+    include_diag_symbols: bool = False,
+) -> tuple[Path, dict[str, int]]:
     src_header = task08_root / "include" / HEADER_NAME
     src_ext = task08_root / "cuda_bmm" / EXT_SOURCE_NAME
     if not src_header.exists():
@@ -300,7 +527,7 @@ def _prepare_gemm2_tree(task08_root: Path, mpad: int) -> tuple[Path, dict[str, i
     if not src_ext.exists():
         raise FileNotFoundError(src_ext)
 
-    work_root = _stable_work_root("gemm2", mpad)
+    work_root = _stable_work_root("gemm2_diag" if include_diag_symbols else "gemm2", mpad)
     include_dir = work_root / "include"
     cuda_dir = work_root / "cuda_bmm"
     include_dir.mkdir(parents=True, exist_ok=True)
@@ -310,17 +537,28 @@ def _prepare_gemm2_tree(task08_root: Path, mpad: int) -> tuple[Path, dict[str, i
         if cuh.name == HEADER_NAME:
             continue
         _copy_if_changed(cuh, include_dir / cuh.name)
-    patched_header, counts = _patch_gemm2_header(src_header.read_text(), mpad)
+    patched_header, counts = _patch_gemm2_header(
+        src_header.read_text(),
+        mpad,
+        include_diag_symbols=include_diag_symbols,
+    )
     _write_text_if_changed(include_dir / HEADER_NAME, patched_header)
     _copy_if_changed(src_ext, cuda_dir / EXT_SOURCE_NAME)
     return work_root, counts
 
 
-def _compile_gemm2_extension(work_root: Path, mpad: int, verbose: bool):
+def _compile_gemm2_extension(
+    work_root: Path,
+    mpad: int,
+    verbose: bool,
+    *,
+    extension_tag: str = "",
+):
     arch_list = _device_arch_list()
     os.environ["TORCH_CUDA_ARCH_LIST"] = arch_list
     arch_suffix = arch_list.replace(".", "_").replace("+", "p")
-    ext_name = f"task08_gemm2_mpad{mpad}_v310_probe_sm{arch_suffix}"
+    tag = f"_{extension_tag}" if extension_tag else ""
+    ext_name = f"task08_gemm2{tag}_mpad{mpad}_v310_probe_sm{arch_suffix}"
     build_dir = Path(tempfile.gettempdir()) / ext_name
     build_dir.mkdir(parents=True, exist_ok=True)
     return load(
@@ -402,15 +640,25 @@ def run_probe(args: argparse.Namespace) -> dict:
     if shape["dtype"] != "nvfp4":
         raise NotImplementedError("task08 GEMM2 probe targets packed NVFP4")
     task08_root = Path(args.task08_root).resolve()
+    gemm2_symbol = args.gemm2_symbol or DEFAULT_GEMM2_SYMBOL
+    include_diag_symbols = gemm2_symbol in DIAG_GEMM2_SYMBOLS
 
     _trace(args, "compile GEMM1 extension")
     gemm1_root, gemm1_patch_counts = _prepare_gemm1_tree(task08_root, args.mpad)
     gemm1_module = _compile_extension(gemm1_root, args.mpad, args.verbose_build)
     _trace(args, "compile GEMM2 extension")
-    gemm2_root, gemm2_patch_counts = _prepare_gemm2_tree(task08_root, args.mpad)
-    gemm2_module = _compile_gemm2_extension(gemm2_root, args.mpad, args.verbose_build)
+    gemm2_root, gemm2_patch_counts = _prepare_gemm2_tree(
+        task08_root,
+        args.mpad,
+        include_diag_symbols=include_diag_symbols,
+    )
+    gemm2_module = _compile_gemm2_extension(
+        gemm2_root,
+        args.mpad,
+        args.verbose_build,
+        extension_tag="diag" if include_diag_symbols else "",
+    )
     gemm1_fn = getattr(gemm1_module, V310_SYMBOL)
-    gemm2_symbol = args.gemm2_symbol or DEFAULT_GEMM2_SYMBOL
     if not hasattr(gemm2_module, gemm2_symbol):
         raise RuntimeError(f"compiled GEMM2 module missing symbol {gemm2_symbol}")
     gemm2_fn = getattr(gemm2_module, gemm2_symbol)
