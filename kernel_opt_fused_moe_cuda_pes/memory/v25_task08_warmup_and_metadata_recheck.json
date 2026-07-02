@@ -1,0 +1,109 @@
+{
+  "version": "v25_task08_warmup_and_metadata_recheck",
+  "date_utc": "2026-07-02",
+  "head_at_experiment_start": "9ac63ec Add SwiGLU metadata diff probe",
+  "goal": "Improve real TP=1 G11 packed-NVFP4 MoE performance versus flashinfer.trtllm_fp4_block_scale_moe.",
+  "source_changes": {
+    "probe_task08_end_to_end.py": [
+      "Added --reference-first to run the FlashInfer oracle before the candidate pipeline.",
+      "Added --candidate-warmup-runs to discard cold candidate pipeline launches before the measured correctness run.",
+      "Recorded reference_order and candidate_warmup_runs in probe JSON output."
+    ]
+  },
+  "findings": [
+    {
+      "finding": "The previous clean postsync and metadata/legacy correctness failures were cold-launch/order effects, not a layout mismatch.",
+      "evidence": {
+        "candidate_first_no_warmup_legacy": {
+          "profile": "kernel_opt_fused_moe_cuda_pes/profiles/task08_end_to_end_g11_correctness_legacy_current.json",
+          "status": "FAIL",
+          "max_abs_vs_flashinfer": 444.1357421875,
+          "gemm2_valid_row_abs_max": 4480.0
+        },
+        "reference_first_legacy": {
+          "profile": "kernel_opt_fused_moe_cuda_pes/profiles/task08_end_to_end_g11_correctness_legacy_reference_first.json",
+          "status": "PASS",
+          "max_abs_vs_flashinfer": 0.046875,
+          "gemm2_valid_row_abs_max": 4.75
+        },
+        "candidate_first_warmup1_legacy": {
+          "profile": "kernel_opt_fused_moe_cuda_pes/profiles/task08_end_to_end_g11_correctness_legacy_candidate_warmup1.json",
+          "status": "PASS",
+          "max_abs_vs_flashinfer": 0.046875,
+          "gemm2_valid_row_abs_max": 4.75
+        }
+      },
+      "conclusion": "Task08 UMMA BMM probes need one discarded candidate warmup or a reference-first run before correctness assertions. Do not classify metadata SwiGLU or clean postsync GEMM2 as incorrect from a cold first launch alone."
+    },
+    {
+      "finding": "metadata_valid_slots SwiGLU matches legacy and is end-to-end correct after the same candidate warmup.",
+      "evidence": {
+        "swiglu_diff": {
+          "profile": "kernel_opt_fused_moe_cuda_pes/profiles/task08_swiglu_diff_legacy_vs_metadata_g11.json",
+          "status": "PASS",
+          "mid_q_valid_max_abs": 0,
+          "mid_q_padding_max_abs": 0,
+          "mid_scale_valid_max_abs": 0,
+          "mid_scale_padding_max_abs": 0,
+          "mid_scale_swizzled_max_abs": 0
+        },
+        "metadata_e2e_warmup1": {
+          "profile": "kernel_opt_fused_moe_cuda_pes/profiles/task08_end_to_end_g11_correctness_metadata_candidate_warmup1.json",
+          "status": "PASS",
+          "max_abs_vs_flashinfer": 0.046875
+        }
+      },
+      "conclusion": "Use metadata_valid_slots for current staged-pipeline benchmarking; legacy_count_dense is no longer needed as the default diagnostic workaround."
+    },
+    {
+      "finding": "The best currently rechecked staged BMM path is still far behind FlashInfer.",
+      "evidence": {
+        "clean_metadata": {
+          "profile": "kernel_opt_fused_moe_cuda_pes/profiles/task08_end_to_end_g11_bench_metadata_warmup1_clean.json",
+          "status": "PASS",
+          "candidate_total_us": 2819.4239139556885,
+          "flashinfer_us": 1381.376028060913,
+          "speedup_vs_flashinfer": 0.48994974513173667,
+          "stages_us": {
+            "gemm1_bmm": 675.4559874534607,
+            "swiglu_requant": 393.92000436782837,
+            "gemm2_bmm": 982.4960231781006,
+            "final_scatter": 223.13599288463593
+          }
+        },
+        "warpshuffle_postldsync_postsync_metadata": {
+          "profile": "kernel_opt_fused_moe_cuda_pes/profiles/task08_end_to_end_g11_bench_warpshuffle_postsync_metadata_warmup1.json",
+          "status": "PASS",
+          "candidate_total_us": 2774.912118911743,
+          "flashinfer_us": 1373.8880157470703,
+          "speedup_vs_flashinfer": 0.49511046003355147,
+          "stages_us": {
+            "gemm1_bmm": 682.3679804801941,
+            "swiglu_requant": 395.26399970054626,
+            "gemm2_bmm": 916.1279797554016,
+            "final_scatter": 223.83999824523926
+          }
+        },
+        "formal_kernel_entrypoint": {
+          "profile": "kernel_opt_fused_moe_cuda_pes/profiles/main_kernel_g11_profile_current.json",
+          "status": "PASS",
+          "candidate_us": 680452.8198242188,
+          "flashinfer_us": 1423.5520362854004,
+          "speedup_vs_flashinfer": 0.0020920657462381396
+        }
+      },
+      "conclusion": "The staged BMM bridge is about 245x faster than the formal scalar kernel.py path but still about 2.0x slower than FlashInfer. The next high-leverage work is integrating a staged BMM special path into kernel.py and then eliminating large memory traffic, especially GEMM2_out plus final scatter and the standalone SwiGLU requant pass."
+    }
+  ],
+  "recommended_next_steps": [
+    "Keep --candidate-warmup-runs 1 for task08 staged-pipeline correctness and short benchmarks.",
+    "Promote the diagnostic warp-shuffle post-load-sync plus post-epilogue-sync GEMM2 only after repeated warmup correctness runs.",
+    "Move the staged BMM path behind an exact G11 TP=1 fast path in kernel.py so the formal evaluator improves from the scalar baseline.",
+    "After integration, pursue GEMM2/final-scatter fusion or SwiGLU-to-GEMM2 fusion; micro-optimizing clears is too small and previously unstable."
+  ],
+  "quality_gate": {
+    "result": "PARTIAL_PROGRESS",
+    "reason": "Correctness diagnosis improved and the best staged BMM path is now reproducibly PASS after warmup, but no current path beats flashinfer.trtllm_fp4_block_scale_moe."
+  },
+  "git_commit_hash": "pending"
+}

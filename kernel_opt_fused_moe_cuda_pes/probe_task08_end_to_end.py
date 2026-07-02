@@ -357,6 +357,22 @@ def run_probe(args: argparse.Namespace) -> dict:
     _trace(args, "build routing metadata and hidden BMM pack")
     case = _build_routing_and_hidden_pack(args, inputs)
 
+    import flashinfer
+
+    flash_fn = getattr(flashinfer, "trtllm_fp4_block_scale_moe", None)
+    if flash_fn is None:
+        raise RuntimeError("flashinfer.trtllm_fp4_block_scale_moe is not available")
+    if args.reference_first:
+        _trace(args, "run FlashInfer reference")
+        flash_out = _first(_call_flashinfer(flash_fn, inputs))
+        torch.cuda.synchronize()
+
+    for warmup_idx in range(int(args.candidate_warmup_runs)):
+        _trace(args, f"run candidate warmup pipeline {warmup_idx + 1}")
+        warmup_candidate = _run_task08_pipeline(case, gemm1_fn, gemm2_fn, args)
+        torch.cuda.synchronize()
+        del warmup_candidate
+
     _trace(args, "run candidate pipeline")
     candidate = _run_task08_pipeline(case, gemm1_fn, gemm2_fn, args)
     torch.cuda.synchronize()
@@ -377,14 +393,10 @@ def run_probe(args: argparse.Namespace) -> dict:
         )
     )
 
-    _trace(args, "run FlashInfer reference")
-    import flashinfer
-
-    flash_fn = getattr(flashinfer, "trtllm_fp4_block_scale_moe", None)
-    if flash_fn is None:
-        raise RuntimeError("flashinfer.trtllm_fp4_block_scale_moe is not available")
-    flash_out = _first(_call_flashinfer(flash_fn, inputs))
-    torch.cuda.synchronize()
+    if not args.reference_first:
+        _trace(args, "run FlashInfer reference")
+        flash_out = _first(_call_flashinfer(flash_fn, inputs))
+        torch.cuda.synchronize()
 
     errors = _errors(candidate["out"], flash_out)
     correctness_ok = bool(
@@ -536,6 +548,8 @@ def run_probe(args: argparse.Namespace) -> dict:
             "out": tuple(candidate["out"].shape),
         },
         "swiglu_requant_path": "legacy_count_dense" if args.legacy_swiglu_requant else "metadata_valid_slots",
+        "reference_order": "reference_first" if args.reference_first else "candidate_first",
+        "candidate_warmup_runs": int(args.candidate_warmup_runs),
         "expert_counts": _count_summary(case["expert_counts"]),
         "checks": {
             "correctness": "PASS" if correctness_ok else "FAIL",
@@ -582,6 +596,8 @@ def main() -> int:
     parser.add_argument("--compare-direct-layout", action="store_true")
     parser.add_argument("--no-prepared-output-layout", action="store_true")
     parser.add_argument("--legacy-swiglu-requant", action="store_true")
+    parser.add_argument("--reference-first", action="store_true")
+    parser.add_argument("--candidate-warmup-runs", type=int, default=0)
     parser.add_argument("--sync-before-final-scatter", action="store_true")
     parser.add_argument("--clone-gemm2-before-final-scatter", action="store_true")
     parser.add_argument("--capture-gemm2-pre-scatter-stats", action="store_true")
