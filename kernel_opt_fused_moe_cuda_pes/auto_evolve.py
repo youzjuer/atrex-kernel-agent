@@ -136,7 +136,7 @@ def copy_task(source: Path, run_dir: Path, *, fresh: bool) -> None:
         ".gitignore",
     ):
         shutil.copy2(source / rel, run_dir / rel)
-    for helper in sorted(source.glob("probe_task08*.py")):
+    for helper in sorted(source.glob("probe_*.py")):
         shutil.copy2(helper, run_dir / helper.name)
     src_dst = run_dir / "src"
     if src_dst.exists():
@@ -514,7 +514,7 @@ def materialize_candidate_base(run_dir: Path, child_dir: Path, parent_id: str | 
     parent_dir = parent_workspace(run_dir, parent_id)
     child_dir.mkdir(parents=True, exist_ok=True)
     shutil.copy2(parent_dir / "kernel.py", child_dir / "kernel.py")
-    for helper in sorted(run_dir.glob("probe_task08*.py")):
+    for helper in sorted(run_dir.glob("probe_*.py")):
         shutil.copy2(helper, child_dir / helper.name)
     if (child_dir / "src").exists():
         shutil.rmtree(child_dir / "src")
