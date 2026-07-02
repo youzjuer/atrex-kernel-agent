@@ -1,0 +1,65 @@
+{
+  "version": "v19_slots2_pack_and_epilogue_negative",
+  "date_utc": "2026-07-02",
+  "head_at_experiment_start": "70b1b71 Save task08 progress checkpoint",
+  "goal": "Improve real TP=1 G11 packed-NVFP4 MoE latency versus flashinfer.trtllm_fp4_block_scale_moe.",
+  "source_state": {
+    "status": "reverted to stable source after experiments",
+    "default_path_verified_profile": "kernel_opt_fused_moe_cuda_pes/profiles/task08_end_to_end_g11_correctness_default_after_slots2.json",
+    "default_correctness_after_revert": "PASS"
+  },
+  "baseline_kept": {
+    "best_profile": "kernel_opt_fused_moe_cuda_pes/profiles/task08_end_to_end_g11_bench_scatter_oct_metadata_swiglu.json",
+    "candidate_total_us": 2832.0000171661377,
+    "flashinfer_us": 1403.007984161377,
+    "default_gemm2_symbol": "atrex_gemm2_tilegrid_splitcolepi_postsync"
+  },
+  "generated_epilogue_probe": {
+    "attempted_symbols": [
+      "up_gate_fp4_sm103_umma_tma_u8_cta2_v240_cutlass_like_pc_stage4_persistent_noreinit_mergebscale_ready_splitcolsmemcoalepi_finalslotdrain_postepimmatgate_scalevec4fullm",
+      "up_gate_fp4_sm103_umma_tma_u8_cta2_v262_cutlass_like_pc_stage4_persistent_noreinit_mergebscale_ready_splitcolldx32_warpshufflestreamstoreepi_postldsync_skippostepisync_finalslotdrain_postepimmatgate_scalevec4fullm"
+    ],
+    "result": "rejected",
+    "evidence": "Both standalone GEMM2 probes entered GEMM2 BMM and hit the external timeout before returning. No JSON profile was written.",
+    "conclusion": "Do not continue broad generated-symbol sweeps without a narrower compatibility reason; persistent built-in epilogue variants are not directly usable as the current TP=1 GEMM2 wrapper."
+  },
+  "slots2_hidden_pack_experiment": {
+    "idea": "For G11 hidden_states uint8 [T, 2048] and hidden_states_scale fp8 [T, 256], replace the generic one-thread-per-16B-chunk pack with a slots2 block layout. Each 256-thread block handles two routed slots, so slot metadata is computed once per slot instead of once per 16B chunk.",
+    "source_status": "reverted",
+    "profiles": {
+      "initial_nozero_fail": "kernel_opt_fused_moe_cuda_pes/profiles/task08_end_to_end_g11_correctness_slots2_pack_rerun.json",
+      "scale_zero_fail": "kernel_opt_fused_moe_cuda_pes/profiles/task08_end_to_end_g11_correctness_slots2_pack_scalezero.json",
+      "full_zero_pass_once": "kernel_opt_fused_moe_cuda_pes/profiles/task08_end_to_end_g11_correctness_slots2_pack_fullzero_rerun.json",
+      "full_zero_bench_fail": "kernel_opt_fused_moe_cuda_pes/profiles/task08_end_to_end_g11_bench_slots2_pack_fullzero.json"
+    },
+    "debug_findings": [
+      "For valid rows only, slots2 produced identical hidden_q_bmm and swizzled scale bytes versus the generic pack path.",
+      "Differences were concentrated in padding rows. Padding values can still perturb the task08 GEMM1 implementation in some allocator states, producing NaN or large valid GEMM1 rows.",
+      "Zeroing only hidden_scale_swizzled reduced the observed max_abs error but did not restore correctness.",
+      "Zeroing both hidden_packed_bmm and hidden_scale_swizzled produced one correctness PASS rerun, but the subsequent benchmark run failed correctness and was slower."
+    ],
+    "bench_result": {
+      "status": "FAIL",
+      "target_status": "MISS",
+      "candidate_total_us": 2852.031946182251,
+      "flashinfer_us": 1407.6160192489624,
+      "speedup_vs_flashinfer": 0.4935484755467787,
+      "max_abs_vs_flashinfer": 509.8623046875,
+      "stage_us": {
+        "gemm1_bmm": 681.4720034599304,
+        "swiglu_requant": 393.69601011276245,
+        "gemm2_bmm": 984.1920137405396,
+        "final_scatter": 222.91199862957
+      }
+    },
+    "conclusion": "Rejected. The metadata-reuse idea is valid, but this implementation is not stable and the full-zero variant costs more than it saves. Keep the generic pack path as default.",
+    "do_not_repeat": [
+      "Do not enable slots2 hidden pack without a deterministic padding contract for task08 GEMM1.",
+      "Do not rely on a single skip-bench correctness PASS for pack changes; rerun correctness and include a benchmark run because allocator state exposed failures."
+    ]
+  },
+  "recommended_next_steps": [
+    "A safer hidden-pack optimization needs expert_counts-aware padding zero for only invalid rows, or a task08 GEMM1 path that guarantees padding rows cannot perturb valid output.",
+    "The largest remaining opportunity remains eliminating the GEMM2 output plus final scatter round trip, or a stable GEMM2 epilogue improvement with full-output correctness localization."
+  ]
+}
