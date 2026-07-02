@@ -1,0 +1,75 @@
+{
+  "version": "v23_progress_save",
+  "date_utc": "2026-07-02",
+  "head_at_save_start": "9f83c08 Record SwiGLU scale skip instability",
+  "branch": "dev_ycb",
+  "request": "Save current progress.",
+  "goal": "Implement an in-repo CUDA kernel aligned with flashinfer.trtllm_fp4_block_scale_moe for real TP=1 G11 packed NVFP4 MoE, and beat FlashInfer performance.",
+  "workload_contract": {
+    "source": "G11 TP=1 from workload_shape_catalog.py",
+    "T": 9500,
+    "H": 4096,
+    "I": 1024,
+    "num_experts": 512,
+    "top_k": 10,
+    "hidden_states": "uint8 [9500, 2048], packed NVFP4 activation",
+    "hidden_states_scale": "fp8 [9500, 256]",
+    "gemm1_weights": "uint8 [512, 2048, 2048], FlashInfer prepared layout",
+    "gemm1_weights_scale": "fp8 [512, 2048, 256]",
+    "gemm2_weights": "uint8 [512, 4096, 512], FlashInfer prepared layout",
+    "gemm2_weights_scale": "fp8 [512, 4096, 64]",
+    "oracle_and_baseline": "flashinfer.trtllm_fp4_block_scale_moe"
+  },
+  "source_state": {
+    "status": "Stable source is committed and pushed. No tracked kernel source diff existed before this checkpoint file.",
+    "default_gemm2_symbol": "atrex_gemm2_tilegrid_splitcolepi_postsync",
+    "latest_committed_memory": "kernel_opt_fused_moe_cuda_pes/memory/v22_swiglu_scale_skip_negative.json",
+    "untracked_outputs": "Many generated profile/log files and an unrelated kernel_opt_fused_moe_pes directory remain untracked; they are not required for restoring the current stable code state."
+  },
+  "best_stable_result": {
+    "profile": "kernel_opt_fused_moe_cuda_pes/profiles/task08_end_to_end_g11_bench_scatter_oct_metadata_swiglu.json",
+    "correctness": "PASS versus FlashInfer direct-layout comparison",
+    "target_status": "MISS",
+    "candidate_total_us": 2832.0000171661377,
+    "flashinfer_us": 1403.007984161377,
+    "speedup_vs_flashinfer": 0.4954,
+    "stage_us": {
+      "routing_topk": 244.7,
+      "metadata": 150.4,
+      "hidden_pack": 126.3,
+      "gemm1_bmm": 675.9999990463257,
+      "swiglu_requant": 393.72798800468445,
+      "gemm2_bmm": 984.4480156898499,
+      "final_scatter": 223.87200593948364
+    }
+  },
+  "recent_findings": [
+    {
+      "area": "SwiGLU scale memory traffic",
+      "status": "rejected",
+      "summary": "Skipping the linear mid_scale allocation, clear, or writes can look correct in a single run but later causes large GEMM2/out corruption. Keep the linear mid_scale clear/write path until the generated GEMM2 sensitivity is localized."
+    },
+    {
+      "area": "Final scatter",
+      "status": "low priority",
+      "summary": "The current oct scatter is the best stable variant at about 224 us. x16, quad, pairload, and tile128 variants were slower or unstable."
+    },
+    {
+      "area": "GEMM2",
+      "status": "next diagnostic target",
+      "summary": "Historical warp-shuffle GEMM2 variants were faster standalone but unstable end to end. The next useful step is a diagnostic-only tile-grid warp-shuffle wrapper plus chunked output comparison against the stable postsync GEMM2."
+    }
+  ],
+  "recommended_next_steps": [
+    "Add a non-default diagnostic GEMM2 tile-grid wrapper that exposes the full v142 template parameters needed for warp-shuffle/post-load-sync experiments.",
+    "Build a chunked GEMM2 diff probe comparing stable postsync output against the warp-shuffle candidate by row_flat, local_expert, row_in_expert, column, and prepared column group.",
+    "Only promote a faster GEMM2 path after repeated end-to-end PASS results against real FlashInfer on the real G11 packed NVFP4 contract.",
+    "Large remaining gains likely require reducing GEMM2/final-scatter memory traffic, not more metadata or final-scatter micro-tuning."
+  ],
+  "restore_notes": {
+    "repo_root": "/home/youchunbo/code/atrex-kernel-agent",
+    "external_proj019_root": "/home/youchunbo/code/sumu/omoExplore/proj/proj_019_moe_workload_op_opt",
+    "cuda_visible_devices": "6",
+    "e2e_bench_command": "timeout 600 bash -lc 'CUDA_VISIBLE_DEVICES=6 PROJ019_ROOT=/home/youchunbo/code/sumu/omoExplore/proj/proj_019_moe_workload_op_opt python kernel_opt_fused_moe_cuda_pes/probe_task08_end_to_end.py --preset g11 --mpad 238 --warmup 1 --rep 3 --compare-direct-layout --trace --json-out kernel_opt_fused_moe_cuda_pes/profiles/<name>.json'"
+  }
+}
