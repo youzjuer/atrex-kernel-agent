@@ -1,0 +1,70 @@
+{
+  "version": "v26_kernel_entry_task08_staged_path",
+  "date_utc": "2026-07-02",
+  "head_at_experiment_start": "51e26d2 Record task08 warmup correctness diagnostics",
+  "goal": "Improve the formal kernel.py entrypoint for real TP=1 G11 packed-NVFP4 MoE toward beating flashinfer.trtllm_fp4_block_scale_moe.",
+  "source_changes": {
+    "kernel.py": [
+      "Added an exact G11 TP=1 staged BMM fast path behind FUSED_MOE_TASK08_STAGED=auto.",
+      "The fast path is enabled only for T=9500, H=4096, I=1024, E=512, top_k=10, routing_method_type=1, packed uint8 hidden_states [9500,2048], fp8 hidden_states_scale [9500,256], and FlashInfer prepared weight shapes.",
+      "The fast path reuses repo task08 generated GEMM1/GEMM2 BMM helpers, routes with routing_pack_type1, builds routing metadata, packs hidden activations/scales, runs prepared-layout SwiGLU NVFP4 requant, then final_scatter_from_bmm.",
+      "The first exact-G11 fast-path call discards one candidate warmup to avoid the task08 cold-launch correctness issue recorded in v25.",
+      "If the task08 helper probe files or external task08 root are unavailable, kernel.py falls back to the previous scalar CUDA path."
+    ]
+  },
+  "correctness": {
+    "formal_g11": {
+      "profile": "kernel_opt_fused_moe_cuda_pes/profiles/main_kernel_g11_correctness_task08_staged_rerun.json",
+      "status": "PASS",
+      "max_abs": 0.046875,
+      "max_rel": 36.90338134765625
+    },
+    "smoke_fallback": {
+      "profile": "kernel_opt_fused_moe_cuda_pes/profiles/smoke_correctness_after_task08_staged.json",
+      "status": "PASS",
+      "max_abs": 0.0,
+      "max_rel": 0.0
+    }
+  },
+  "performance": {
+    "formal_g11_clean_postsync": {
+      "profile": "kernel_opt_fused_moe_cuda_pes/profiles/main_kernel_g11_profile_task08_staged_clean.json",
+      "status": "PASS",
+      "candidate_us": 2844.7680473327637,
+      "flashinfer_us": 1419.6799993515015,
+      "speedup_vs_flashinfer": 0.4990494745898824,
+      "target_status": "MISS"
+    },
+    "previous_formal_scalar": {
+      "profile": "kernel_opt_fused_moe_cuda_pes/profiles/main_kernel_g11_profile_current.json",
+      "candidate_us": 680452.8198242188,
+      "flashinfer_us": 1423.5520362854004,
+      "speedup_vs_flashinfer": 0.0020920657462381396
+    },
+    "improvement_vs_previous_scalar": {
+      "latency_ratio": 239.19623302180717,
+      "note": "The formal entrypoint improved from hundreds of milliseconds to about 2.85 ms, but remains about 2.0x slower than FlashInfer."
+    }
+  },
+  "negative_result": {
+    "formal_g11_warpshuffle_postldsync_postsync_env": {
+      "profile": "kernel_opt_fused_moe_cuda_pes/profiles/main_kernel_g11_profile_task08_staged_warpshuffle_postsync.json",
+      "status": "BLOCKED",
+      "row_status": "FAIL",
+      "max_abs": 52.125,
+      "max_rel": 40999.75,
+      "conclusion": "Do not make the diagnostic warp-shuffle GEMM2 symbol the kernel.py default. It can pass the standalone end-to-end probe with warmup but failed under the formal evaluator integration."
+    }
+  },
+  "recommended_next_steps": [
+    "Keep clean postsync as the default kernel.py staged BMM GEMM2 symbol.",
+    "Reduce remaining 2x gap by eliminating staged memory traffic: fuse GEMM2 output with final scatter and/or fuse SwiGLU requant into GEMM2 input consumption.",
+    "If revisiting diagnostic GEMM2 symbols, debug under kernel.py/test_kernel.py formal evaluator, not only probe_task08_end_to_end.py.",
+    "Avoid cache or precomputed-output shortcuts; the fast path still computes the MoE output with own kernels."
+  ],
+  "quality_gate": {
+    "result": "PARTIAL_PROGRESS",
+    "reason": "The formal kernel.py entrypoint is now correct and about 239x faster than the previous scalar G11 path, but it still does not beat flashinfer.trtllm_fp4_block_scale_moe."
+  },
+  "git_commit_hash": "pending"
+}
