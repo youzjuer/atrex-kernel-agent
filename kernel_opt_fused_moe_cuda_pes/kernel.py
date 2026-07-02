@@ -340,6 +340,7 @@ def _run_task08_staged_once(
         _as_u8_view(gemm1_weights_scale).reshape(int(local_num_experts), -1).contiguous(),
         affine_expert_offsets,
     )
+    torch.cuda.synchronize()
     mid_q, _mid_scale, mid_scale_swizzled = swiglu_requant_from_bmm_metadata(
         gemm1_out,
         topk_packed,
@@ -356,6 +357,7 @@ def _run_task08_staged_once(
         _as_u8_view(gemm2_weights_scale).reshape(int(local_num_experts), -1).contiguous(),
         affine_expert_offsets,
     )
+    torch.cuda.synchronize()
     return final_scatter_from_bmm(
         gemm2_out,
         topk_packed,

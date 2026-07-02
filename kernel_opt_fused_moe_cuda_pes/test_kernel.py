@@ -506,10 +506,20 @@ def evaluate(candidate_path: Path, token_values, warmup: int, rep: int, args):
         try:
             if real_inputs:
                 used_real_flashinfer_oracle = True
-                ref = _first(_flashinfer_reference(inputs))
+                reference_first = (
+                    os.environ.get("ATREX_FLASHINFER_REFERENCE_FIRST", "0").strip().lower()
+                    in {"1", "true", "yes", "on"}
+                )
+                if reference_first:
+                    ref = _first(_flashinfer_reference(inputs))
+                    out = _first(cand.run(*inputs))
+                else:
+                    out = _first(cand.run(*inputs))
+                    torch.cuda.synchronize()
+                    ref = _first(_flashinfer_reference(inputs))
             else:
                 ref = _first(run_reference(*inputs))
-            out = _first(cand.run(*inputs))
+                out = _first(cand.run(*inputs))
             torch.cuda.synchronize()
             diff = (out.float() - ref.float()).abs()
             abs_err = float(diff.max().item())

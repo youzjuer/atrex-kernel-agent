@@ -2408,6 +2408,14 @@ void pack_hidden_bmm_swizzled_from_metadata_cuda(
   constexpr int block = 256;
   const int grid = static_cast<int>((total_chunks + block - 1) / block);
   const auto stream = at::cuda::getCurrentCUDAStream();
+  C10_CUDA_CHECK(cudaMemsetAsync(hidden_packed_bmm.data_ptr(), 0,
+                                 hidden_packed_bmm.numel() *
+                                     hidden_packed_bmm.element_size(),
+                                 stream.stream()));
+  C10_CUDA_CHECK(cudaMemsetAsync(hidden_scale_swizzled.data_ptr(), 0,
+                                 hidden_scale_swizzled.numel() *
+                                     hidden_scale_swizzled.element_size(),
+                                 stream.stream()));
   pack_hidden_bmm_swizzled_from_metadata_kernel<<<grid, block, 0, stream>>>(
       topk_packed.data_ptr<int32_t>(), expanded_idx_to_permuted_idx.data_ptr<int32_t>(),
       expert_padded_offsets.data_ptr<int32_t>(),
