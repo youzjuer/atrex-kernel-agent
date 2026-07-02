@@ -55,6 +55,20 @@ is exercised in M3.
   Roofline / evidence extraction.
 - **Knowledge sources:** `<gpu-wiki>/`, `reference-projects/`, public web (planner only, by priority).
 
+## Skill Entry Points
+
+The skill-owned MoE launcher is:
+
+```bash
+./skills/gpu-kernel-evolve/run_moe.sh
+```
+
+This is a convenience entry point for the current FlashInfer-aligned MoE PES workspace. The run
+parameters live in the script's top configuration block, including GPU id, `PROJ019_ROOT`, preset,
+token count, warmup/rep, candidate count, backend selection, and FlashInfer baseline gates. It
+forwards to `kernel_opt_fused_moe_cuda_pes/run_moe.sh` after resolving paths from the skill
+directory, so it belongs to this PES skill rather than the repository root.
+
 ## Workspace Layout
 
 ```text
