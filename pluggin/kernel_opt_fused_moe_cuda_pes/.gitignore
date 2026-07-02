@@ -4,6 +4,7 @@ __pycache__/
 *.so
 *.o
 logs/
+profiles/*.json
 profiles/*/ncu/
 profiles/*/*.ncu-rep
 moe_run/

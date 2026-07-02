@@ -76,7 +76,7 @@ and scatter-add local expert outputs into `[T, H]` bf16. It exists for correctne
 ## Commands
 
 ```bash
-cd kernel_opt_fused_moe_cuda_pes
+cd pluggin/kernel_opt_fused_moe_cuda_pes
 python test_kernel.py --mode correctness --preset smoke --tokens 2,4
 python test_kernel.py --mode profile --preset smoke --tokens 2
 python test_kernel.py --mode correctness --preset qwen_micro --tokens 1
@@ -115,8 +115,8 @@ The runnable entry point mirrors the structure of
 and evaluator instead of the external LoongFlow runtime:
 
 ```bash
-cd kernel_opt_fused_moe_cuda_pes
-./run_moe.sh --fresh --generations 1 --n-candidates 3 --preset smoke --tokens 2
+cd pluggin/kernel_opt_fused_moe_cuda_pes
+./run_moe.sh
 ```
 
 This creates `moe_run/` and automatically:

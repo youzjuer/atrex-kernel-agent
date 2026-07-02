@@ -60,19 +60,18 @@ is exercised in M3.
 The skill-owned MoE launcher is:
 
 ```bash
-./skills/gpu-kernel-evolve/run_moe.sh
+./pluggin/kernel_opt_fused_moe_cuda_pes/run_moe.sh
 ```
 
 This is a convenience entry point for the current FlashInfer-aligned MoE PES workspace. The run
 parameters live in the script's top configuration block, including GPU id, `PROJ019_ROOT`, preset,
 token count, warmup/rep, candidate count, backend selection, and FlashInfer baseline gates. It
-forwards to `kernel_opt_fused_moe_cuda_pes/run_moe.sh` after resolving paths from the skill
-directory, so it belongs to this PES skill rather than the repository root.
+resolves the repository root from the plugin workspace path and runs the PES orchestrator directly.
 
 ## Workspace Layout
 
 ```text
-kernel_opt_<name>/
+pluggin/kernel_opt_<name>/
   kernel.py                      # current best (synced from the DB best after each checkpoint)
   test_kernel.py
   README.md                      # static config, specs, Roofline, Stop Conditions, Evolve Config
