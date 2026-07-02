@@ -1,0 +1,99 @@
+{
+  "version": "v22_swiglu_scale_skip_negative",
+  "date_utc": "2026-07-02",
+  "head_at_experiment_start": "3708601 Save G11 progress checkpoint",
+  "goal": "Improve real TP=1 G11 packed-NVFP4 MoE latency versus flashinfer.trtllm_fp4_block_scale_moe.",
+  "source_state": {
+    "status": "reverted to stable source after experiments",
+    "tracked_diff_after_revert": "none before this memory record",
+    "default_path_kept": "metadata_valid_slots with linear mid_scale clear and writes"
+  },
+  "baseline_kept": {
+    "best_profile": "kernel_opt_fused_moe_cuda_pes/profiles/task08_end_to_end_g11_bench_scatter_oct_metadata_swiglu.json",
+    "candidate_total_us": 2832.0000171661377,
+    "flashinfer_us": 1403.007984161377,
+    "stage_us": {
+      "gemm1_bmm": 675.9999990463257,
+      "swiglu_requant": 393.72798800468445,
+      "gemm2_bmm": 984.4480156898499,
+      "final_scatter": 223.87200593948364
+    }
+  },
+  "experiments": [
+    {
+      "name": "swizzled_only_no_linear_mid_scale",
+      "result": "rejected",
+      "idea": "Skip allocation/clear/write of the unused linear mid_scale tensor and return only mid_q plus mid_scale_swizzled for GEMM2.",
+      "observations": [
+        {
+          "profile": "kernel_opt_fused_moe_cuda_pes/profiles/task08_end_to_end_g11_correctness_swizzled_only.json",
+          "status": "PASS",
+          "note": "Runtime-null first attempt passed single correctness."
+        },
+        {
+          "profile": "kernel_opt_fused_moe_cuda_pes/profiles/task08_end_to_end_g11_bench_swizzled_only.json",
+          "status": "PASS",
+          "candidate_total_us": 2815.648078918457,
+          "swiglu_requant_us": 388.96000385284424,
+          "note": "One short benchmark looked faster, but follow-up checks exposed instability."
+        },
+        {
+          "profile": "kernel_opt_fused_moe_cuda_pes/profiles/task08_end_to_end_g11_bench_swizzled_only_v2.json",
+          "status": "FAIL",
+          "candidate_total_us": 2824.8960971832275,
+          "swiglu_requant_us": 387.2320055961609,
+          "failure": "Benchmark process reported correctness FAIL with large GEMM2/out errors."
+        },
+        {
+          "profile": "kernel_opt_fused_moe_cuda_pes/profiles/task08_end_to_end_g11_bench_swizzled_dummy.json",
+          "status": "FAIL",
+          "candidate_total_us": 2816.0319328308105,
+          "swiglu_requant_us": 387.1999979019165,
+          "failure": "Keeping a full-size dummy linear scale allocation alive did not remove the benchmark correctness failure."
+        }
+      ],
+      "conclusion": "Removing linear mid_scale writes is not stable with the current GEMM2 pipeline. Single-run correctness can pass, but benchmark runs intermittently produce large GEMM2 output corruption."
+    },
+    {
+      "name": "skip_linear_mid_scale_clear_only",
+      "result": "rejected",
+      "idea": "Keep the original kernel and linear mid_scale writes, but skip the pre-kernel cudaMemsetAsync on the unused linear mid_scale tensor.",
+      "profiles": {
+        "correctness": "kernel_opt_fused_moe_cuda_pes/profiles/task08_end_to_end_g11_correctness_skip_scale_clear.json",
+        "bench": "kernel_opt_fused_moe_cuda_pes/profiles/task08_end_to_end_g11_bench_skip_scale_clear.json"
+      },
+      "correctness_result": {
+        "status": "PASS",
+        "note": "Single skip-bench correctness passed versus FlashInfer."
+      },
+      "bench_result": {
+        "status": "FAIL",
+        "candidate_total_us": 2816.351890563965,
+        "flashinfer_us": 1407.520055770874,
+        "swiglu_requant_us": 391.3919925689697,
+        "failure": "Benchmark process reported correctness FAIL with large GEMM2/out errors."
+      },
+      "conclusion": "The linear mid_scale clear appears to be required for stable current end-to-end behavior, even though GEMM2 only consumes mid_scale_swizzled."
+    },
+    {
+      "name": "old_metadata_path_recheck",
+      "result": "kept",
+      "profiles": {
+        "correctness": "kernel_opt_fused_moe_cuda_pes/profiles/task08_end_to_end_g11_correctness_metadata_linear_scale_fixed.json",
+        "bench": "kernel_opt_fused_moe_cuda_pes/profiles/task08_end_to_end_g11_bench_metadata_linear_scale_fixed.json"
+      },
+      "bench_result": {
+        "status": "PASS",
+        "candidate_total_us": 2831.712007522583,
+        "flashinfer_us": 1390.239953994751,
+        "swiglu_requant_us": 393.3440148830414
+      },
+      "conclusion": "The original metadata path with linear mid_scale clear and writes remains the stable default."
+    }
+  ],
+  "recommended_next_steps": [
+    "Do not skip linear mid_scale clear or writes in the current staged pipeline.",
+    "If revisiting this area, first localize why GEMM2/out can corrupt when the unused linear scale traffic is removed; suspect hidden memory-layout, allocator, or generated GEMM2 out-of-bounds sensitivity rather than numerical mismatch.",
+    "For meaningful speedup, focus on GEMM2/final-scatter fusion or a stable faster GEMM2 epilogue; SwiGLU scale-memory micro-optimizations are too small and currently unstable."
+  ]
+}
