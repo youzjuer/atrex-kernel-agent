@@ -667,6 +667,24 @@ def planner_context(
             "baseline": str(baseline_json),
             "directory": str(run_dir / "profiles"),
         },
+        "database_tools": {
+            "evolution_db_py": str(repo_root / "tools" / "evolution_db.py"),
+            "summary_command": (
+                f"{sys.executable} {repo_root / 'tools' / 'evolution_db.py'} "
+                f"summary --workspace {run_dir}"
+            ),
+            "lineage_command_template": (
+                f"{sys.executable} {repo_root / 'tools' / 'evolution_db.py'} "
+                f"lineage --workspace {run_dir} --solution <solution_id> --json"
+            ),
+        },
+        "high_signal_files": [
+            str(run_dir / "README.md"),
+            str(run_dir / "kernel.py"),
+            str(run_dir / "src" / "fused_moe_kernel.cu"),
+            str(run_dir / "src" / "fused_moe_kernel.cpp"),
+            str(run_dir / "profiles" / "auto_baseline.json"),
+        ],
         "operator_surface": "flashinfer.trtllm_fp4_block_scale_moe",
         "application_profile": "Qwen3_5-Plus_prefill_TP2",
         "optimization_focus": [
@@ -715,6 +733,120 @@ def local_plan(generation: int, n_candidates: int, parents: list[dict[str, Any]]
         "evidence_summary": "local fallback; no agent planning",
         "search_sources": [],
         "exhaustion": False,
+    }
+
+
+def planner_fallback_plan(
+    generation: int,
+    n_candidates: int,
+    parents: list[dict[str, Any]],
+    baseline_json: Path,
+    *,
+    reason: str,
+) -> dict[str, Any]:
+    try:
+        baseline = parse_json(baseline_json)
+    except Exception:
+        baseline = {}
+    cand_us = first_latency(baseline)
+    flash_us = flashinfer_latency(baseline)
+    speed = target_speedup(baseline)
+    evidence_prefix = (
+        f"Planner backend failed ({reason}). Fallback uses current G11 profile: "
+        f"candidate_us={cand_us}, flashinfer_us={flash_us}, "
+        f"speedup_vs_flashinfer={speed}, target_status={baseline.get('target_status')}."
+    )
+    templates = [
+        {
+            "action_category": "grouped_gemm_finalize_fusion",
+            "action_description": (
+                "Fuse or partially fuse the task08 GEMM2 finalize path by reducing the "
+                "separate gemm2_out -> final_scatter traffic. Keep prepared output row "
+                "inversion and packed bf16 top-k weighting identical to the parent."
+            ),
+            "evidence_chain": (
+                evidence_prefix
+                + " The staged path materializes a large BF16 gemm2_out buffer before "
+                "writing [T,H], while FlashInfer fuses grouped GEMM finalize."
+            ),
+            "expected_impact": (
+                "Targets the largest post-GEMM memory movement and one launch. Even a "
+                "partial fusion or vectorized finalize should move the candidate toward "
+                "the FlashInfer baseline."
+            ),
+            "risks": (
+                "Multiple top-k experts per token require exact accumulation; preserve "
+                "the existing final_scatter path as rollback if correctness fails."
+            ),
+        },
+        {
+            "action_category": "tiled_fp4_dequantization",
+            "action_description": (
+                "Reduce standalone routed activation/scale materialization before GEMM1. "
+                "Implement a narrowly scoped improvement in pack_hidden_bmm_swizzled or "
+                "its call path, preserving the packed NVFP4 activation contract."
+            ),
+            "evidence_chain": (
+                evidence_prefix
+                + " The parent copies routed FP4 activations and FP8 scales into "
+                "expert-major staging buffers before GEMM1."
+            ),
+            "expected_impact": (
+                "Cuts pre-GEMM memory traffic or launch overhead without changing routing "
+                "semantics."
+            ),
+            "risks": (
+                "Scale swizzle and token/expert mapping mistakes are easy; keep the "
+                "current staging path as rollback."
+            ),
+        },
+        {
+            "action_category": "grouped_expert_scheduling",
+            "action_description": (
+                "Reduce affine E*Mpad padding overhead in task08 scheduling. Make a "
+                "minimal metadata/scheduling change that avoids extra padded rows where "
+                "the downstream task08 ABI can still consume fixed-safe offsets."
+            ),
+            "evidence_chain": (
+                evidence_prefix
+                + " G11 has 95000 valid routed slots but the current affine Mpad path "
+                "allocates about 512*238 rows."
+            ),
+            "expected_impact": (
+                "Reduces padded grouped-GEMM work and intermediate traffic if the task08 "
+                "fixed-row assumptions can be preserved."
+            ),
+            "risks": (
+                "Existing task08 wrappers may require fixed rows per expert; if dynamic "
+                "offsets violate ABI assumptions, record a dead-end instead of broad rewrites."
+            ),
+        },
+    ]
+    strategies: list[dict[str, Any]] = []
+    for idx in range(n_candidates):
+        parent = parents[idx % len(parents)] if parents else {}
+        template = templates[idx % len(templates)]
+        strategies.append(
+            {
+                "child": f"{generation}_{idx}",
+                "parent_id": parent.get("solution_id"),
+                **template,
+            }
+        )
+    return {
+        "plan_path": f"iteration/{generation}/planner/plan.md",
+        "strategies": strategies,
+        "evidence_summary": evidence_prefix,
+        "search_sources": [
+            {
+                "source": str(baseline_json),
+                "layer": "profile",
+                "new": False,
+                "finding": evidence_prefix,
+            }
+        ],
+        "exhaustion": False,
+        "planner_fallback_reason": reason,
     }
 
 
@@ -783,6 +915,12 @@ Produce exactly {args.n_candidates} strategies for the FlashInfer-aligned CUDA
 FP4 MoE operator. The optimization direction is grouped expert scheduling,
 tiled FP4 dequantization, and grouped GEMM. Do not edit implementation files.
 
+Keep this planner pass bounded. Use the absolute commands and high-signal file
+paths already provided in the JSON context; do not recursively scan generated
+executor directories or dump large source files into your context. If
+`n_candidates` is 1, choose the single highest-impact next step and write the
+plan immediately.
+
 Write machine-readable output to `{plan_json}` with this shape:
 {{"plan_path": "...", "strategies": [{{"child": "{generation}_0", "parent_id": "...",
 "action_category": "...", "action_description": "...", "evidence_chain": "...",
@@ -791,13 +929,39 @@ Write machine-readable output to `{plan_json}` with this shape:
 
 Also write a human-readable plan to `{plan_md}`. Return only after both files
 exist."""
-        codex_exec(
-            repo_root,
-            prompt,
-            args,
-            prompt_path=plan_dir / "codex_prompt.md",
-            log_path=plan_dir / "codex_run.log",
-        )
+        try:
+            codex_exec(
+                repo_root,
+                prompt,
+                args,
+                prompt_path=plan_dir / "codex_prompt.md",
+                log_path=plan_dir / "codex_run.log",
+            )
+        except Exception as exc:
+            error = f"{type(exc).__name__}: {exc}"
+            log_path = plan_dir / "codex_run.log"
+            write_json(
+                plan_dir / "planner_error.json",
+                {
+                    "backend": "codex",
+                    "status": "PLANNER_FAIL",
+                    "error": error,
+                    "codex_prompt": str((plan_dir / "codex_prompt.md").relative_to(run_dir)),
+                    "codex_log": str(log_path.relative_to(run_dir)) if log_path.exists() else None,
+                    "codex_log_tail": tail_text(log_path),
+                },
+            )
+            print(f"[Atrex] planner failed; using fallback plan: {error}", flush=True)
+            write_json(
+                plan_json,
+                planner_fallback_plan(
+                    generation,
+                    args.n_candidates,
+                    parents,
+                    baseline_json,
+                    reason=error,
+                ),
+            )
     else:
         write_json(plan_json, local_plan(generation, args.n_candidates, parents))
 
