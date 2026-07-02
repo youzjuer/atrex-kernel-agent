@@ -11,8 +11,10 @@ planner/executor/evaluator/summarizer trace.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
+import signal
 import shutil
 import subprocess
 import sys
@@ -36,6 +38,64 @@ class PlanStrategy:
 def run_cmd(cmd: list[str], *, cwd: Path, env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
     print("+", " ".join(cmd), flush=True)
     return subprocess.run(cmd, cwd=cwd, env=env, text=True, check=True)
+
+
+def run_cmd_with_timeout(
+    cmd: list[str],
+    *,
+    cwd: Path,
+    timeout_s: float,
+    env: dict[str, str] | None = None,
+    log_path: Path | None = None,
+) -> None:
+    print("+", " ".join(cmd), flush=True)
+    log_fh = None
+    stdout = None
+    stderr = None
+    if log_path is not None:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_fh = log_path.open("w", encoding="utf-8")
+        log_fh.write("$ " + " ".join(cmd) + "\n\n")
+        log_fh.flush()
+        stdout = log_fh
+        stderr = subprocess.STDOUT
+        print(f"[Atrex] logging command output to {log_path}", flush=True)
+    proc = subprocess.Popen(
+        cmd,
+        cwd=cwd,
+        env=env,
+        text=True,
+        start_new_session=True,
+        stdout=stdout,
+        stderr=stderr,
+    )
+    try:
+        proc.wait(timeout=timeout_s)
+    except subprocess.TimeoutExpired as exc:
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+            proc.wait(timeout=10)
+        except Exception:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            proc.wait()
+        if log_fh is not None:
+            log_fh.write(f"\n[Atrex] command timed out after {timeout_s:.1f}s\n")
+            log_fh.flush()
+        detail = f"command timed out after {timeout_s:.1f}s: {' '.join(cmd)}"
+        if log_path is not None:
+            detail += f" (log: {log_path})"
+        raise RuntimeError(detail) from exc
+    finally:
+        if log_fh is not None:
+            log_fh.close()
+    if proc.returncode:
+        detail = f"command exited with status {proc.returncode}: {' '.join(cmd)}"
+        if log_path is not None:
+            detail += f" (log: {log_path})"
+        raise RuntimeError(detail)
 
 
 def run_capture(cmd: list[str], *, cwd: Path, env: dict[str, str] | None = None) -> str:
@@ -76,6 +136,8 @@ def copy_task(source: Path, run_dir: Path, *, fresh: bool) -> None:
         ".gitignore",
     ):
         shutil.copy2(source / rel, run_dir / rel)
+    for helper in sorted(source.glob("probe_task08*.py")):
+        shutil.copy2(helper, run_dir / helper.name)
     src_dst = run_dir / "src"
     if src_dst.exists():
         shutil.rmtree(src_dst)
@@ -91,6 +153,28 @@ def parse_json(path: Path) -> dict[str, Any]:
 def write_json(path: Path, data: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2) + "\n")
+
+
+def tail_text(path: Path, *, max_lines: int = 80, max_chars: int = 20000) -> str | None:
+    if not path.exists():
+        return None
+    lines = path.read_text(errors="replace").splitlines()
+    text = "\n".join(lines[-max_lines:])
+    if len(text) > max_chars:
+        text = text[-max_chars:]
+    return text
+
+
+def candidate_digest(candidate_dir: Path) -> list[tuple[str, str]]:
+    files = [candidate_dir / "kernel.py"]
+    src = candidate_dir / "src"
+    if src.exists():
+        files += sorted(path for path in src.rglob("*") if path.is_file())
+    digest: list[tuple[str, str]] = []
+    for path in files:
+        rel = str(path.relative_to(candidate_dir))
+        digest.append((rel, hashlib.sha256(path.read_bytes()).hexdigest()))
+    return digest
 
 
 def init_db(repo_root: Path, source: Path, run_dir: Path) -> None:
@@ -430,6 +514,8 @@ def materialize_candidate_base(run_dir: Path, child_dir: Path, parent_id: str | 
     parent_dir = parent_workspace(run_dir, parent_id)
     child_dir.mkdir(parents=True, exist_ok=True)
     shutil.copy2(parent_dir / "kernel.py", child_dir / "kernel.py")
+    for helper in sorted(run_dir.glob("probe_task08*.py")):
+        shutil.copy2(helper, child_dir / helper.name)
     if (child_dir / "src").exists():
         shutil.rmtree(child_dir / "src")
     shutil.copytree(parent_dir / "src", child_dir / "src")
@@ -514,7 +600,17 @@ def backend_choice(kind: str, requested: str, command: str | None) -> str:
     return "local"
 
 
-def codex_exec(repo_root: Path, prompt: str, args: argparse.Namespace) -> None:
+def codex_exec(
+    repo_root: Path,
+    prompt: str,
+    args: argparse.Namespace,
+    *,
+    prompt_path: Path | None = None,
+    log_path: Path | None = None,
+) -> None:
+    if prompt_path is not None:
+        prompt_path.parent.mkdir(parents=True, exist_ok=True)
+        prompt_path.write_text(prompt.rstrip() + "\n")
     cmd = [
         "codex",
         "exec",
@@ -525,7 +621,10 @@ def codex_exec(repo_root: Path, prompt: str, args: argparse.Namespace) -> None:
     if args.codex_model:
         cmd += ["--model", args.codex_model]
     cmd.append(prompt)
-    run_cmd(cmd, cwd=repo_root)
+    if args.codex_timeout_s > 0:
+        run_cmd_with_timeout(cmd, cwd=repo_root, timeout_s=args.codex_timeout_s, log_path=log_path)
+    else:
+        run_cmd(cmd, cwd=repo_root)
 
 
 def previous_summary_path(run_dir: Path, generation: int) -> str | None:
@@ -692,7 +791,13 @@ Write machine-readable output to `{plan_json}` with this shape:
 
 Also write a human-readable plan to `{plan_md}`. Return only after both files
 exist."""
-        codex_exec(repo_root, prompt, args)
+        codex_exec(
+            repo_root,
+            prompt,
+            args,
+            prompt_path=plan_dir / "codex_prompt.md",
+            log_path=plan_dir / "codex_run.log",
+        )
     else:
         write_json(plan_json, local_plan(generation, args.n_candidates, parents))
 
@@ -754,6 +859,7 @@ def run_executor(
         return parse_json(result_path)
 
     parent_dir = materialize_candidate_base(run_dir, child_dir, parent_id)
+    parent_digest = candidate_digest(child_dir)
     if result_path.exists():
         result_path.unlink()
     history_path = child_dir / "history.md"
@@ -802,17 +908,39 @@ The target is CUDA C++/PyTorch extension code for
 `flashinfer.trtllm_fp4_block_scale_moe`, used by Qwen3_5-Plus_prefill_TP2.
 Do not generate FlyDSL and do not run benchmark/evaluator commands.
 
+This is a LoongFlow-style executor step, not an open-ended analysis session:
+make one concrete candidate change, run only cheap import/compile self-checks,
+write the required result files, then exit. If the assigned strategy is too
+large to implement safely, write `history.md` explaining the dead-end and
+`executor_result.json` with `self_check="failed"` instead of spending the whole
+timeout analyzing. A no-op parent clone is not a valid candidate.
+
 Write `{child_dir / "history.md"}` and machine-readable `{result_path}` with
 fields: child, parent_id, candidate_code, action_category, action_description,
 self_check, history_path. Return only after the candidate files exist."""
-        codex_exec(repo_root, prompt, args)
+        codex_exec(
+            repo_root,
+            prompt,
+            args,
+            prompt_path=child_dir / "codex_prompt.md",
+            log_path=child_dir / "codex_run.log",
+        )
     else:
         write_json(result_path, local_execute(child_dir, strategy, parent_id))
 
     if not (child_dir / "kernel.py").exists() or not (child_dir / "src").exists():
         raise RuntimeError(f"executor did not produce a complete candidate: {child_dir}")
     if not result_path.exists():
-        write_json(result_path, local_execute(child_dir, strategy, parent_id))
+        if backend == "local":
+            write_json(result_path, local_execute(child_dir, strategy, parent_id))
+        else:
+            raise RuntimeError(f"executor did not write {result_path}")
+    if (
+        backend != "local"
+        and strategy.action_category != "control_parent_clone"
+        and candidate_digest(child_dir) == parent_digest
+    ):
+        raise RuntimeError(f"executor produced no code changes for {strategy.child}")
     return parse_json(result_path)
 
 
@@ -997,6 +1125,12 @@ def main() -> int:
         help="Optional model override for codex exec planner/executor backends.",
     )
     parser.add_argument(
+        "--codex-timeout-s",
+        type=float,
+        default=float(os.environ.get("ATREX_CODEX_TIMEOUT_S", "900")),
+        help="Timeout for each codex exec planner/executor child. Use 0 to disable.",
+    )
+    parser.add_argument(
         "--resume-existing",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -1041,16 +1175,112 @@ def main() -> int:
         for strategy in strategies:
             child = strategy.child
             child_dir = run_dir / "iteration" / str(generation) / "executor" / child
-            executor_result = run_executor(repo_root, run_dir, generation, strategy, args)
             parent_id = strategy.parent_id
             result_path = child_dir / "result.json"
-            if args.resume_existing and result_path.exists():
-                print(f"[Atrex] resume: using existing evaluator output {result_path}", flush=True)
-                result = parse_json(result_path)
-            else:
-                result = profile_kernel(run_dir, child_dir / "kernel.py", result_path, args)
+            try:
+                executor_result = run_executor(repo_root, run_dir, generation, strategy, args)
+            except Exception as exc:
+                error = f"{type(exc).__name__}: {exc}"
+                print(f"[Atrex] executor failed for {child}: {error}", flush=True)
+                evidence_path = child_dir / "evidence.json"
+                codex_prompt = child_dir / "codex_prompt.md"
+                codex_log = child_dir / "codex_run.log"
+                write_json(
+                    evidence_path,
+                    {
+                        "tool_used": "codex_exec",
+                        "stage": "executor",
+                        "strategy": strategy_to_json(strategy),
+                        "status": "EXECUTOR_FAIL",
+                        "error": error,
+                        "codex_prompt": (
+                            str(codex_prompt.relative_to(run_dir)) if codex_prompt.exists() else None
+                        ),
+                        "codex_log": str(codex_log.relative_to(run_dir)) if codex_log.exists() else None,
+                        "codex_log_tail": tail_text(codex_log),
+                    },
+                )
+                rows.append(
+                    {
+                        "child": child,
+                        "strategy": strategy.action_category,
+                        "status": "EXECUTOR_FAIL",
+                        "latency_us": None,
+                        "max_rel": None,
+                        "flashinfer_us": None,
+                        "target_status": "MISS",
+                        "target_speedup_vs_flashinfer": None,
+                    }
+                )
+                continue
+            try:
+                if args.resume_existing and result_path.exists():
+                    print(f"[Atrex] resume: using existing evaluator output {result_path}", flush=True)
+                    result = parse_json(result_path)
+                else:
+                    result = profile_kernel(run_dir, child_dir / "kernel.py", result_path, args)
+            except Exception as exc:
+                error = f"{type(exc).__name__}: {exc}"
+                print(f"[Atrex] evaluator failed for {child}: {error}", flush=True)
+                try:
+                    result = parse_json(result_path) if result_path.exists() else {}
+                except Exception:
+                    result = {}
+                result.setdefault("status", "FAIL")
+                result.setdefault("target_status", "MISS")
+                result["error"] = error
+                evidence_path = child_dir / "evidence.json"
+                evidence = {
+                    "tool_used": "torch.cuda.Event",
+                    "stage": "evaluator",
+                    "strategy": strategy_to_json(strategy),
+                    "executor_result": executor_result,
+                    "status": result.get("status"),
+                    "latency_us": first_latency(result),
+                    "max_rel": result.get("max_rel"),
+                    "flashinfer_us": flashinfer_latency(result),
+                    "target_status": result.get("target_status"),
+                    "target_speedup_vs_flashinfer": target_speedup(result),
+                    "flashinfer": result.get("flashinfer"),
+                    "result_file": str(result_path.relative_to(run_dir)),
+                    "error": error,
+                }
+                write_json(evidence_path, evidence)
+                iteration_ref = f"iteration/{generation}/executor/{child}"
+                if (
+                    (child_dir / "kernel.py").exists()
+                    and not (args.resume_existing and solution_for_iteration_ref(run_dir, iteration_ref))
+                ):
+                    try:
+                        add_candidate(
+                            repo_root,
+                            run_dir,
+                            generation,
+                            child,
+                            parent_id,
+                            strategy,
+                            result,
+                            evidence_path,
+                        )
+                    except Exception as add_exc:
+                        evidence["db_add_error"] = f"{type(add_exc).__name__}: {add_exc}"
+                        write_json(evidence_path, evidence)
+                rows.append(
+                    {
+                        "child": child,
+                        "strategy": strategy.action_category,
+                        "status": result.get("status"),
+                        "latency_us": first_latency(result),
+                        "max_rel": result.get("max_rel"),
+                        "flashinfer_us": flashinfer_latency(result),
+                        "target_status": result.get("target_status"),
+                        "target_speedup_vs_flashinfer": target_speedup(result),
+                    }
+                )
+                continue
             evidence = {
                 "tool_used": "torch.cuda.Event",
+                "stage": "evaluator",
                 "strategy": strategy_to_json(strategy),
                 "executor_result": executor_result,
                 "status": result.get("status"),
