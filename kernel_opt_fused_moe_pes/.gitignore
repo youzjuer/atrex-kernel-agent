@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+*.ncu-rep
+profiles/*/att/*.att
+profiles/*/att/*.out
+profiles/*/att/*.pftrace
+profiles/*/att/*.otf2

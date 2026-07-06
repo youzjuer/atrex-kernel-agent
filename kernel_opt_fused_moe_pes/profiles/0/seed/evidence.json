@@ -1,0 +1,22 @@
+{
+  "tool_used": "torch.profiler archive",
+  "evidence_summary": "Archived gpu-wiki v2 profile parity baseline. Formal rows M=1/16/32/64/128/256/512 passed correctness and profile parity on 2026-05-27. Mean e2e_avg_us across rows is 695.1714; mean kernel_sum_us is 328.9857.",
+  "bottleneck_type": "mixed",
+  "evidence_chain": "per-row profile buckets show routing, quant, stage1, stage2, and overhead components -> optimize one localized component per PES child -> gate with correctness plus e2e/profile parity on MI308X",
+  "environment_status": {
+    "current_host_gpu": "NVIDIA L20D",
+    "required_gpu": "AMD MI308X",
+    "local_gate_status": "blocked",
+    "missing": [
+      "AITER_BASE",
+      "aiter",
+      "flydsl",
+      "rocprofv3"
+    ]
+  },
+  "baseline": {
+    "mean_e2e_avg_us": 695.1714,
+    "mean_kernel_sum_us": 328.9857,
+    "formal_m_values": [1, 16, 32, 64, 128, 256, 512]
+  }
+}

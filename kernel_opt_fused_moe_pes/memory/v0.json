@@ -1,0 +1,86 @@
+{
+  "version": "v0",
+  "masked": false,
+  "timestamp": "2026-06-30T03:41:38.406731+00:00",
+  "performance": {
+    "latency_us": 695.1714,
+    "tflops": 46.34,
+    "bandwidth_gbps": null,
+    "tflops_peak_utilization_pct": 9.94,
+    "bandwidth_peak_utilization_pct": null,
+    "comparison_with_previous": {
+      "latency_delta": null,
+      "tflops_delta": null,
+      "bandwidth_delta": null
+    }
+  },
+  "optimization": {
+    "action_category": "baseline",
+    "action_description": "Archived atrex-open FlyDSL v2 FP8 PTPC fused_moe baseline seed",
+    "expected_impact": "Seed solution for Full-Agent PES evolution",
+    "risks_and_rollback": "Requires MI308X plus AITER plus FlyDSL runtime; rollback is seed kernel.py"
+  },
+  "profile_evidence": {
+    "tool_used": "torch.profiler archive",
+    "evidence_summary": "Archived gpu-wiki baseline: 7 token rows pass correctness and profile parity; mean e2e_avg_us=695.1714",
+    "bottleneck_type": "mixed",
+    "evidence_chain": "archived profile buckets show routing/quant/stage1/stage2 overhead -> PES should optimize one localized bucket per generation"
+  },
+  "correctness": {
+    "rel_err": 0.22,
+    "status": "PASS"
+  },
+  "isa_metric_progress": [
+    {
+      "metric": "FP8 compute target",
+      "target": "419.4 TFLOPS",
+      "current": "46.34 TFLOPS mean across formal M rows",
+      "met": false
+    },
+    {
+      "metric": "Profile trace guard",
+      "target": "no memcpy and other == 0.0",
+      "current": "archived v2 parity package passed",
+      "met": true
+    }
+  ],
+  "search_log": [
+    {
+      "source": "gpu-wiki",
+      "query": "MI308X FlyDSL FP8 PTPC fused_moe atrex v2 baseline",
+      "finding": "Archived package records shape, reproduction commands, correctness, profile parity, and per-M latency table.",
+      "actionability": "Use as the seed solution and generation-0 evidence for PES."
+    }
+  ],
+  "pitfalls_and_fixes": [
+    {
+      "error_type": "environment",
+      "error_message": "Current host is NVIDIA L20D and lacks AITER_BASE, aiter, flydsl, and rocprofv3.",
+      "root_cause": "The selected fused MoE reference is MI308X/FlyDSL-specific.",
+      "fix_applied": "Initialized PES workspace and seed database from archived gpu-wiki evidence; real evaluator must run on MI308X.",
+      "lesson": "Do not promote or reject candidates from this host; use it only for orchestration/setup validation."
+    }
+  ],
+  "references": [
+    {
+      "source_type": "gpu-wiki",
+      "path_or_url": "gpu-wiki/reference-kernels/amd/cdna3/flydsl/FlyDSL/moe_fp8_ptpc_mi308x_atrex_v2/README.md",
+      "description": "Task scope, reproduction commands, archived correctness/profile result, baseline latency table."
+    },
+    {
+      "source_type": "gpu-wiki",
+      "path_or_url": "gpu-wiki/docs/ref-docs/amd/flydsl/gfx942/cdna3-fused-moe-fp8-ptpc-atrex-v2.md",
+      "description": "Full-pipeline v2 optimization/archive report."
+    },
+    {
+      "source_type": "gpu-wiki",
+      "path_or_url": "gpu-wiki/docs/pitfalls/amd/flydsl/fused-moe-fp8-ptpc-pitfalls.md",
+      "description": "Known invalid directions and trace/timing pitfalls for this kernel family."
+    }
+  ],
+  "quality_gate": {
+    "result": "PASS",
+    "failure_reason": "Local evaluator blocked on environment mismatch; archived gpu-wiki gate passed"
+  },
+  "git_commit_hash": "ec2dfd0"
+}

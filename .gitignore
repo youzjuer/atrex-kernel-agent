@@ -13,6 +13,7 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 .pytest_cache/
+logs/
 
 # rocprof-trace-decoder is cloned by install.sh at runtime
 tools/rocprof-trace-decoder/
