@@ -31,6 +31,17 @@
 - compute_utilization.py / bench_bandwidth.py / measure_bandwidth_ceiling.py
 - measure_kernel_time.py / extract_asm.py / profile_kernel.sh
 - profile_nvidia.sh / classify_ncu.py / extract_nvidia_asm.py (NVIDIA; helpers in ncu_helpers/)
+- memory_manager.py / evolution_db.py
+
+## Evolve Config
+Used only when Stage 2 runs the full-agent PES search shape.
+
+- enabled: false
+- n_candidates: 3
+- max_generations: 30
+- no_improve_patience: 5
+- score_metric: baseline_geomean_latency_us / candidate_geomean_latency_us
+- state_source: database/ (single source of truth when enabled)
 
 ## Stop Conditions
 The following targets are filled by Step 0 after calculation as `hardware peak * 90%`. Prefer measured maxima from gpu-wiki when available; otherwise use hardware spec values.

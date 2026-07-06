@@ -13,6 +13,7 @@ AKA is an end-to-end Agent project for GPU kernel implementation, analysis, prof
 - Runs Roofline analysis and sets auditable performance targets.
 - Implements a correct baseline kernel before entering optimization.
 - Runs the profile-driven optimization loop: profile with `ncu` or `rocprofv3`, extract bottleneck evidence, query `gpu-wiki` / reference projects / web sources for relevant optimization knowledge, write an evidence-based plan, apply one optimization category, validate correctness and performance, record memory, commit, then repeat until Stop Conditions are met.
+- Optionally runs an evolutionary **Plan-Execute-Summary** full-agent loop: select parents from an island-model MAP-Elites population, fan out N candidates, evaluate them with the immutable benchmark harness, admit by score/diversity, summarize, checkpoint, and repeat. At `n_candidates = 1` it reduces to the single-trajectory loop. See [`docs/full-agent-refactor-plan.md`](docs/full-agent-refactor-plan.md) and [`docs/evolution-db-design.md`](docs/evolution-db-design.md).
 - Records plans, profile artifacts, structured memory, reports, and Git commits for every accepted iteration.
 
 For the full architecture and workflow design, see [`docs/design.md`](docs/design.md).
@@ -91,6 +92,7 @@ The Agent will initialize a workspace, source hardware specs from `gpu-wiki`, wr
 ├── SKILL.md                         # Top-level gpu-kernel-optimizer router manifest
 ├── install.sh                       # Installer / uninstaller
 ├── docs/                            # Detailed project design docs
+├── orchestrator/                    # sol-execbench session orchestration, including optional PES runner
 ├── reference/                       # Workspace, plan, memory, and profiling templates
 ├── skills/                          # Baseline, optimizer, restart, and output-contract modules
 ├── tools/                           # Profiling, utilization, memory, and measurement tools

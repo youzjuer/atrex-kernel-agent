@@ -60,4 +60,8 @@ When executing `skills/gpu-kernel-profile-optimizer/SKILL.md`:
 ## Skill References
 
 - Full optimization workflow: `skills/gpu-kernel-profile-optimizer/SKILL.md`
+- Full-agent PES workflow: `skills/gpu-kernel-evolve/SKILL.md`
 - Research subagent contract: `agents/gpu-kernel-research.md`
+- PES planner / executor / evaluator / summarizer contracts:
+  `agents/gpu-kernel-planner.md`, `agents/gpu-kernel-executor.md`,
+  `agents/gpu-kernel-evaluator.md`, `agents/gpu-kernel-summarizer.md`

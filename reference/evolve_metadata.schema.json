@@ -1,0 +1,38 @@
+{
+  "generation": 0,
+  "timestamp": 0.0,
+  "baseline": {
+    "solution_id": "<8-hex>",
+    "latency_us": null
+  },
+  "best_solution_id": "<8-hex>",
+  "best_score": 0.0,
+  "population_size_current": 0,
+  "elites": ["<solution_id>"],
+  "islands_state": [
+    {
+      "island_id": 0,
+      "members": ["<solution_id>"],
+      "best_solution_id": "<8-hex>",
+      "feature_map": {
+        "<bin-bin-bin>": "<solution_id>"
+      }
+    }
+  ],
+  "feature_stats": {
+    "complexity": { "min": 0.0, "max": 0.0, "values": [] },
+    "diversity": { "min": 0.0, "max": 0.0, "values": [] },
+    "score": { "min": 0.0, "max": 0.0, "values": [] }
+  },
+  "migration": {
+    "last_migration_generation": 0
+  },
+  "history": [
+    { "generation": 0, "best_score": 0.0, "best_solution_id": "<8-hex>" }
+  ],
+  "convergence": {
+    "no_improve_streak": 0,
+    "stopped": false,
+    "stop_reason": null
+  }
+}

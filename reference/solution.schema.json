@@ -1,0 +1,42 @@
+{
+  "solution_id": "<8-hex>",
+  "parent_id": "<8-hex or null>",
+  "generate_plan": "<planner strategy text for this candidate>",
+  "island_id": 0,
+  "iteration": 0,
+  "generation": 0,
+  "timestamp": 0.0,
+  "sample_cnt": 0,
+  "sample_weight": 0.0,
+  "score": 0.0,
+  "evaluation": "<evaluator raw verdict string>",
+  "summary": "<summarizer distilled text>",
+  "solution": "database/solutions/<solution_id>/kernel.py",
+  "metadata": {
+    "MAP_Elite_feature": "<bin-bin-bin>",
+    "lang": "<CuteDSL / FlyDSL / triton / cuda>",
+    "code_sha256": "<hex>",
+    "correctness": {
+      "rel_err": null,
+      "status": "<PASS / FAIL / TIMEOUT_FAIL>"
+    },
+    "performance": {
+      "latency_us": null,
+      "tflops": null,
+      "bandwidth_gbps": null,
+      "tflops_peak_utilization_pct": null,
+      "bandwidth_peak_utilization_pct": null
+    },
+    "optimization": {
+      "action_category": "<vectorized_load / swizzle / double_buffering / k_split / baseline>",
+      "action_description": "<what changed vs parent>"
+    },
+    "profile_evidence": {
+      "tool_used": "<ncu / profile_kernel.sh / do_bench>",
+      "evidence_summary": "<key profile metrics>",
+      "bottleneck_type": "<compute_bound / memory_bound>",
+      "evidence_chain": "<evidence -> inference -> action>"
+    },
+    "iteration_ref": "iteration/<K>/executor/<M_N>/"
+  }
+}

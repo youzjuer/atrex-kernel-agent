@@ -12,7 +12,7 @@ The project centers on the `gpu-kernel-optimizer` Skill. The top-level Skill act
 - **Traceable hardware assumptions**: Hardware specs must come from the local `gpu-wiki` knowledge base and must be archived with source references.
 - **Auditable optimization history**: Plans, profiles, reports, structured memory, and Git commits preserve every accepted iteration.
 - **Reproducible workspaces**: Each task runs in an isolated `/tmp/kernel_opt_<name>/` workspace.
-- **Controlled iteration state**: Structured `memory/v<N>.json` files record performance, correctness, profile evidence, search logs, risks, and commit hashes.
+- **Controlled iteration state**: Structured `memory/v<N>.json` files record linear optimization state; the optional PES/full-agent loop uses `database/` checkpoints for population state, lineage, and candidate traces.
 - **Safe final packaging**: Evaluator-facing output is separated into a clean `generated_kernel.py` contract when needed.
 
 ## Project Structure
@@ -23,6 +23,9 @@ The project centers on the `gpu-kernel-optimizer` Skill. The top-level Skill act
 ├── SKILL.md                              # Top-level gpu-kernel-optimizer router and global constraints
 ├── install.sh                            # Installer / uninstaller for Skills, hooks, gpu-wiki, and references
 ├── atrex-workflow.png                    # Workflow diagram
+├── orchestrator/
+│   ├── optimize.py                       # sol-execbench linear / decomposition driver
+│   └── evolve.py                         # generic PES generation runner with JSON command hooks
 ├── docs/
 │   ├── design.md                         # This design document
 │   └── gpu-wiki-design.md                # gpu-wiki knowledge-base design
@@ -37,10 +40,14 @@ The project centers on the `gpu-kernel-optimizer` Skill. The top-level Skill act
 │   ├── iteration_report.md               # Iteration report template
 │   ├── profile_guide.md                  # Consolidated NVIDIA / AMD profiling guide
 │   ├── v_iteration.schema.json           # Structured memory JSON schema
+│   ├── solution.schema.json              # PES solution record schema
+│   ├── evolve_metadata.schema.json       # PES checkpoint metadata schema
+│   ├── evolve_config.schema.json         # PES database config schema
 │   └── workspace_init.sh                 # Creates /tmp/kernel_opt_<name>/ workspace
 ├── skills/
 │   ├── gpu-kernel-baseline/              # Stage 1 baseline implementation Agent
 │   ├── gpu-kernel-profile-optimizer/     # Stage 2 profile-driven optimization Skill
+│   ├── gpu-kernel-evolve/                # Optional full-agent PES optimization Skill
 │   ├── gpu-kernel-output-contract/       # Final generated_kernel.py packaging Skill
 │   └── gpu-kernel-partial-restart/       # Masked-memory partial restart Agent
 └── tools/
@@ -50,6 +57,7 @@ The project centers on the `gpu-kernel-optimizer` Skill. The top-level Skill act
     ├── measure_bandwidth_ceiling.py      # Same-size bandwidth ceiling measurement
     ├── measure_kernel_time.py            # Kernel latency helper
     ├── memory_manager.py                 # Structured memory JSON manager
+    ├── evolution_db.py                   # PES population / lineage / checkpoint manager
     ├── profile_kernel.sh                 # AMD rocprofv3 / ATT / PMC / ASM wrapper
     ├── profile_nvidia.sh                 # NVIDIA ncu wrapper (metrics + symptom classification)
     ├── classify_ncu.py                   # NCU metrics -> symptom diagnosis
@@ -97,6 +105,19 @@ Profile and evidence extraction
 ```
 
 Each iteration must use official profiler evidence, change exactly one optimization category, validate correctness before performance conclusions, and record results in structured memory.
+
+### Full-Agent PES Skill
+
+Path: `skills/gpu-kernel-evolve/SKILL.md`
+
+This optional Stage 2 search shape generalizes the single trajectory into a Plan-Execute-Summary
+loop. Each generation selects parents from `tools/evolution_db.py`, asks the planner for N
+evidence-backed strategies, fans out isolated executor children, evaluates every candidate through
+the immutable task harness, admits PASS and FAIL candidates into the population, summarizes lessons,
+and checkpoints. At `n_candidates = 1`, it must behave like the linear optimizer.
+
+The PES state source is `database/`, not `memory/v<N>.json`. `memory/` remains the compatibility
+record for linear runs and for importing the baseline seed.
 
 ### Output Contract Skill
 
@@ -233,6 +254,12 @@ Important rules:
 - Performance records must include latency, TFLOPS, bandwidth, and peak-utilization ratios.
 - If a quality gate fails, the workflow reverts to the previous commit and records the failure.
 
+Optional full-agent mode replaces the linear one-candidate loop with the PES loop described above.
+It preserves the same hardware-spec, profiler-evidence, correctness, and harness-integrity rules.
+In `sol-execbench`, every candidate is gated by `python test_kernel.py` over the full workload set;
+the scalar fitness stored in the evolution DB is baseline geomean latency divided by candidate
+geomean latency.
+
 ### 6. Stop or Continue
 
 The optimizer stops when Stop Conditions in workspace `README.md` are met. Otherwise, it continues with the next profile-driven iteration. If no new actionable path is available, it may enter the partial restart workflow.
@@ -253,6 +280,8 @@ A typical optimization task produces:
 │   ├── v0.json               # Baseline iteration record
 │   ├── v1.json               # Optimization iteration record
 │   └── ...                   # Files with masked=true are ignored by active planning
+├── database/                 # PES population / lineage / checkpoints when full-agent mode is enabled
+├── iteration/                # PES planner / executor / summarizer traces
 ├── plans/
 │   ├── v0_plan.md
 │   ├── v1_plan.md
@@ -334,6 +363,7 @@ The `tools/` directory provides:
 - `profile_nvidia.sh`: NVIDIA profiling wrapper for ncu; parses metrics and classifies symptoms via `classify_ncu.py` and the bundled `ncu_helpers/`.
 - `extract_nvidia_asm.py`: extract and analyze NVIDIA SASS (from `.ncu-rep`, cubin, Triton, or CuteDSL).
 - `memory_manager.py`: manage structured iteration records.
+- `evolution_db.py`: manage PES population state, parent selection, admission, lineage, and checkpoints.
 
 ## Critical Constraints
 
@@ -346,6 +376,8 @@ The `tools/` directory provides:
 - Kernel changes that fail correctness tests must not proceed to performance validation or commit.
 - Every accepted baseline and optimization iteration must be committed with Git.
 - `memory/v*.json` files with `masked: true` are discarded from active planning and must not influence future optimization decisions.
+- In full-agent PES mode, `database/` is the population source of truth and failed candidates are preserved as negative evidence with score 0.
+- In `sol-execbench`, `test_kernel.py`, `definition.json`, `reference.py`, and `workload.jsonl` are immutable benchmark assets.
 - Final `generated_kernel.py`, when required, must contain only evaluator-ready runtime code.
 
 ## Use Cases
@@ -354,5 +386,6 @@ The `tools/` directory provides:
 - Diagnose bottlenecks through Roofline analysis and official profiler evidence.
 - Optimize kernels on NVIDIA Hopper or AMD CDNA platforms.
 - Continue stalled optimization runs with partial restart and masked memory.
+- Explore several candidate lineages in parallel with the optional full-agent PES loop.
 - Produce clean evaluator-ready candidates for hidden benchmark systems.
 - Maintain an auditable, reproducible, and continuously iterative kernel optimization workflow.

@@ -201,13 +201,21 @@ Stage 2 (profile-driven optimization) is driven by the **orchestrator** as a ser
 
 ### Stage 2: Profile-Driven Iterative Optimization (orchestrator-driven)
 
-**Sub-skill**: [gpu-kernel-profile-optimizer](skills/gpu-kernel-profile-optimizer/SKILL.md)
+Two search shapes are available for Stage 2:
+
+- **Linear / single trajectory** — [gpu-kernel-profile-optimizer](skills/gpu-kernel-profile-optimizer/SKILL.md):
+  the current orchestrator default. Each fresh session performs exactly one profile -> edit ->
+  validate -> bench cycle.
+- **Full-agent PES / evolutionary** — [gpu-kernel-evolve](skills/gpu-kernel-evolve/SKILL.md):
+  select parents from `tools/evolution_db.py`, fan out N isolated candidates, evaluate every
+  candidate through the immutable `sol-execbench` harness, admit by score/diversity, summarize, and
+  checkpoint. At `n_candidates = 1`, this must behave like the linear loop.
 
 **Bottleneck / Roofline analysis**: inlined in this router — see the **Step 0** section above. There is no separate helper skill.
 
 Goal: approach the performance limit through repeated profile -> code change -> validation cycles.
 
-The iteration loop is owned by the **orchestrator** (`orchestrator/optimize.py`), not by a single long session. Each iteration is a fresh `claude` session that runs `gpu-kernel-profile-optimizer` for **exactly one** profile -> edit -> validate -> bench cycle and then exits (see `orchestrator/prompts/iteration.md`). State crosses sessions only on disk (`memory/v<N>.json`, `plans/`, `profiles/`, git): each session reads the prior `open_directions` + recorded dead-ends and starts from HEAD (the best kernel so far). A regressing iteration reverts and is never committed, so HEAD stays best.
+The linear iteration loop is owned by the **orchestrator** (`orchestrator/optimize.py`), not by a single long session. Each iteration is a fresh `claude` session that runs `gpu-kernel-profile-optimizer` for **exactly one** profile -> edit -> validate -> bench cycle and then exits (see `orchestrator/prompts/iteration.md`). State crosses sessions only on disk (`memory/v<N>.json`, `plans/`, `profiles/`, git): each session reads the prior `open_directions` + recorded dead-ends and starts from HEAD (the best kernel so far). A regressing iteration reverts and is never committed, so HEAD stays best. A PES/full-agent runner uses the same disk-only principle, but stores population state under `database/` and per-child traces under `iteration/<K>/`.
 
 **Termination is mechanical and owned by the orchestrator, not the model**: it stops on a hard budget (max iterations or token budget), or when a committed, correctness-PASS iteration reaches the target utilization in `README.md` under `Stop Conditions` (default: peak utilization >= 90%). A single session never decides to keep looping.
 
@@ -225,6 +233,14 @@ python orchestrator/optimize.py \
 python orchestrator/optimize.py \
   --op-dir <atrex-bench native op dir> --platform <P> --framework <F> --layer \
   [--max-iters 20] [--token-budget 0]
+
+# Optional full-agent PES generation with command hooks:
+python orchestrator/evolve.py \
+  --workspace <kernel_opt_workspace> --init-db --import-seed \
+  --planner-cmd <planner-json-command> \
+  --executor-cmd <executor-json-command> \
+  --evaluator-cmd <evaluator-json-command> \
+  [--summarizer-cmd <summarizer-json-command>] [--n-candidates 3]
 ```
 
 `--op-dir` is the only op input: the workspace name (dir basename), the kernel/layer to optimize
@@ -253,6 +269,7 @@ All sub-skills share top-level `tools/`:
 - `tools/classify_ncu.py`
 - `tools/extract_nvidia_asm.py`
 - `tools/memory_manager.py`
+- `tools/evolution_db.py`
 
 ## Shared References
 
@@ -260,4 +277,7 @@ All sub-skills share top-level `tools/`:
 - `reference/README.md` — workspace `README.md` template.
 - `reference/plan.md` — optimization plan template.
 - `reference/v_iteration.schema.json` — iteration JSON schema.
+- `reference/solution.schema.json` — evolutionary candidate / best-solution record schema.
+- `reference/evolve_metadata.schema.json` — evolutionary checkpoint metadata schema.
+- `reference/evolve_config.schema.json` — evolutionary database config schema.
 - `reference/profile_guide.md` — consolidated profile tool usage guide (ncu for NVIDIA, rocprofv3/ATT/PMC for AMD), sourced from gpu-wiki. Covers commands, key metrics, evidence extraction, SASS/ASM analysis, and troubleshooting.
