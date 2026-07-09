@@ -1,6 +1,6 @@
 ---
 name: gpu-kernel-optimizer
-description: End-to-end GPU kernel implementation and optimization router. Use this skill to turn PyTorch logic into a high-performance kernel or to systematically optimize an existing kernel. It initializes the local knowledge base, identifies the current phase, and routes work to baseline implementation, bottleneck analysis, and profile-driven optimization sub-skills.
+description: End-to-end GPU kernel implementation and optimization router. Use this skill to turn PyTorch logic into a high-performance kernel or to systematically optimize an existing kernel. It initializes the local knowledge base, identifies the current phase, routes work to baseline implementation, bottleneck analysis, profile-driven optimization sub-skills, and routes the keyword "pes" to the real full-agent PES workflow.
 ---
 
 # GPU Kernel Optimizer Router
@@ -61,6 +61,26 @@ Trigger this skill when the request asks to:
 - Optimize an existing kernel
 - Analyze kernel bottlenecks, Roofline behavior, or bandwidth utilization
 - Move from baseline implementation to profile-driven optimization
+
+## PES Keyword Trigger
+
+If the user prompt contains the standalone keyword `pes` / `PES`, `full-agent PES`,
+`Plan-Execute-Summary`, or Chinese phrasing such as `pes优化`, `完整pes流程`, or
+`进化式PES`, route Stage 2 to the **real full-agent PES workflow** immediately.
+
+For the currently supported MLSys26 FlashInfer MoE task, the only valid PES entry point is:
+
+```bash
+bash orchestrator/pes.sh moe
+```
+
+This command delegates to `orchestrator/run_moe_full_agent.sh`, which in turn invokes the local
+`mlsys26-flashinfer-contest/full-agent/moe/run_moe.sh` LoongFlow runner. A `pes` request must not be
+satisfied by manually editing one candidate, by the linear profile optimizer, or by
+`orchestrator/evolve.py` unless the user explicitly asks for the experimental JSON-hook runner.
+
+If the requested task has no supported LoongFlow PES runner, stop and report that no real PES bridge
+exists for that task. Do not silently fall back to the linear optimizer.
 
 ## Startup: Create Workspace and Parse User Input
 
@@ -207,15 +227,19 @@ Two search shapes are available for Stage 2:
   the current orchestrator default. Each fresh session performs exactly one profile -> edit ->
   validate -> bench cycle.
 - **Full-agent PES / evolutionary** — [gpu-kernel-evolve](skills/gpu-kernel-evolve/SKILL.md):
-  select parents from `tools/evolution_db.py`, fan out N isolated candidates, evaluate every
-  candidate through the immutable `sol-execbench` harness, admit by score/diversity, summarize, and
-  checkpoint. At `n_candidates = 1`, this must behave like the linear loop.
+  delegate to the local MLSys26 FlashInfer LoongFlow full-agent runner, matching
+  `mlsys26-flashinfer-contest/full-agent/moe/run_moe.sh` (YAML config + task prompt + initial JSON +
+  evaluator program -> `math_evolve_agent.py`).
+
+When the user includes the keyword `pes`, this full-agent PES path is mandatory. The main agent must
+run or instruct the user to run `bash orchestrator/pes.sh moe` for the supported MoE path, and must not
+substitute a hand-driven Plan/Execute/Evaluate loop.
 
 **Bottleneck / Roofline analysis**: inlined in this router — see the **Step 0** section above. There is no separate helper skill.
 
 Goal: approach the performance limit through repeated profile -> code change -> validation cycles.
 
-The linear iteration loop is owned by the **orchestrator** (`orchestrator/optimize.py`), not by a single long session. Each iteration is a fresh `claude` session that runs `gpu-kernel-profile-optimizer` for **exactly one** profile -> edit -> validate -> bench cycle and then exits (see `orchestrator/prompts/iteration.md`). State crosses sessions only on disk (`memory/v<N>.json`, `plans/`, `profiles/`, git): each session reads the prior `open_directions` + recorded dead-ends and starts from HEAD (the best kernel so far). A regressing iteration reverts and is never committed, so HEAD stays best. A PES/full-agent runner uses the same disk-only principle, but stores population state under `database/` and per-child traces under `iteration/<K>/`.
+The linear iteration loop is owned by the **orchestrator** (`orchestrator/optimize.py`), not by a single long session. Each iteration is a fresh `claude` session that runs `gpu-kernel-profile-optimizer` for **exactly one** profile -> edit -> validate -> bench cycle and then exits (see `orchestrator/prompts/iteration.md`). State crosses sessions only on disk (`memory/v<N>.json`, `plans/`, `profiles/`, git): each session reads the prior `open_directions` + recorded dead-ends and starts from HEAD (the best kernel so far). A full-agent LoongFlow run stores its own population state, checkpoints, and traces under the MLSys26 full-agent run directory.
 
 **Termination is mechanical and owned by the orchestrator, not the model**: it stops on a hard budget (max iterations or token budget), or when a committed, correctness-PASS iteration reaches the target utilization in `README.md` under `Stop Conditions` (default: peak utilization >= 90%). A single session never decides to keep looping.
 
@@ -234,13 +258,9 @@ python orchestrator/optimize.py \
   --op-dir <atrex-bench native op dir> --platform <P> --framework <F> --layer \
   [--max-iters 20] [--token-budget 0]
 
-# Optional full-agent PES generation with command hooks:
-python orchestrator/evolve.py \
-  --workspace <kernel_opt_workspace> --init-db --import-seed \
-  --planner-cmd <planner-json-command> \
-  --executor-cmd <executor-json-command> \
-  --evaluator-cmd <evaluator-json-command> \
-  [--summarizer-cmd <summarizer-json-command>] [--n-candidates 3]
+# Full-agent MoE LoongFlow PES run (mandatory when the user says "pes"):
+export LLM_API_KEY=sk-...
+bash orchestrator/pes.sh moe
 ```
 
 `--op-dir` is the only op input: the workspace name (dir basename), the kernel/layer to optimize
@@ -269,7 +289,7 @@ All sub-skills share top-level `tools/`:
 - `tools/classify_ncu.py`
 - `tools/extract_nvidia_asm.py`
 - `tools/memory_manager.py`
-- `tools/evolution_db.py`
+- `tools/evolution_db.py` — experimental JSON-hook PES compatibility runner state, not the recommended MoE LoongFlow path.
 
 ## Shared References
 
@@ -277,7 +297,7 @@ All sub-skills share top-level `tools/`:
 - `reference/README.md` — workspace `README.md` template.
 - `reference/plan.md` — optimization plan template.
 - `reference/v_iteration.schema.json` — iteration JSON schema.
-- `reference/solution.schema.json` — evolutionary candidate / best-solution record schema.
-- `reference/evolve_metadata.schema.json` — evolutionary checkpoint metadata schema.
-- `reference/evolve_config.schema.json` — evolutionary database config schema.
+- `reference/solution.schema.json` — experimental JSON-hook evolutionary candidate / best-solution record schema.
+- `reference/evolve_metadata.schema.json` — experimental JSON-hook evolutionary checkpoint metadata schema.
+- `reference/evolve_config.schema.json` — experimental JSON-hook evolutionary database config schema.
 - `reference/profile_guide.md` — consolidated profile tool usage guide (ncu for NVIDIA, rocprofv3/ATT/PMC for AMD), sourced from gpu-wiki. Covers commands, key metrics, evidence extraction, SASS/ASM analysis, and troubleshooting.

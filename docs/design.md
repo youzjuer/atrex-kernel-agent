@@ -12,7 +12,7 @@ The project centers on the `gpu-kernel-optimizer` Skill. The top-level Skill act
 - **Traceable hardware assumptions**: Hardware specs must come from the local `gpu-wiki` knowledge base and must be archived with source references.
 - **Auditable optimization history**: Plans, profiles, reports, structured memory, and Git commits preserve every accepted iteration.
 - **Reproducible workspaces**: Each task runs in an isolated `/tmp/kernel_opt_<name>/` workspace.
-- **Controlled iteration state**: Structured `memory/v<N>.json` files record linear optimization state; the optional PES/full-agent loop uses `database/` checkpoints for population state, lineage, and candidate traces.
+- **Controlled iteration state**: Structured `memory/v<N>.json` files record linear optimization state. The recommended MoE full-agent path delegates to the MLSys26 FlashInfer LoongFlow runner, which stores its own population state and checkpoints in its run directory. The local `database/` layout is retained only for the experimental JSON-hook runner.
 - **Safe final packaging**: Evaluator-facing output is separated into a clean `generated_kernel.py` contract when needed.
 
 ## Project Structure
@@ -25,7 +25,9 @@ The project centers on the `gpu-kernel-optimizer` Skill. The top-level Skill act
 ├── atrex-workflow.png                    # Workflow diagram
 ├── orchestrator/
 │   ├── optimize.py                       # sol-execbench linear / decomposition driver
-│   └── evolve.py                         # generic PES generation runner with JSON command hooks
+│   ├── evolve.py                         # generic PES generation runner with JSON command hooks
+│   ├── pes.sh                            # keyword PES entry point; delegates to real full-agent runners
+│   └── run_moe_full_agent.sh             # bridge to MLSys26 FlashInfer LoongFlow MoE runner
 ├── docs/
 │   ├── design.md                         # This design document
 │   └── gpu-wiki-design.md                # gpu-wiki knowledge-base design
@@ -57,7 +59,7 @@ The project centers on the `gpu-kernel-optimizer` Skill. The top-level Skill act
     ├── measure_bandwidth_ceiling.py      # Same-size bandwidth ceiling measurement
     ├── measure_kernel_time.py            # Kernel latency helper
     ├── memory_manager.py                 # Structured memory JSON manager
-    ├── evolution_db.py                   # PES population / lineage / checkpoint manager
+    ├── evolution_db.py                   # experimental JSON-hook PES population manager
     ├── profile_kernel.sh                 # AMD rocprofv3 / ATT / PMC / ASM wrapper
     ├── profile_nvidia.sh                 # NVIDIA ncu wrapper (metrics + symptom classification)
     ├── classify_ncu.py                   # NCU metrics -> symptom diagnosis
@@ -110,14 +112,25 @@ Each iteration must use official profiler evidence, change exactly one optimizat
 
 Path: `skills/gpu-kernel-evolve/SKILL.md`
 
-This optional Stage 2 search shape generalizes the single trajectory into a Plan-Execute-Summary
-loop. Each generation selects parents from `tools/evolution_db.py`, asks the planner for N
-evidence-backed strategies, fans out isolated executor children, evaluates every candidate through
-the immutable task harness, admits PASS and FAIL candidates into the population, summarizes lessons,
-and checkpoints. At `n_candidates = 1`, it must behave like the linear optimizer.
+This optional Stage 2 search shape delegates to the local MLSys26 FlashInfer full-agent LoongFlow
+runner. The recommended MoE path mirrors
+`mlsys26-flashinfer-contest/full-agent/moe/run_moe.sh`: render the LoongFlow YAML task config, pass
+`task_prompt.txt`, the initial task JSON, and `eval_program_modal.py` to
+`agents/math_agent/math_evolve_agent.py`, then let LoongFlow own PES state, worker registration,
+evaluation, checkpointing, and target-score termination.
 
-The PES state source is `database/`, not `memory/v<N>.json`. `memory/` remains the compatibility
-record for linear runs and for importing the baseline seed.
+The keyword `pes` is the hard trigger for this mode. Atrex routes it through:
+
+```bash
+bash orchestrator/pes.sh moe
+```
+
+`orchestrator/pes.sh` is deliberately narrow: supported tasks delegate to real LoongFlow full-agent
+runners; unsupported tasks fail explicitly. It must not fall back to the linear profile optimizer or
+the experimental JSON-hook runner for a `pes` request.
+
+`orchestrator/evolve.py` and `tools/evolution_db.py` are retained as experimental JSON-hook tooling,
+but they are not the recommended MLSys26 full-agent MoE path.
 
 ### Output Contract Skill
 
@@ -254,11 +267,9 @@ Important rules:
 - Performance records must include latency, TFLOPS, bandwidth, and peak-utilization ratios.
 - If a quality gate fails, the workflow reverts to the previous commit and records the failure.
 
-Optional full-agent mode replaces the linear one-candidate loop with the PES loop described above.
-It preserves the same hardware-spec, profiler-evidence, correctness, and harness-integrity rules.
-In `sol-execbench`, every candidate is gated by `python test_kernel.py` over the full workload set;
-the scalar fitness stored in the evolution DB is baseline geomean latency divided by candidate
-geomean latency.
+Optional full-agent mode uses the LoongFlow bridge described above. It preserves the same
+hardware-spec, correctness, and harness-integrity expectations, but the authoritative PES state and
+checkpoints live in the MLSys26 full-agent run directory rather than atrex `memory/v<N>.json`.
 
 ### 6. Stop or Continue
 
@@ -280,8 +291,8 @@ A typical optimization task produces:
 │   ├── v0.json               # Baseline iteration record
 │   ├── v1.json               # Optimization iteration record
 │   └── ...                   # Files with masked=true are ignored by active planning
-├── database/                 # PES population / lineage / checkpoints when full-agent mode is enabled
-├── iteration/                # PES planner / executor / summarizer traces
+├── database/                 # experimental JSON-hook PES state, not used by LoongFlow bridge
+├── iteration/                # experimental JSON-hook planner / executor / summarizer traces
 ├── plans/
 │   ├── v0_plan.md
 │   ├── v1_plan.md
@@ -363,7 +374,7 @@ The `tools/` directory provides:
 - `profile_nvidia.sh`: NVIDIA profiling wrapper for ncu; parses metrics and classifies symptoms via `classify_ncu.py` and the bundled `ncu_helpers/`.
 - `extract_nvidia_asm.py`: extract and analyze NVIDIA SASS (from `.ncu-rep`, cubin, Triton, or CuteDSL).
 - `memory_manager.py`: manage structured iteration records.
-- `evolution_db.py`: manage PES population state, parent selection, admission, lineage, and checkpoints.
+- `evolution_db.py`: manage PES population state for the experimental JSON-hook runner; the recommended MoE full-agent path uses the LoongFlow runner's own memory/checkpoint implementation.
 
 ## Critical Constraints
 
@@ -376,7 +387,7 @@ The `tools/` directory provides:
 - Kernel changes that fail correctness tests must not proceed to performance validation or commit.
 - Every accepted baseline and optimization iteration must be committed with Git.
 - `memory/v*.json` files with `masked: true` are discarded from active planning and must not influence future optimization decisions.
-- In full-agent PES mode, `database/` is the population source of truth and failed candidates are preserved as negative evidence with score 0.
+- In the recommended MoE full-agent mode, the local contest LoongFlow run directory is the population/checkpoint source of truth. For the experimental JSON-hook runner only, `database/` is the population source of truth and failed candidates are preserved as negative evidence with score 0.
 - In `sol-execbench`, `test_kernel.py`, `definition.json`, `reference.py`, and `workload.jsonl` are immutable benchmark assets.
 - Final `generated_kernel.py`, when required, must contain only evaluator-ready runtime code.
 
@@ -386,6 +397,6 @@ The `tools/` directory provides:
 - Diagnose bottlenecks through Roofline analysis and official profiler evidence.
 - Optimize kernels on NVIDIA Hopper or AMD CDNA platforms.
 - Continue stalled optimization runs with partial restart and masked memory.
-- Explore several candidate lineages in parallel with the optional full-agent PES loop.
+- Run the MLSys26 FlashInfer LoongFlow MoE full-agent search, or use the experimental JSON-hook runner to explore candidate lineages locally.
 - Produce clean evaluator-ready candidates for hidden benchmark systems.
 - Maintain an auditable, reproducible, and continuously iterative kernel optimization workflow.

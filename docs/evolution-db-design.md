@@ -1,19 +1,24 @@
-# `tools/evolution_db.py` 细化设计（M1，接口 + Schema，**不含实现**）
+# `tools/evolution_db.py` 细化设计（历史自研 hook-runner 兼容层）
 
-> 配套：[full-agent-refactor-plan.md](full-agent-refactor-plan.md)（A1 方案）。
-> 本文只定义**落盘结构、JSON Schema、CLI 接口签名、选择/准入算法规格**，供 review；**不写任何实现代码**。
+> 配套：[full-agent-refactor-plan.md](full-agent-refactor-plan.md)（历史 A1 自研方案）。
+> 当前推荐 full-agent 路径已切换为委托本地 MLSys26 FlashInfer LoongFlow runner
+> (`full-agent/moe/run_moe.sh`)；本文保留为 atrex 自研 JSON-hook PES runner /
+> `tools/evolution_db.py` 的兼容设计，不是主执行路径。MoE full-agent 的权威配置、
+> 进化记忆、评测和 checkpoint 都由本地 contest 仓库里的 LoongFlow runner 管理。
+> 本文定义**落盘结构、JSON Schema、CLI 接口签名、选择/准入算法规格**。
 > **算法与参数复用参考(原)仓库 LoongFlow 的做法**（`agentsdk/memory/evolution/{in_memory.py, boltzmann.py, base_memory.py}`）：
-> score = evaluator 单 float（越大越好）、novelty = 代码距离 + MAP-Elites、准入 = MAP-Elites 岛内替换 + 精英存档 + 迁移、选择 = 自适应温度 Boltzmann。详见 §4。
+> score = evaluator 单 float（越大越好）、novelty = 代码距离 + MAP-Elites、准入 = MAP-Elites 岛内替换 + 精英存档 + 迁移、选择 = 自适应温度 + 分数×权重的非贪心采样。详见 §4。
 > 解记录字段对齐原仓库 `Solution` dataclass，并保留 atrex 既有 `performance/correctness/profile_evidence` 约定。
 
 ---
 
 ## 1. 定位与边界
 
-- **定位**：PES 进化循环的**状态中枢与唯一真源**。承载"多候选 + 多岛种群(island) + MAP-Elites 特征网格 + 精英存档 + 血缘(`parent_id`)"，是 `memory_manager.py`（线性 `v<N>.json`）装不下的那一层。
-- **做什么**：候选准入(add，含 MAP-Elites/岛/精英/迁移)、父代选择(select-parents，自适应温度 Boltzmann)、每代落 checkpoint、取最优(best)、回溯血缘(lineage)、进度汇总(summary)。
+- **定位**：仅限 atrex 自研 JSON-hook PES runner 的状态中枢。它不是当前 MoE full-agent 的真源；当前 MoE full-agent 的真源在 `mlsys26-flashinfer-contest/full-agent/moe/` 下的 LoongFlow 运行目录。
+- **旧 runner 内部定位**：承载"多候选 + 多岛种群(island) + MAP-Elites 特征网格 + 精英存档 + 血缘(`parent_id`)"，是 `memory_manager.py`（线性 `v<N>.json`）装不下的那一层。
+- **做什么**：候选准入(add，含 MAP-Elites/岛/精英/迁移/采样权重)、父代选择(select-parents，自适应温度 + shortlist 加权采样)、每代落 checkpoint、取最优(best)、回溯血缘(lineage)、summary 诊断入库、进度汇总(summary)。
 - **不做什么**：不编译、不跑 kernel、不测时、不 profile（这些是 evaluator 子流程的事，结果通过 `add` 写进来）；不调 LLM；不管 git commit（沿用现有流程）。
-- **可配置**：种群/岛/精英/迁移/温度/预算/收敛全部参数化，默认值=原仓库默认（§7）。
+- **可配置**：种群/岛/精英/迁移/温度/预算/收敛全部参数化，默认值见 §7。
 
 ---
 
@@ -22,7 +27,7 @@
 ```text
 kernel_opt_<name>/
 ├── database/
-│   ├── config.json                       # 进化配置（§3.3，默认=原仓库默认）
+│   ├── config.json                       # 进化配置（§3.3，默认见 §7）
 │   ├── state.json                        # 活动权威状态（种群/岛/精英/特征统计；CLI 跨次调用持久化，实现细节）
 │   ├── solutions/                        # 全量解池（内容寻址；含评测失败的 score=0 解）
 │   │   └── <solution_id>/
@@ -60,7 +65,7 @@ kernel_opt_<name>/
   "generation": 0,                       // 进化代数（语义同 iteration，对齐原仓库双字段）
   "timestamp": 0.0,                      // epoch 秒（原仓库用 float）
   "sample_cnt": 0,                       // 作为父代被采样次数
-  "sample_weight": 0.0,                  // 采样权重（Boltzmann 用，见 §4.4）
+  "sample_weight": 1.0,                  // 采样权重（select-parents 用，见 §4.4）
   "score": 0.0,                          // 适应度，越大越好；定义见 §4.1。失败=0
   "evaluation": "<evaluator 原始结论字符串>",
   "summary": "<summarizer 蒸馏文本>",
@@ -125,28 +130,44 @@ kernel_opt_<name>/
 }
 ```
 
-### 3.3 配置 `config.json`（默认值=原仓库默认）
+### 3.3 配置 `config.json`（当前默认值）
 
 ```jsonc
 {
   // —— 种群/岛/精英/迁移：原仓库 InMemoryEvolveMemory 默认 ——
   "population_size": 100,
-  "num_islands": 3,
+  "num_islands": 1,
   "elite_archive_size": 50,
   "migration_interval": 10,
   "migration_rate": 0.2,
   "feature_dimensions": ["complexity", "diversity", "score"],
   "feature_bins": null,                   // null=自动: ceil(elite_archive_size^(1/dims))，默认→4
 
-  // —— Boltzmann 选择：原仓库 boltzmann.py 默认 ——
+  // —— 非贪心选择：90% shortlist 加权 + 10% 岛内随机探索 ——
   "selection": {
     "strategy": "boltzmann",
     "initial_temperature": 1.0,
     "min_temperature": 0.5,
     "max_temperature": 2.0,
-    "exploration_rate": 0.2,
+    "exploration_rate": 0.1,
+    "stuck_exploration_multiplier": 2.0,
+    "stuck_patience_fraction": 0.4,
     "use_sampling_weight": true,
     "sampling_weight_power": 1.0
+  },
+  "sample_weight": {
+    "base": 1.0,
+    "inheritance_gain": 0.35,
+    "lineage_gain": 0.08,
+    "relative_improvement_gain": 1.0,
+    "absolute_quality_gain": 0.25,
+    "time_decay": 0.9,
+    "max": 10.0
+  },
+  "executor": {
+    "react_score_threshold": 2.0,
+    "chat_max_rounds": 1,
+    "react_max_rounds": 6
   },
 
   // —— atrex 任务侧 ——
@@ -192,16 +213,18 @@ kernel_opt_<name>/
 - 坐标键形如 `"2-1-3"`，决定解落在哪个网格格子（§4.2 第 2 步）。
 - **不用** action_category 0/1（那是我先前的简化，现废弃）。
 
-### 4.4 父代选择 `select-parents`（原仓库：自适应温度 Boltzmann）
+### 4.4 父代选择 `select-parents`（自适应温度 + shortlist 加权）
 
-`select_parents_with_dynamic_temperature`（对齐 `boltzmann.py`）：
+`select_parents`：
 
 1. **算种群 diversity** → **自适应温度**：`T` 在 `[min=0.5, max=2.0]` 间按多样性调（越散温度越高、越偏探索），与当前温度 0.8/0.2 混合稳态。
-2. **exploration**：以 `exploration_rate=0.2` 概率直接随机选一个（纯探索）。
+2. **exploration**：以 `exploration_rate=0.1` 概率在当前岛内等概率随机；若 no-improve streak 达到 `stuck_patience_fraction × no_improve_patience`，探索率乘 `stuck_exploration_multiplier=2.0`。
 3. **精英/非精英分组采样**：从 elites 取 3 个、non-elites 取 2 个，凑 5 个候选。
-4. **Boltzmann 概率**：`P(i) ∝ exp((score_i − max_score)/T)`（减 max 保数值稳定）；若 `use_sampling_weight`，再乘 `sample_weight^power` 归一。
-5. 兜底：softmax / 取最高分。
+4. **加权概率**：`P(i) ∝ score_i^(1/T) × sample_weight_i^power`；`score=0` 的候选只在全零 fallback 或随机探索中被选中。
+5. 兜底：权重和异常时取最高分。
 6. 选 N 次得 N 个父代（被选解 `sample_cnt++`）。
+
+`sample_weight` 在 `add` 时计算，默认由三类信号构成：父代血脉权重继承、相对 parent 的进步（随 generation age 衰减）、自身绝对质量。`annotate-generation` 可从 summarizer 的 `sampling_weights` 或 `weight_adjustments` 覆盖 / 调整权重。
 
 ---
 
@@ -222,8 +245,10 @@ python tools/evolution_db.py add          --workspace <ws> --generation <K> --pa
                                           [--evaluation <str>] [--evidence-file <json>]
                                           [--iteration-ref <path>] [--json]
                                           # MAP-Elites 坐标、精英、迁移、剪枝由 add 内部按 §4.2 自动处理
-python tools/evolution_db.py select-parents --workspace <ws> [--n 3] [--json]
-                                          # 自适应温度 Boltzmann（§4.4），温度/exploration 读 config
+python tools/evolution_db.py select-parents --workspace <ws> [--n 3] [--island <id>] [--json]
+                                          # 自适应温度 + shortlist 加权（§4.4），温度/exploration 读 config
+python tools/evolution_db.py annotate-generation --workspace <ws> --generation <K>
+                                          --summary-file <summary.json|summary.md> [--json]
 python tools/evolution_db.py checkpoint   --workspace <ws> --generation <K> [--json]
 python tools/evolution_db.py best         --workspace <ws> [--island <id>] [--json]
 python tools/evolution_db.py lineage      --workspace <ws> --solution <id> [--json]
@@ -236,10 +261,11 @@ python tools/evolution_db.py config       --workspace <ws> [--get <key>] [--set 
 
 | 命令 | 作用 | 关键输出 | 副作用 |
 |------|------|---------|--------|
-| `init` | 建 `database/`、写 `config.json`（默认=原仓库默认） | db 路径 | 创建目录/配置 |
+| `init` | 建 `database/`、写 `config.json`（默认见 §7） | db 路径 | 创建目录/配置 |
 | `import-seed` | 把 baseline(`memory/v0.json`+`kernel.py`)登记为 seed(gen0, parent=null) | `solution_id` | 写 seed + 首个 checkpoint |
 | `add` | 登记一个已评测候选，跑 §4.2（MAP-Elites/岛/精英/迁移/剪枝） | `solution_id` + 落格/替换/入精英情况 | 写 `solutions/<id>/` |
-| `select-parents` | 按 §4.4 自适应温度 Boltzmann 采样 N 个父代 | 父代精简记录列表 | `sample_cnt++` |
+| `select-parents` | 按 §4.4 自适应温度 + shortlist 加权采样 N 个父代 | 父代精简记录列表 | `sample_cnt++` |
+| `annotate-generation` | 把 summarizer 诊断写回同代 solution，可覆盖/调整采样权重 | 更新数量 | 写 `summary` / `sample_weight` |
 | `checkpoint` | 固化第 K 代：算 best、写 metadata、复制本代候选、判收敛 | checkpoint 路径 + best + 是否停止 | 写 `checkpoints/iter-<K>/` |
 | `best` | 当前全局/指定岛最优 | best 解记录 | 无 |
 | `lineage` | 回溯父链到 seed | id 链 + 每环 score/plan | 无 |
@@ -247,7 +273,7 @@ python tools/evolution_db.py config       --workspace <ws> [--get <key>] [--set 
 | `list` | 列解（可筛代/岛） | 解清单 | 无 |
 | `config` | 读/改进化配置 | 配置项 | 改 `config.json` |
 
-### 典型一代调用序列（由 `gpu-kernel-evolve` 编排）
+### 典型一代调用序列（历史 JSON-hook runner）
 
 ```bash
 # 一次性
@@ -264,6 +290,13 @@ python tools/evolution_db.py checkpoint   --workspace $WS --generation $K --json
 # 读 checkpoint.convergence.stopped 决定是否继续
 ```
 
+当前 MoE full-agent 不执行这组命令。请使用：
+
+```bash
+export LLM_API_KEY=sk-...
+bash orchestrator/pes.sh moe
+```
+
 ---
 
 ## 6. 与 `memory_manager.py` / git 的关系
@@ -275,18 +308,18 @@ python tools/evolution_db.py checkpoint   --workspace $WS --generation $K --json
 
 ---
 
-## 7. 默认参数（=原仓库默认；可被核心文档覆盖）
+## 7. 默认参数（当前分支；可被核心文档覆盖）
 
 | 参数 | 默认 | 来源 |
 |------|------|------|
 | `population_size` | 100 | 原仓库 |
-| `num_islands` | 3 | 原仓库 |
 | `elite_archive_size` | 50 | 原仓库 |
-| `migration_interval` / `migration_rate` | 10 / 0.2 | 原仓库 |
+| `num_islands` | 1 | 当前 `sol-execbench` contest profile；多岛仍可配置 |
+| `migration_interval` / `migration_rate` | 10 / 0.2 | 多岛启用时生效 |
 | `feature_dimensions` | complexity / diversity / score | 原仓库 |
 | `feature_bins` | 自动→4（`ceil(50^(1/3))`） | 原仓库 |
-| `selection` 温度 | init 1.0 / min 0.5 / max 2.0 | 原仓库 boltzmann |
-| `exploration_rate` | 0.2 | 原仓库 |
+| `selection` 温度 | init 1.0 / min 0.5 / max 2.0 | 本分支沿用温度自适应 |
+| `exploration_rate` | 0.1，停滞后×2 | 本分支 |
 | `sampling_weight` / `power` | on / 1.0 | 原仓库 |
 | `n_candidates` (N) | 3 | atrex 方案 |
 | `budget.max_generations` | 30 | atrex 方案 |
@@ -298,12 +331,14 @@ python tools/evolution_db.py checkpoint   --workspace $WS --generation $K --json
 
 ---
 
-## 8. M1 交付物（确认后再写实现）
+## 8. M1 交付物（历史自研方案）
 
 1. `reference/solution.schema.json`、`reference/evolve_metadata.schema.json`、`reference/evolve_config.schema.json`（§3 三份 schema 落成文件）。
-2. `tools/evolution_db.py`（实现 §5 全部子命令 + §4 原仓库算法：MAP-Elites/岛/精英/迁移/剪枝 + 自适应温度 Boltzmann）。
-3. 单元测试：MAP-Elites 落格与替换、代码距离 diversity、岛迁移、精英存档淘汰、自适应温度 Boltzmann 采样分布、血缘回溯、seed 导入、收敛判据触发、种群剪枝。
+2. `tools/evolution_db.py`（实现 §5 全部子命令 + §4 算法：MAP-Elites/岛/精英/迁移/剪枝 + 自适应温度 shortlist 加权选择 + summary 入库）。
+3. 单元测试：MAP-Elites 落格与替换、代码距离 diversity、岛迁移、精英存档淘汰、自适应温度采样分布、血缘回溯、seed 导入、收敛判据触发、种群剪枝。
 4. 与 `memory_manager.py` 的兼容映射（seed 导入 + 每代 best 同步）。
+
+这些交付物属于旧 JSON-hook runner，不是当前 MoE full-agent bridge 的必需项。
 
 ## 9. 设计选择确认状态
 
@@ -312,9 +347,10 @@ python tools/evolution_db.py checkpoint   --workspace $WS --generation $K --json
 | 1 | score 口径 | ✅ **复用原仓库**：单 float、越大越好 = 加速比（`baseline/candidate` latency），失败=0 |
 | 2 | 准入策略 | ✅ **复用原仓库**：MAP-Elites 岛内替换 + 精英存档(50) + 迁移(每10代/20%) + 超 100 剪枝（替代先前自创 6 步/岛容量 8） |
 | 3 | novelty | ✅ **复用原仓库**：代码文本距离 + MAP-Elites 特征(complexity/diversity/score)（替代先前 action_category 0/1） |
-| 4 | 父代选择 | ✅ **复用原仓库**：自适应温度 Boltzmann + 精英/非精英分组 + sample_weight + exploration 0.2（替代先前定温不放回采样） |
+| 4 | 父代选择 | ✅ 自适应温度 + 3 elite / 2 non-elite shortlist + sample_weight + exploration 0.1（停滞翻倍） |
 | 5 | 失败/低分候选 | ✅ **复用原仓库**：不另立拒绝池，统一进 populations 记 score=0，由网格竞争+剪枝淘汰；负样本证据留在 evaluator/summarizer |
 
-| 6 | 容量参数 | ✅ **保留原仓库默认**：population 100 / elite 50 / num_islands 3（上限，本地小预算下不会填满，属正常） |
+| 6 | 容量参数 | ✅ population 100 / elite 50 / num_islands 1（多岛、迁移仍可配置启用） |
 
-> §9 全部敲定。M1 实现按本文 §3（schema）/§4（原仓库算法）/§5（CLI）/§7（默认参数）落地。
+> §9 是旧 JSON-hook runner 的设计状态。当前 MoE full-agent 以本地 contest
+> `full-agent/moe/run_moe.sh` 和 LoongFlow 配置为准。

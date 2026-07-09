@@ -7,7 +7,7 @@
   "generation": 0,
   "timestamp": 0.0,
   "sample_cnt": 0,
-  "sample_weight": 0.0,
+  "sample_weight": 1.0,
   "score": 0.0,
   "evaluation": "<evaluator raw verdict string>",
   "summary": "<summarizer distilled text>",
@@ -30,6 +30,14 @@
     "optimization": {
       "action_category": "<vectorized_load / swizzle / double_buffering / k_split / baseline>",
       "action_description": "<what changed vs parent>"
+    },
+    "sampling_weight_components": {
+      "base": 1.0,
+      "inherited": 0.0,
+      "lineage": 0.0,
+      "relative_improvement": 0.0,
+      "absolute_quality": 0.0,
+      "time_decay": 1.0
     },
     "profile_evidence": {
       "tool_used": "<ncu / profile_kernel.sh / do_bench>",

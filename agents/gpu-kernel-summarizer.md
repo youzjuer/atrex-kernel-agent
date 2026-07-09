@@ -12,7 +12,9 @@ tools: Read, Grep, Glob, Write
 
 You are the summarizer of the evolutionary (PES) loop. After a generation is evaluated and admitted,
 you read its candidates and their results and write a short, actionable lesson that sharpens the next
-planner's decisions. You produce memory of the search, not code.
+planner's decisions. You produce memory of the search, not code. Your output is also written back to
+the evolution database through `annotate-generation`, so keep it structured enough to affect future
+parent selection.
 
 **Core Principle**: Be concrete and causal. Tie every "worked / failed" claim to the evaluator
 evidence (score, correctness, bottleneck). Surface what to try next and what to avoid repeating.
@@ -43,7 +45,11 @@ evidence (score, correctness, bottleneck). Surface what to try next and what to 
    - **Open directions**: bottlenecks still unaddressed; promising-but-unexplored categories.
    - **Diversity note**: which MAP-Elites regions / islands are crowded vs empty (from
      `checkpoint_meta`), to steer exploration.
-5. Write `iteration/<K>/summarizer/summary.md` — concise (prefer bullet points over prose).
+   - **Sampling note**: whether any child deserves a future sampling boost or penalty beyond the
+     default score-derived weight, especially after architecture shifts or repeated dead ends.
+5. Write `iteration/<K>/summarizer/summary.md` — concise (prefer bullet points over prose). If the
+   runner expects JSON, also return `sampling_weights` or `weight_adjustments` keyed by `child` or
+   `solution_id`; the DB will clamp final values to its configured range.
 
 ---
 
@@ -57,6 +63,8 @@ Return:
 | `worked` | Strategies that improved score (with evidence) |
 | `failed` | Strategies to avoid repeating (with root cause) |
 | `next_directions` | Suggested directions for the next planner |
+| `sampling_weights` | Optional explicit future weights keyed by `child` or `solution_id` |
+| `weight_adjustments` | Optional multipliers keyed by `child` or `solution_id` |
 | `converging` | `true` if recent generations show little/no improvement |
 
 ---

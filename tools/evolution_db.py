@@ -5,14 +5,15 @@
 This tool is the state hub / single source of truth for the evolutionary
 Plan-Execute-Summary loop. It carries what ``memory_manager.py`` (a linear
 ``memory/v<N>.json`` sequence) cannot: a multi-island MAP-Elites population, an
-elite archive, parent lineage (``parent_id``), and diversity-adaptive Boltzmann
-parent selection.
+elite archive, parent lineage (``parent_id``), diversity-adaptive parent
+selection, and snowball-style sampling weights.
 
-Algorithms and default parameters mirror the upstream LoongFlow approach
-(``agentsdk/memory/evolution/{in_memory.py, boltzmann.py, base_memory.py}``),
-reimplemented with the Python standard library only (no numpy) so the tool runs
-on any host, GPU box or not. See ``docs/evolution-db-design.md`` for the full
-spec.
+Algorithms follow the upstream LoongFlow shape
+(``agentsdk/memory/evolution/{in_memory.py, boltzmann.py, base_memory.py}``) but
+use the current contest defaults: one island, 90/10 parent exploration, and
+snowball sampling weights. The implementation uses only the Python standard
+library (no numpy) so the tool runs on any host, GPU box or not. See
+``docs/evolution-db-design.md`` for the full spec.
 
 What this tool does NOT do: compile/run/profile kernels, call an LLM, or manage
 git. Score and correctness are supplied from the outside via ``add``.
@@ -33,12 +34,12 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 # --------------------------------------------------------------------------- #
-# Defaults (= upstream LoongFlow defaults; see reference/evolve_config.schema.json)
+# Defaults (see reference/evolve_config.schema.json)
 # --------------------------------------------------------------------------- #
 
 DEFAULT_CONFIG: Dict[str, Any] = {
     "population_size": 100,
-    "num_islands": 3,
+    "num_islands": 1,
     "elite_archive_size": 50,
     "migration_interval": 10,
     "migration_rate": 0.2,
@@ -50,9 +51,25 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "initial_temperature": 1.0,
         "min_temperature": 0.5,
         "max_temperature": 2.0,
-        "exploration_rate": 0.2,
+        "exploration_rate": 0.1,
+        "stuck_exploration_multiplier": 2.0,
+        "stuck_patience_fraction": 0.4,
         "use_sampling_weight": True,
         "sampling_weight_power": 1.0,
+    },
+    "sample_weight": {
+        "base": 1.0,
+        "inheritance_gain": 0.35,
+        "lineage_gain": 0.08,
+        "relative_improvement_gain": 1.0,
+        "absolute_quality_gain": 0.25,
+        "time_decay": 0.9,
+        "max": 10.0,
+    },
+    "executor": {
+        "react_score_threshold": 2.0,
+        "chat_max_rounds": 1,
+        "react_max_rounds": 6,
     },
     "n_candidates": 3,
     "budget": {"max_generations": 30},
@@ -79,7 +96,7 @@ class Solution:
     generation: int = 0
     timestamp: float = 0.0
     sample_cnt: int = 0
-    sample_weight: float = 0.0
+    sample_weight: float = 1.0
     score: float = 0.0
     evaluation: str = ""
     summary: str = ""
@@ -323,6 +340,65 @@ class EvolutionDB:
     def _score_of(self, sid: str) -> float:
         return float(self.state["solutions"][sid]["score"] or 0.0)
 
+    def _lineage_depth(self, sid: Optional[str]) -> int:
+        depth = 0
+        cur = sid
+        seen = set()
+        while cur and cur not in seen and cur in self.state["solutions"]:
+            seen.add(cur)
+            parent = self.state["solutions"][cur].get("parent_id")
+            if parent is None:
+                break
+            depth += 1
+            cur = parent
+        return depth
+
+    def _sample_weight_cap(self) -> float:
+        return float(self.config.get("sample_weight", {}).get("max", 10.0))
+
+    def _clamp_sample_weight(self, value: float) -> float:
+        cap = self._sample_weight_cap()
+        return max(0.01, min(cap, float(value)))
+
+    def _compute_sample_weight(
+        self, parent_id: Optional[str], score: float, generation: int
+    ) -> tuple[float, Dict[str, float]]:
+        cfg = self.config.get("sample_weight", {})
+        base = float(cfg.get("base", 1.0))
+        parent_weight = 1.0
+        parent_score = 0.0
+        parent_generation = generation
+        depth = 0
+        has_parent = bool(parent_id and parent_id in self.state["solutions"])
+        if has_parent:
+            parent = self.state["solutions"][parent_id]
+            parent_weight = float(parent.get("sample_weight") or 1.0)
+            parent_score = float(parent.get("score") or 0.0)
+            parent_generation = int(parent.get("generation") or generation)
+            depth = self._lineage_depth(parent_id) + 1
+
+        age = max(0, generation - parent_generation)
+        decay = float(cfg.get("time_decay", 0.9)) ** age
+        inherited = (
+            float(cfg.get("inheritance_gain", 0.35)) * parent_weight * decay
+            if has_parent
+            else 0.0
+        )
+        lineage = float(cfg.get("lineage_gain", 0.08)) * depth
+        denom = max(abs(parent_score), 1e-9)
+        relative = max(0.0, (float(score) - parent_score) / denom) if has_parent else 0.0
+        improvement = float(cfg.get("relative_improvement_gain", 1.0)) * relative * decay
+        quality = float(cfg.get("absolute_quality_gain", 0.25)) * math.log1p(max(float(score), 0.0))
+        total = self._clamp_sample_weight(base + inherited + lineage + improvement + quality)
+        return total, {
+            "base": base,
+            "inherited": inherited,
+            "lineage": lineage,
+            "relative_improvement": improvement,
+            "absolute_quality": quality,
+            "time_decay": decay,
+        }
+
     def _update_island(self, sol: Dict[str, Any]) -> None:
         isl = sol["island_id"]
         key = sol["metadata"]["MAP_Elite_feature"]
@@ -411,7 +487,7 @@ class EvolutionDB:
         self.state["best_solution_id"] = bid
         self.state["best_score"] = self._score_of(bid)
 
-    # ----- adaptive-temperature Boltzmann selection (upstream boltzmann.py) - #
+    # ----- adaptive-temperature weighted parent selection -------------------- #
 
     def _adaptive_temperature(self) -> float:
         sel = self.config["selection"]
@@ -422,15 +498,39 @@ class EvolutionDB:
         new_temp = max(sel["min_temperature"], min(sel["max_temperature"], new_temp))
         return 0.8 * new_temp + 0.2 * base
 
-    def _select_one(self, temperature: float) -> Optional[str]:
+    def _stuck_threshold(self) -> int:
+        conv_cfg = self.config.get("convergence", {})
+        patience = int(conv_cfg.get("no_improve_patience", 5))
+        fraction = float(self.config["selection"].get("stuck_patience_fraction", 0.4))
+        return max(1, int(math.ceil(patience * fraction)))
+
+    def _effective_exploration_rate(self) -> float:
+        sel = self.config["selection"]
+        rate = float(sel["exploration_rate"])
+        streak = int((self.state.get("convergence") or {}).get("no_improve_streak") or 0)
+        if streak >= self._stuck_threshold():
+            rate *= float(sel.get("stuck_exploration_multiplier", 2.0))
+        return min(1.0, max(0.0, rate))
+
+    def _selection_ids(self, island: Optional[int]) -> List[str]:
+        sols = self.state["solutions"]
+        if island is None:
+            return list(sols)
+        if not 0 <= island < self.config["num_islands"]:
+            raise DBError(f"island {island} out of range [0,{self.config['num_islands']})")
+        ids = [sid for sid in self.state["islands"][island] if sid in sols]
+        return ids or list(sols)
+
+    def _select_one(self, temperature: float, island: Optional[int] = None) -> Optional[str]:
         sel = self.config["selection"]
         sols = self.state["solutions"]
         if not sols:
             return None
-        ids = list(sols)
-        if random.random() < sel["exploration_rate"]:
+        ids = self._selection_ids(island)
+        if random.random() < self._effective_exploration_rate():
             return random.choice(ids)
-        elites = [e for e in self.state["elites"] if e in sols]
+        allowed = set(ids)
+        elites = [e for e in self.state["elites"] if e in allowed]
         non_elites = [i for i in ids if i not in set(elites)]
         cand: List[str] = []
         cand.extend(random.sample(elites, min(3, len(elites))))
@@ -443,8 +543,11 @@ class EvolutionDB:
         if not cand:
             cand = ids[:]
         scores = [self._score_of(c) for c in cand]
-        max_s = max(scores)
-        probs = [math.exp((s - max_s) / temperature) for s in scores]
+        temp = max(float(temperature), 1e-6)
+        if max(scores) <= 0:
+            probs = [1.0 for _ in scores]
+        else:
+            probs = [pow(max(s, 0.0) + 1e-9, 1.0 / temp) for s in scores]
         if sel["use_sampling_weight"]:
             power = sel["sampling_weight_power"]
             weights = [
@@ -519,6 +622,7 @@ class EvolutionDB:
             generation=0,
             timestamp=time.time(),
             score=1.0,  # speedup vs itself
+            sample_weight=float(self.config.get("sample_weight", {}).get("base", 1.0)),
             evaluation="seed (baseline)",
             solution=str((dest / "kernel.py").relative_to(self.ws)),
             metadata={
@@ -560,6 +664,9 @@ class EvolutionDB:
 
         island = self._assign_island(args.island)
         parent = None if (args.parent in (None, "null", "None")) else args.parent
+        sample_weight, weight_components = self._compute_sample_weight(
+            parent, float(score), args.generation
+        )
         sol = Solution(
             solution_id=sid,
             parent_id=parent,
@@ -568,6 +675,7 @@ class EvolutionDB:
             iteration=args.generation,
             generation=args.generation,
             timestamp=time.time(),
+            sample_weight=sample_weight,
             score=float(score),
             evaluation=args.evaluation or "",
             solution=str((dest / "kernel.py").relative_to(self.ws)),
@@ -582,8 +690,9 @@ class EvolutionDB:
                 },
                 "optimization": {
                     "action_category": args.action_category or "",
-                    "action_description": "",
+                    "action_description": args.generate_plan or "",
                 },
+                "sampling_weight_components": weight_components,
                 "iteration_ref": args.iteration_ref or "",
             },
         ).to_dict()
@@ -607,15 +716,16 @@ class EvolutionDB:
             "map_elite_feature": sol["metadata"]["MAP_Elite_feature"],
             "occupies_cell": occupies,
             "is_elite": sid in self.state["elites"],
+            "sample_weight": sol["sample_weight"],
         }
 
-    def select_parents(self, n: int) -> List[Dict[str, Any]]:
+    def select_parents(self, n: int, island: Optional[int] = None) -> List[Dict[str, Any]]:
         if not self.state["solutions"]:
             raise DBError("population is empty; import a seed first")
         temp = self._adaptive_temperature()
         out: List[Dict[str, Any]] = []
         for _ in range(n):
-            pid = self._select_one(temp)
+            pid = self._select_one(temp, island=island)
             if pid is None:
                 break
             self.state["solutions"][pid]["sample_cnt"] += 1
@@ -627,6 +737,7 @@ class EvolutionDB:
                     "island_id": s["island_id"],
                     "generation": s["generation"],
                     "code": s["solution"],
+                    "sample_weight": s["sample_weight"],
                     "generate_plan": s["generate_plan"],
                     "action_category": (s["metadata"].get("optimization") or {}).get(
                         "action_category", ""
@@ -716,6 +827,10 @@ class EvolutionDB:
             "elites": list(self.state["elites"]),
             "islands_state": islands_state,
             "feature_stats": fs,
+            "selection": {
+                "temperature": self._adaptive_temperature(),
+                "exploration_rate": self._effective_exploration_rate(),
+            },
             "migration": {"last_migration_generation": self.state["last_migration_generation"]},
             "history": list(self.state["history"]),
             "convergence": dict(self.state["convergence"]),
@@ -752,6 +867,108 @@ class EvolutionDB:
             cur = s["parent_id"]
         return chain
 
+    def _summary_digest(self, data: Any) -> str:
+        if isinstance(data, str):
+            return data
+        if not isinstance(data, dict):
+            return json.dumps(data, ensure_ascii=False)
+        if isinstance(data.get("summary"), str):
+            return data["summary"]
+        parts = []
+        for key in ("worked", "failed", "next_directions", "converging"):
+            if key in data:
+                parts.append(f"{key}: {json.dumps(data[key], ensure_ascii=False)}")
+        return "\n".join(parts) if parts else json.dumps(data, ensure_ascii=False)
+
+    def _child_from_solution(self, sol: Dict[str, Any]) -> str:
+        ref = sol.get("metadata", {}).get("iteration_ref", "")
+        return Path(ref).name if ref else ""
+
+    def _summary_for_solution(self, data: Any, sol: Dict[str, Any], default: str) -> str:
+        if not isinstance(data, dict):
+            return default
+        sid = sol["solution_id"]
+        child = self._child_from_solution(sol)
+        mappings = (
+            data.get("per_child"),
+            data.get("children"),
+            data.get("candidate_summaries"),
+        )
+        for mapping in mappings:
+            if isinstance(mapping, dict):
+                item = mapping.get(sid) or mapping.get(child)
+                if item is not None:
+                    return self._summary_digest(item)
+        for key in ("candidates", "results"):
+            items = data.get(key)
+            if not isinstance(items, list):
+                continue
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                if item.get("solution_id") == sid or item.get("child") == child:
+                    return self._summary_digest(
+                        item.get("summary") or item.get("diagnosis") or item
+                    )
+        return default
+
+    def _lookup_summary_number(
+        self, data: Any, key: str, sol: Dict[str, Any]
+    ) -> Optional[float]:
+        if not isinstance(data, dict):
+            return None
+        mapping = data.get(key)
+        if not isinstance(mapping, dict):
+            return None
+        sid = sol["solution_id"]
+        child = self._child_from_solution(sol)
+        value = mapping.get(sid, mapping.get(child))
+        if value is None:
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    def annotate_generation(self, generation: int, summary_file: str) -> Dict[str, Any]:
+        path = Path(summary_file)
+        if not path.is_absolute():
+            path = self.ws / summary_file
+        if not path.exists():
+            raise NotFound(f"summary file not found: {path}")
+        raw = path.read_text()
+        try:
+            data: Any = json.loads(raw)
+        except json.JSONDecodeError:
+            data = raw
+        default_summary = self._summary_digest(data)
+        updated = 0
+        weights_updated = 0
+        for sol in self.state["solutions"].values():
+            if int(sol.get("generation") or -1) != generation:
+                continue
+            sol["summary"] = self._summary_for_solution(data, sol, default_summary)
+            explicit_weight = self._lookup_summary_number(data, "sampling_weights", sol)
+            if explicit_weight is not None:
+                sol["sample_weight"] = self._clamp_sample_weight(explicit_weight)
+                weights_updated += 1
+            else:
+                multiplier = self._lookup_summary_number(data, "weight_adjustments", sol)
+                if multiplier is not None:
+                    sol["sample_weight"] = self._clamp_sample_weight(
+                        float(sol.get("sample_weight") or 1.0) * multiplier
+                    )
+                    weights_updated += 1
+            self._persist_solution(sol)
+            updated += 1
+        self.save()
+        return {
+            "generation": generation,
+            "solutions_updated": updated,
+            "weights_updated": weights_updated,
+            "summary_file": str(path),
+        }
+
     def summary(self) -> Dict[str, Any]:
         return {
             "generations": len(self.state["history"]),
@@ -762,6 +979,10 @@ class EvolutionDB:
             "best_solution_id": self.state["best_solution_id"],
             "best_score": self.state["best_score"],
             "baseline": self.state["baseline"],
+            "selection": {
+                "temperature": self._adaptive_temperature() if self.state["solutions"] else None,
+                "exploration_rate": self._effective_exploration_rate(),
+            },
             "convergence": self.state["convergence"],
             "history": self.state["history"],
         }
@@ -865,9 +1086,15 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--evidence-file", dest="evidence_file", default=None)
     sp.add_argument("--iteration-ref", dest="iteration_ref", default=None)
 
-    sp = sub.add_parser("select-parents", help="Sample N parents (adaptive Boltzmann).")
+    sp = sub.add_parser("select-parents", help="Sample N parents (adaptive weighted selection).")
     common(sp)
     sp.add_argument("--n", type=int, default=None)
+    sp.add_argument("--island", type=int, default=None)
+
+    sp = sub.add_parser("annotate-generation", help="Write summarizer feedback into generation records.")
+    common(sp)
+    sp.add_argument("--generation", type=int, required=True)
+    sp.add_argument("--summary-file", required=True)
 
     sp = sub.add_parser("checkpoint", help="Finalize a generation.")
     common(sp)
@@ -915,7 +1142,9 @@ def main(argv: Optional[List[str]] = None) -> int:
             _emit(db.add(args), args.json)
         elif args.command == "select-parents":
             n = args.n if args.n is not None else db.config["n_candidates"]
-            _emit(db.select_parents(n), args.json)
+            _emit(db.select_parents(n, island=args.island), args.json)
+        elif args.command == "annotate-generation":
+            _emit(db.annotate_generation(args.generation, args.summary_file), args.json)
         elif args.command == "checkpoint":
             _emit(db.checkpoint(args.generation, target_met=args.target_met), args.json)
         elif args.command == "best":

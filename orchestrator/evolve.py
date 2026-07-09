@@ -14,6 +14,7 @@ import argparse
 import json
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
@@ -116,6 +117,10 @@ def main() -> int:
         cwd=REPO_ROOT,
         as_json=True,
     )
+    evolve_config = db(["config", "--workspace", str(workspace)], cwd=REPO_ROOT, as_json=True)
+    executor_config = evolve_config.get("executor") or {}
+    react_threshold = float(executor_config.get("react_score_threshold", 2.0))
+    parent_by_id = {p.get("solution_id"): p for p in parents if isinstance(p, dict)}
 
     planner_dir = workspace / "iteration" / str(generation) / "planner"
     planner_payload = {
@@ -134,11 +139,20 @@ def main() -> int:
     if not isinstance(strategies, list) or not strategies:
         raise RuntimeError("planner output must contain a non-empty strategies list")
 
-    results: list[dict[str, Any]] = []
+    children: list[dict[str, Any]] = []
     for index, strategy in enumerate(strategies):
         child = strategy_child(strategy, generation, index)
         child_dir = workspace / "iteration" / str(generation) / "executor" / child
         child_dir.mkdir(parents=True, exist_ok=True)
+        parent_id = strategy.get("parent_id")
+        parent_record = parent_by_id.get(parent_id)
+        if parent_record is None and index < len(parents):
+            parent_record = parents[index]
+            parent_id = parent_id or parent_record.get("solution_id")
+        parent_score = float((parent_record or {}).get("score") or 0.0)
+        execution_mode = "react" if parent_score >= react_threshold else "chat"
+        parent_code = (parent_record or {}).get("code")
+        parent_code_path = str((workspace / parent_code).resolve()) if parent_code else ""
 
         executor_payload = {
             "workspace_path": str(workspace),
@@ -146,22 +160,43 @@ def main() -> int:
             "generation": generation,
             "child": child,
             "strategy": strategy,
-            "parent_id": strategy.get("parent_id"),
+            "parent_id": parent_id,
+            "parent_score": parent_score,
+            "parent_code": parent_code_path,
+            "execution_mode": execution_mode,
+            "executor_config": executor_config,
             "candidate_dir": str(child_dir),
             "candidate_code": str(child_dir / "kernel.py"),
             "candidate_solution": str(child_dir / "solution.json"),
         }
         write_json(child_dir / "executor_context.json", executor_payload)
-        executor_result = run_json(args.executor_cmd, executor_payload, cwd=workspace)
-        write_json(child_dir / "executor_result.json", executor_result)
+        children.append(
+            {
+                "index": index,
+                "child": child,
+                "child_dir": child_dir,
+                "strategy": strategy,
+                "parent_id": parent_id,
+                "executor_payload": executor_payload,
+            }
+        )
 
+    def run_executor(item: dict[str, Any]) -> dict[str, Any]:
+        result = run_json(args.executor_cmd, item["executor_payload"], cwd=workspace)
+        write_json(item["child_dir"] / "executor_result.json", result)
+        return {**item, "executor_result": result}
+
+    def run_evaluator(item: dict[str, Any]) -> dict[str, Any]:
+        child = item["child"]
+        child_dir = item["child_dir"]
+        executor_result = item["executor_result"]
         candidate_code = executor_result.get("candidate_code") or str(child_dir / "kernel.py")
         evaluator_payload = {
             "workspace_path": str(workspace),
             "repo_root": str(REPO_ROOT),
             "generation": generation,
             "child": child,
-            "strategy": strategy,
+            "strategy": item["strategy"],
             "executor_result": executor_result,
             "candidate_code": candidate_code,
             "profiles_dir": str(workspace / "profiles" / str(generation) / child),
@@ -169,7 +204,34 @@ def main() -> int:
         write_json(child_dir / "evaluator_context.json", evaluator_payload)
         evaluator_result = run_json(args.evaluator_cmd, evaluator_payload, cwd=workspace)
         write_json(child_dir / "evaluator_result.json", evaluator_result)
+        return {
+            **item,
+            "candidate_code": candidate_code,
+            "evaluator_result": evaluator_result,
+        }
 
+    max_workers = max(1, len(children))
+    executor_results: list[dict[str, Any]] = []
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = [pool.submit(run_executor, item) for item in children]
+        for future in as_completed(futures):
+            executor_results.append(future.result())
+    executor_results.sort(key=lambda item: item["index"])
+
+    evaluated_results: list[dict[str, Any]] = []
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = [pool.submit(run_evaluator, item) for item in executor_results]
+        for future in as_completed(futures):
+            evaluated_results.append(future.result())
+    evaluated_results.sort(key=lambda item: item["index"])
+
+    results: list[dict[str, Any]] = []
+    for item in evaluated_results:
+        child = item["child"]
+        strategy = item["strategy"]
+        executor_result = item["executor_result"]
+        evaluator_result = item["evaluator_result"]
+        candidate_code = item["candidate_code"]
         correctness = evaluator_result.get("correctness") or evaluator_result.get("status") or "FAIL"
         latency = evaluator_result.get("latency_us")
         score = evaluator_result.get("score")
@@ -181,7 +243,7 @@ def main() -> int:
             "--generation",
             str(generation),
             "--parent",
-            str(strategy.get("parent_id") or "null"),
+            str(item.get("parent_id") or "null"),
             "--code",
             str(Path(candidate_code).resolve()),
             "--lang",
@@ -222,7 +284,21 @@ def main() -> int:
     write_json(summarizer_dir / "summarizer_context.json", summary_payload)
     if args.summarizer_cmd:
         summary = run_json(args.summarizer_cmd, summary_payload, cwd=workspace)
-        write_json(summarizer_dir / "summary.json", summary)
+        summary_file = summarizer_dir / "summary.json"
+        write_json(summary_file, summary)
+        db(
+            [
+                "annotate-generation",
+                "--workspace",
+                str(workspace),
+                "--generation",
+                str(generation),
+                "--summary-file",
+                str(summary_file),
+            ],
+            cwd=REPO_ROOT,
+            as_json=True,
+        )
 
     checkpoint_args = ["checkpoint", "--workspace", str(workspace), "--generation", str(generation)]
     if args.target_met:

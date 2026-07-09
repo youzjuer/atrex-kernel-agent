@@ -103,7 +103,7 @@ class TestInitAndSeed(DBTestBase):
         self.assertTrue((self.ws / "database" / "config.json").exists())
         self.assertTrue((self.ws / "database" / "solutions").is_dir())
         self.assertTrue((self.ws / "database" / "checkpoints").is_dir())
-        self.assertEqual(db.config["num_islands"], 3)
+        self.assertEqual(db.config["num_islands"], 1)
 
     def test_import_seed(self):
         db = self._init()
@@ -143,6 +143,16 @@ class TestAdd(DBTestBase):
         res = db.add(make_add_ns(code="c3.py", generation=1, score=5.5))
         self.assertEqual(res["score"], 5.5)
 
+    def test_sample_weight_snowballs_from_parent_and_improvement(self):
+        db = self._init()
+        seed = db.import_seed("memory/v0.json", "kernel.py")["solution_id"]
+        db.load()
+        self._write_kernel("w1.py", "def run():\n    return 4\n")
+        res = db.add(make_add_ns(code="w1.py", generation=1, parent=seed, latency_us=500.0))
+        self.assertGreater(res["sample_weight"], 1.0)
+        comps = db.state["solutions"][res["solution_id"]]["metadata"]["sampling_weight_components"]
+        self.assertGreater(comps["relative_improvement"], 0.0)
+
 
 class TestMapElitesAndElites(DBTestBase):
     def _seed_sol(self, db, sid, score, key, island=0):
@@ -156,7 +166,7 @@ class TestMapElitesAndElites(DBTestBase):
             "summary": "",
             "generate_plan": "",
             "sample_cnt": 0,
-            "sample_weight": 0.0,
+            "sample_weight": 1.0,
             "solution": "",
         }
         db.state["solutions"][sid] = sol
@@ -383,7 +393,7 @@ class TestGenerationFanout(DBTestBase):
 
 
 class TestIslandsSelectionLineage(DBTestBase):
-    """M4: multi-island, migration cadence, adaptive Boltzmann, deep lineage."""
+    """M4: multi-island, migration cadence, adaptive weighted selection, deep lineage."""
 
     def _add_child(self, db, name, body, gen, parent, **over):
         self._write_kernel(name, body)
@@ -433,7 +443,7 @@ class TestIslandsSelectionLineage(DBTestBase):
         # diversity == 0 -> new_temp = clamp(1*(0)) = 0.5 -> blend 0.8*0.5 + 0.2*1.0 = 0.6
         self.assertAlmostEqual(db._adaptive_temperature(), 0.6, places=6)
 
-    def test_boltzmann_favors_high_score(self):
+    def test_weighted_selection_favors_high_score(self):
         db = self._init(num_islands=1, population_size=100)
         db.config["selection"]["exploration_rate"] = 0.0
         db._write_config()
@@ -445,6 +455,12 @@ class TestIslandsSelectionLineage(DBTestBase):
             pick = db._select_one(0.5)
             counts[pick] = counts.get(pick, 0) + 1
         self.assertGreater(counts.get(hi, 0), 90)  # high score dominates
+
+    def test_exploration_rate_doubles_when_stuck(self):
+        db = self._init()
+        self.assertAlmostEqual(db._effective_exploration_rate(), 0.1)
+        db.state["convergence"]["no_improve_streak"] = 2
+        self.assertAlmostEqual(db._effective_exploration_rate(), 0.2)
 
     def test_deep_lineage_across_generations(self):
         db = self._init()
@@ -476,6 +492,31 @@ class TestIslandsSelectionLineage(DBTestBase):
         self.assertGreaterEqual(len(meta["islands_state"][1]["members"]), 1)
         self.assertEqual(meta["best_solution_id"], db.state["best_solution_id"])
         self.assertIn("feature_map", meta["islands_state"][0])
+
+    def test_annotate_generation_updates_summary_and_weight(self):
+        db = self._init()
+        seed = db.import_seed("memory/v0.json", "kernel.py")["solution_id"]
+        db.load()
+        child = self._add_child(
+            db,
+            "ann.py",
+            "def run():\n    return 5\n" + "a" * 20,
+            1,
+            seed,
+            score=2.0,
+        )["solution_id"]
+        summary = self.ws / "summary.json"
+        summary.write_text(json.dumps({
+            "summary": "generation diagnosis",
+            "candidate_summaries": {
+                child: {"summary": "child-specific diagnosis"}
+            },
+            "sampling_weights": {child: 4.0},
+        }))
+        res = db.annotate_generation(1, str(summary))
+        self.assertEqual(res["solutions_updated"], 1)
+        self.assertEqual(db.state["solutions"][child]["summary"], "child-specific diagnosis")
+        self.assertEqual(db.state["solutions"][child]["sample_weight"], 4.0)
 
 
 class TestCLISmoke(DBTestBase):

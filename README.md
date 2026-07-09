@@ -13,7 +13,7 @@ AKA is an end-to-end Agent project for GPU kernel implementation, analysis, prof
 - Runs Roofline analysis and sets auditable performance targets.
 - Implements a correct baseline kernel before entering optimization.
 - Runs the profile-driven optimization loop: profile with `ncu` or `rocprofv3`, extract bottleneck evidence, query `gpu-wiki` / reference projects / web sources for relevant optimization knowledge, write an evidence-based plan, apply one optimization category, validate correctness and performance, record memory, commit, then repeat until Stop Conditions are met.
-- Optionally runs an evolutionary **Plan-Execute-Summary** full-agent loop: select parents from an island-model MAP-Elites population, fan out N candidates, evaluate them with the immutable benchmark harness, admit by score/diversity, summarize, checkpoint, and repeat. At `n_candidates = 1` it reduces to the single-trajectory loop. See [`docs/full-agent-refactor-plan.md`](docs/full-agent-refactor-plan.md) and [`docs/evolution-db-design.md`](docs/evolution-db-design.md).
+- Optionally delegates full-agent **Plan-Execute-Summary** search to the local MLSys26 FlashInfer LoongFlow runner, matching `mlsys26-flashinfer-contest/full-agent/moe/run_moe.sh`. See [`skills/gpu-kernel-evolve/SKILL.md`](skills/gpu-kernel-evolve/SKILL.md).
 - Records plans, profile artifacts, structured memory, reports, and Git commits for every accepted iteration.
 
 For the full architecture and workflow design, see [`docs/design.md`](docs/design.md).
@@ -85,6 +85,22 @@ Example:
 
 The Agent will initialize a workspace, source hardware specs from `gpu-wiki`, write the workspace configuration, build a baseline, profile the kernel, and iterate until the configured Stop Conditions are met.
 
+### Full-Agent PES Quick Start
+
+When a request includes the keyword `pes`, Atrex treats it as a request for the real
+Plan-Execute-Summary full-agent flow, not the linear optimizer and not a manual single-candidate
+loop. For the supported MLSys26 FlashInfer MoE task:
+
+```bash
+export LLM_API_KEY=sk-...
+bash orchestrator/pes.sh moe
+```
+
+`orchestrator/pes.sh` delegates to `orchestrator/run_moe_full_agent.sh`, which runs the local
+`mlsys26-flashinfer-contest/full-agent/moe/run_moe.sh` LoongFlow runner. LoongFlow owns planner,
+executor, evaluator, summary, population memory, lineage, reflections, checkpoints, and target-score
+termination.
+
 ## Main Files
 
 ```text
@@ -92,7 +108,7 @@ The Agent will initialize a workspace, source hardware specs from `gpu-wiki`, wr
 ├── SKILL.md                         # Top-level gpu-kernel-optimizer router manifest
 ├── install.sh                       # Installer / uninstaller
 ├── docs/                            # Detailed project design docs
-├── orchestrator/                    # sol-execbench session orchestration, including optional PES runner
+├── orchestrator/                    # sol-execbench orchestration and LoongFlow full-agent bridge
 ├── reference/                       # Workspace, plan, memory, and profiling templates
 ├── skills/                          # Baseline, optimizer, restart, and output-contract modules
 ├── tools/                           # Profiling, utilization, memory, and measurement tools

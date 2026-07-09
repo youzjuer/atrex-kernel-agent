@@ -34,14 +34,15 @@
 - memory_manager.py / evolution_db.py
 
 ## Evolve Config
-Used only when Stage 2 runs the full-agent PES search shape.
+Used only when Stage 2 runs a full-agent PES search shape.
 
 - enabled: false
-- n_candidates: 3
-- max_generations: 30
-- no_improve_patience: 5
-- score_metric: baseline_geomean_latency_us / candidate_geomean_latency_us
-- state_source: database/ (single source of truth when enabled)
+- keyword_trigger: pes
+- recommended_entrypoint: orchestrator/pes.sh moe
+- recommended_moe_runner: orchestrator/run_moe_full_agent.sh
+- recommended_state_source: MLSys26 FlashInfer LoongFlow run directory
+- compatibility_runner: orchestrator/evolve.py
+- compatibility_state_source: database/ (experimental JSON-hook runner only)
 
 ## Stop Conditions
 The following targets are filled by Step 0 after calculation as `hardware peak * 90%`. Prefer measured maxima from gpu-wiki when available; otherwise use hardware spec values.

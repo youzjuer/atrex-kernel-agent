@@ -1,6 +1,6 @@
 {
   "population_size": 100,
-  "num_islands": 3,
+  "num_islands": 1,
   "elite_archive_size": 50,
   "migration_interval": 10,
   "migration_rate": 0.2,
@@ -12,9 +12,25 @@
     "initial_temperature": 1.0,
     "min_temperature": 0.5,
     "max_temperature": 2.0,
-    "exploration_rate": 0.2,
+    "exploration_rate": 0.1,
+    "stuck_exploration_multiplier": 2.0,
+    "stuck_patience_fraction": 0.4,
     "use_sampling_weight": true,
     "sampling_weight_power": 1.0
+  },
+  "sample_weight": {
+    "base": 1.0,
+    "inheritance_gain": 0.35,
+    "lineage_gain": 0.08,
+    "relative_improvement_gain": 1.0,
+    "absolute_quality_gain": 0.25,
+    "time_decay": 0.9,
+    "max": 10.0
+  },
+  "executor": {
+    "react_score_threshold": 2.0,
+    "chat_max_rounds": 1,
+    "react_max_rounds": 6
   },
   "n_candidates": 3,
   "budget": {

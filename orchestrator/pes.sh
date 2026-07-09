@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat >&2 <<'USAGE'
+Usage:
+  bash orchestrator/pes.sh [moe] [--dry-run] [-- <runner args>]
+  PES_TASK=moe bash orchestrator/pes.sh
+
+Purpose:
+  Atrex PES keyword entry point. This intentionally delegates to a real
+  full-agent PES runner instead of running the experimental JSON-hook runner or
+  a hand-written single-trajectory optimization loop.
+
+Supported tasks:
+  moe    MLSys26 FlashInfer MoE LoongFlow runner
+
+Required for real runs:
+  LLM_API_KEY
+
+Optional:
+  MLSYS26_FLASHINFER_CONTEST_ROOT=/path/to/mlsys26-flashinfer-contest
+USAGE
+}
+
+task="${PES_TASK:-moe}"
+dry_run=0
+runner_args=()
+
+while (($#)); do
+  case "$1" in
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    --dry-run)
+      dry_run=1
+      shift
+      ;;
+    --task)
+      if (($# < 2)); then
+        echo "error: --task requires a value" >&2
+        exit 2
+      fi
+      task="$2"
+      shift 2
+      ;;
+    --)
+      shift
+      runner_args+=("$@")
+      break
+      ;;
+    moe|flashinfer-moe|mlsys26-moe)
+      task="moe"
+      shift
+      ;;
+    *)
+      runner_args+=("$1")
+      shift
+      ;;
+  esac
+done
+
+case "$task" in
+  moe)
+    runner="orchestrator/run_moe_full_agent.sh"
+    ;;
+  *)
+    echo "error: unsupported PES task '$task'" >&2
+    echo "Atrex will not fall back to the linear optimizer or experimental JSON-hook runner for a 'pes' request." >&2
+    usage
+    exit 2
+    ;;
+esac
+
+if [[ ! -f "$runner" ]]; then
+  echo "error: PES runner not found: $runner" >&2
+  exit 1
+fi
+
+if ((dry_run)); then
+  echo "[Atrex PES] task=$task"
+  echo "[Atrex PES] runner=$runner"
+  echo "[Atrex PES] runner_args=${runner_args[*]-}"
+  exit 0
+fi
+
+: "${LLM_API_KEY:?LLM_API_KEY not set. export LLM_API_KEY=sk-... before running PES.}"
+
+exec bash "$runner" "${runner_args[@]}"
