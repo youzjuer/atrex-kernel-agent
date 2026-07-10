@@ -11,7 +11,8 @@ CONTEST_ROOT="${MLSYS26_FLASHINFER_CONTEST_ROOT:-/home/youchunbo/code/mlsys26-fl
 PROJECT_ROOT="${CONTEST_ROOT}/full-agent/moe/agent/loongflow"
 RUN_DIR="${SOL58_PES_RUN_DIR:-/tmp/sol58_pes_run}"
 
-export PYTHONPATH="${PROJECT_ROOT}:${PROJECT_ROOT}/src:${PYTHONPATH:-}"
+export PYTHONPATH="${SCRIPT_DIR}/loongflow_compat:${PROJECT_ROOT}:${PROJECT_ROOT}/src:${PYTHONPATH:-}"
+export ATREX_LITELLM_DROP_PARAMS="${ATREX_LITELLM_DROP_PARAMS:-1}"
 export SOL58_PROBLEM_DIR="${SOL58_PROBLEM_DIR:-/home/youchunbo/code/sol-problems/058_moe_expert_token_radix_sort_with_prefix_sum}"
 export SOL58_EVAL_ROOT="${SOL58_EVAL_ROOT:-/tmp/sol58_pes_eval}"
 export SOL58_TARGET_LATENCY_MS="${SOL58_TARGET_LATENCY_MS:-0.006797}"
@@ -53,6 +54,7 @@ if [[ "${SOL58_SKIP_LLM_PREFLIGHT:-0}" != "1" ]]; then
   echo "[Atrex] Checking LLM endpoint before SOL evaluator..."
   python - <<'PY'
 import os
+import re
 import sys
 
 from litellm import completion
@@ -63,15 +65,21 @@ try:
         api_key=os.environ["LLM_API_KEY"],
         api_base=os.environ["LLM_BASE_URL"],
         messages=[{"role": "user", "content": "Reply OK."}],
-        max_tokens=2,
-        temperature=0,
+        max_tokens=4,
+        temperature=float(os.environ.get("LLM_TEMPERATURE", "1")),
         timeout=min(60, int(os.environ.get("LLM_TIMEOUT", "60"))),
     )
-except Exception:
+except Exception as exc:
+    api_key = os.environ.get("LLM_API_KEY", "")
+    detail = str(exc)
+    if api_key:
+        detail = detail.replace(api_key, "<redacted>")
+    detail = re.sub(r"([A-Za-z0-9]{4,})\*+([A-Za-z0-9]{4,})", r"\1****\2", detail)
     print(
         "error: LLM preflight failed. Check LLM_API_KEY, LLM_BASE_URL, and LLM_MODEL before running SOL58 PES.",
         file=sys.stderr,
     )
+    print(detail[:1200], file=sys.stderr)
     raise SystemExit(1)
 PY
 fi
