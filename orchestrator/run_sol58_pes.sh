@@ -31,6 +31,7 @@ export LLM_TEMPERATURE="${LLM_TEMPERATURE:-0.9}"
 export LLM_CONTEXT_LENGTH="${LLM_CONTEXT_LENGTH:-128000}"
 export LLM_MAX_TOKENS="${LLM_MAX_TOKENS:-32768}"
 export LLM_TIMEOUT="${LLM_TIMEOUT:-1200}"
+export ATREX_PES_MAX_PARALLEL_CANDIDATES="${ATREX_PES_MAX_PARALLEL_CANDIDATES:-1}"
 
 if [[ ! -f "${PROJECT_ROOT}/agents/math_agent/math_evolve_agent.py" ]]; then
   echo "error: LoongFlow math_evolve_agent.py not found under ${PROJECT_ROOT}" >&2
