@@ -4,8 +4,8 @@ set -euo pipefail
 usage() {
   cat >&2 <<'USAGE'
 Usage:
-  bash orchestrator/pes.sh [moe] [--dry-run] [-- <runner args>]
-  PES_TASK=moe bash orchestrator/pes.sh
+  bash orchestrator/pes.sh [moe|sol58] [--dry-run] [-- <runner args>]
+  PES_TASK=sol58 bash orchestrator/pes.sh
 
 Purpose:
   Atrex PES keyword entry point. This intentionally delegates to a real
@@ -13,13 +13,16 @@ Purpose:
   a hand-written single-trajectory optimization loop.
 
 Supported tasks:
-  moe    MLSys26 FlashInfer MoE LoongFlow runner
+  moe      MLSys26 FlashInfer MoE LoongFlow runner
+  sol58    SOL-ExecBench kernel 58 LoongFlow runner
 
 Required for real runs:
   LLM_API_KEY
 
 Optional:
   MLSYS26_FLASHINFER_CONTEST_ROOT=/path/to/mlsys26-flashinfer-contest
+  SOL58_PROBLEM_DIR=/path/to/058_moe_expert_token_radix_sort_with_prefix_sum
+  SOL58_TARGET_LATENCY_MS=0.006797
 USAGE
 }
 
@@ -54,6 +57,10 @@ while (($#)); do
       task="moe"
       shift
       ;;
+    sol58|kernel58|sol-execbench-58|sol_execbench_58)
+      task="sol58"
+      shift
+      ;;
     *)
       runner_args+=("$1")
       shift
@@ -64,6 +71,9 @@ done
 case "$task" in
   moe)
     runner="orchestrator/run_moe_full_agent.sh"
+    ;;
+  sol58)
+    runner="orchestrator/run_sol58_pes.sh"
     ;;
   *)
     echo "error: unsupported PES task '$task'" >&2

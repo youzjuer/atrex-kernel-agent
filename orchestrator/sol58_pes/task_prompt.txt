@@ -1,0 +1,47 @@
+You are optimizing SOL-ExecBench kernel 58 for the NVIDIA B200 leaderboard.
+
+Objective:
+- Beat Databricks rank 4 for this kernel.
+- Target latency: geomean latency strictly below 0.006797 ms.
+- Evaluator score is target_latency_ms / measured_geomean_latency_ms.
+- A score >= 1.0 means the target is met.
+
+Problem:
+- Definition: 058_moe_expert_token_radix_sort_with_prefix_sum.
+- Input: topk_idx, int32 tensor with shape [batch_size, seq_len, 8].
+- Values are expert ids in [0, 255].
+- Output 1: sorted_token_indices, int32 tensor with shape [num_tokens], where num_tokens = batch_size * seq_len * 8.
+- Output 2: expert_offsets, int32 tensor with shape [257].
+- Semantics: stable sort flattened assignment indices by expert id, plus cumulative histogram offsets.
+- Reference behavior is equivalent to:
+  flat = topk_idx.reshape(-1)
+  _, sorted_token_indices = flat.sort(stable=True)
+  expert_offsets[0] = 0
+  expert_offsets[1:] = bincount(flat, minlength=256).cumsum(0)
+
+Workloads:
+- The full workload set has 16 shapes and every one is a hard correctness gate.
+- Representative num_tokens values include 16384, 65536, 32768, 17408, 16896, 8704, 32768, and nearby MoE routing sizes.
+- Do not optimize only one shape.
+
+Output contract:
+- Produce the complete contents of a single CUDA C++ source file named kernel.cu.
+- Do not output a diff.
+- Do not output Python, Triton, JSON, or explanatory text as the solution.
+- The source must define a destination-passing-style function:
+  void run(torch::Tensor topk_idx, torch::Tensor sorted_token_indices, torch::Tensor expert_offsets)
+- The source must include a PYBIND11_MODULE binding for run.
+- If you use a fenced block, use ```python or ```c++ so the executor extracts only the source body.
+
+Evaluation contract:
+- The evaluator writes your generated text to kernel.cu, creates a SOL-ExecBench CUDA C++ solution.json, and runs the real sol-execbench CLI over every workload.
+- Any compilation failure, runtime failure, wrong answer, missing workload, reward-hack detection, or partial output gives score 0.
+- Only all-pass candidates receive latency score.
+
+Search guidance:
+- The initial parent is a CUDA Graph tiled stable counting-sort implementation.
+- It uses per-tile histograms, a block-prefix pass, a 256-entry expert prefix pass, and stable scatter.
+- Valid directions include reducing launch/graph overhead, specializing small vs large token counts inside run(), reducing atomics in scatter, using block/warp-local prefix layouts, improving persistent scratch handling, and simplifying graph update overhead.
+- Preserve stability. Unstable sorting by expert id is incorrect even if counts match.
+- Correctness is the hard gate; performance only matters after all 16 workloads pass.
+

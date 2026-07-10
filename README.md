@@ -89,17 +89,19 @@ The Agent will initialize a workspace, source hardware specs from `gpu-wiki`, wr
 
 When a request includes the keyword `pes`, Atrex treats it as a request for the real
 Plan-Execute-Summary full-agent flow, not the linear optimizer and not a manual single-candidate
-loop. For the supported MLSys26 FlashInfer MoE task:
+loop. Supported real PES tasks include MLSys26 FlashInfer MoE and SOL-ExecBench kernel 58:
 
 ```bash
 export LLM_API_KEY=sk-...
 bash orchestrator/pes.sh moe
+bash orchestrator/pes.sh sol58
 ```
 
-`orchestrator/pes.sh` delegates to `orchestrator/run_moe_full_agent.sh`, which runs the local
-`mlsys26-flashinfer-contest/full-agent/moe/run_moe.sh` LoongFlow runner. LoongFlow owns planner,
-executor, evaluator, summary, population memory, lineage, reflections, checkpoints, and target-score
-termination.
+`orchestrator/pes.sh` delegates to task-specific LoongFlow bridges. `moe` runs the local
+`mlsys26-flashinfer-contest/full-agent/moe/run_moe.sh` runner. `sol58` runs
+`orchestrator/run_sol58_pes.sh`, using the same LoongFlow `math_evolve_agent.py` with a
+SOL-ExecBench evaluator. LoongFlow owns planner, executor, evaluator, summary, population memory,
+lineage, reflections, checkpoints, and target-score termination.
 
 ## Main Files
 

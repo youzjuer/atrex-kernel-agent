@@ -10,8 +10,8 @@ For the full stage-by-stage workflow, read the skill files referenced below.
 - If the user prompt contains `pes`, `PES`, `full-agent PES`, `Plan-Execute-Summary`, `pes优化`,
   or `完整pes流程`, the agent MUST route to the real full-agent PES workflow in
   `skills/gpu-kernel-evolve/SKILL.md`.
-- For the supported MLSys26 FlashInfer MoE path, the entry point is
-  `bash orchestrator/pes.sh moe`.
+- Supported real PES entry points include `bash orchestrator/pes.sh moe` and
+  `bash orchestrator/pes.sh sol58`.
 - A `pes` request MUST NOT be satisfied by manual single-candidate edits, by
   `orchestrator/optimize.py`, or by `orchestrator/evolve.py` unless the user explicitly asks for the
   experimental JSON-hook runner.

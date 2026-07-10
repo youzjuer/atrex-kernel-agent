@@ -112,17 +112,20 @@ Each iteration must use official profiler evidence, change exactly one optimizat
 
 Path: `skills/gpu-kernel-evolve/SKILL.md`
 
-This optional Stage 2 search shape delegates to the local MLSys26 FlashInfer full-agent LoongFlow
-runner. The recommended MoE path mirrors
+This optional Stage 2 search shape delegates to real LoongFlow full-agent runners. The recommended
+MoE path mirrors
 `mlsys26-flashinfer-contest/full-agent/moe/run_moe.sh`: render the LoongFlow YAML task config, pass
 `task_prompt.txt`, the initial task JSON, and `eval_program_modal.py` to
 `agents/math_agent/math_evolve_agent.py`, then let LoongFlow own PES state, worker registration,
-evaluation, checkpointing, and target-score termination.
+evaluation, checkpointing, and target-score termination. The SOL-ExecBench kernel 58 path uses the
+same LoongFlow runner through `orchestrator/run_sol58_pes.sh`, with task files in
+`orchestrator/sol58_pes/`.
 
 The keyword `pes` is the hard trigger for this mode. Atrex routes it through:
 
 ```bash
 bash orchestrator/pes.sh moe
+bash orchestrator/pes.sh sol58
 ```
 
 `orchestrator/pes.sh` is deliberately narrow: supported tasks delegate to real LoongFlow full-agent

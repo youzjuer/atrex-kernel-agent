@@ -1,0 +1,81 @@
+# SOL-ExecBench kernel 58 LoongFlow PES configuration.
+workspace_path: "${SOL58_PES_WORKSPACE}"
+
+logger:
+  level: "INFO"
+  console_logging: true
+  file_logging: true
+  log_path: "${SOL58_PES_WORKSPACE}/logs"
+  filename: "sol58-pes.log"
+
+llm_config:
+  url: "${LLM_BASE_URL}"
+  api_key: "${LLM_API_KEY}"
+  model: "${LLM_MODEL}"
+  temperature: ${LLM_TEMPERATURE}
+  context_length: ${LLM_CONTEXT_LENGTH}
+  max_tokens: ${LLM_MAX_TOKENS}
+  timeout: ${LLM_TIMEOUT}
+
+planners:
+  evolve_planner:
+    react_max_steps: 5
+
+executors:
+  evolve_executor_react:
+    parallel_candidates: 1
+    max_rounds: 3
+    react_max_steps: 10
+
+  evolve_executor_chat:
+    max_rounds: 3
+
+  evolve_executor_fuse:
+    max_rounds: 3
+    react_max_steps: 10
+    score_threshold: 0.99
+
+summarizers:
+  evolve_summary:
+    react_max_steps: 5
+
+evolve:
+  task_name: "sol_execbench_kernel_58_b200"
+  task: |
+    Optimize SOL-ExecBench kernel 58:
+    058_moe_expert_token_radix_sort_with_prefix_sum.
+
+  planner_name: "evolve_planner"
+  executor_name: "evolve_executor_fuse"
+  summary_name: "evolve_summary"
+
+  max_iterations: ${SOL58_MAX_ITERATIONS}
+  target_score: 1.0
+  concurrency: ${SOL58_PES_CONCURRENCY}
+
+  # initial_score is intentionally omitted. The LoongFlow runner default is None,
+  # which makes PES evaluate initial_kernel.cu before the first Plan step.
+  initial_evaluation: ""
+
+  evaluator:
+    timeout: ${SOL58_EVAL_TIMEOUT}
+
+  database:
+    storage_type: "in_memory"
+    num_islands: ${SOL58_NUM_ISLANDS}
+    population_size: 100
+    elite_archive_size: 50
+    use_sampling_weight: true
+    sampling_weight_power: 2
+    exploration_rate: 0.1
+    migration_interval: 10
+    migration_rate: 0.2
+    boltzmann_temperature: 1.0
+    feature_bins: 8
+    feature_dimensions:
+      - "complexity"
+      - "diversity"
+      - "score"
+    feature_scaling_method: "minmax"
+    checkpoint_interval: 1
+    output_path: "${SOL58_PES_WORKSPACE}/database/checkpoints"

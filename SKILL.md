@@ -68,15 +68,18 @@ If the user prompt contains the standalone keyword `pes` / `PES`, `full-agent PE
 `Plan-Execute-Summary`, or Chinese phrasing such as `pes优化`, `完整pes流程`, or
 `进化式PES`, route Stage 2 to the **real full-agent PES workflow** immediately.
 
-For the currently supported MLSys26 FlashInfer MoE task, the only valid PES entry point is:
+Supported real PES entry points:
 
 ```bash
 bash orchestrator/pes.sh moe
+bash orchestrator/pes.sh sol58
 ```
 
-This command delegates to `orchestrator/run_moe_full_agent.sh`, which in turn invokes the local
-`mlsys26-flashinfer-contest/full-agent/moe/run_moe.sh` LoongFlow runner. A `pes` request must not be
-satisfied by manually editing one candidate, by the linear profile optimizer, or by
+`moe` delegates to `orchestrator/run_moe_full_agent.sh`, which in turn invokes the local
+`mlsys26-flashinfer-contest/full-agent/moe/run_moe.sh` LoongFlow runner. `sol58` delegates to
+`orchestrator/run_sol58_pes.sh`, which runs the same LoongFlow `math_evolve_agent.py` with a
+SOL-ExecBench kernel 58 task prompt, initial CUDA C++ seed, and SOL evaluator. A `pes` request must
+not be satisfied by manually editing one candidate, by the linear profile optimizer, or by
 `orchestrator/evolve.py` unless the user explicitly asks for the experimental JSON-hook runner.
 
 If the requested task has no supported LoongFlow PES runner, stop and report that no real PES bridge
@@ -227,12 +230,12 @@ Two search shapes are available for Stage 2:
   the current orchestrator default. Each fresh session performs exactly one profile -> edit ->
   validate -> bench cycle.
 - **Full-agent PES / evolutionary** — [gpu-kernel-evolve](skills/gpu-kernel-evolve/SKILL.md):
-  delegate to the local MLSys26 FlashInfer LoongFlow full-agent runner, matching
-  `mlsys26-flashinfer-contest/full-agent/moe/run_moe.sh` (YAML config + task prompt + initial JSON +
-  evaluator program -> `math_evolve_agent.py`).
+  delegate to a real LoongFlow full-agent runner. Supported tasks include the local MLSys26
+  FlashInfer MoE runner and SOL-ExecBench kernel 58 (`orchestrator/run_sol58_pes.sh`).
 
 When the user includes the keyword `pes`, this full-agent PES path is mandatory. The main agent must
-run or instruct the user to run `bash orchestrator/pes.sh moe` for the supported MoE path, and must not
+run or instruct the user to run `bash orchestrator/pes.sh moe` or `bash orchestrator/pes.sh sol58`
+for supported paths, and must not
 substitute a hand-driven Plan/Execute/Evaluate loop.
 
 **Bottleneck / Roofline analysis**: inlined in this router — see the **Step 0** section above. There is no separate helper skill.
@@ -261,6 +264,9 @@ python orchestrator/optimize.py \
 # Full-agent MoE LoongFlow PES run (mandatory when the user says "pes"):
 export LLM_API_KEY=sk-...
 bash orchestrator/pes.sh moe
+
+# Full-agent SOL-ExecBench kernel 58 LoongFlow PES run:
+bash orchestrator/pes.sh sol58
 ```
 
 `--op-dir` is the only op input: the workspace name (dir basename), the kernel/layer to optimize

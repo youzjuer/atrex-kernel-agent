@@ -48,6 +48,13 @@ export LLM_API_KEY=sk-...
 bash orchestrator/pes.sh moe
 ```
 
+For SOL-ExecBench kernel 58, run:
+
+```bash
+export LLM_API_KEY=sk-...
+bash orchestrator/pes.sh sol58
+```
+
 Optional override when the contest checkout is not at the default path:
 
 ```bash
@@ -55,12 +62,18 @@ export MLSYS26_FLASHINFER_CONTEST_ROOT=/path/to/mlsys26-flashinfer-contest
 bash orchestrator/pes.sh moe
 ```
 
-This bridge intentionally calls the local contest runner directly, so the authoritative config,
+The MoE bridge intentionally calls the local contest runner directly, so the authoritative config,
 prompts, evaluator, and LoongFlow implementation stay under:
 
 ```text
 $MLSYS26_FLASHINFER_CONTEST_ROOT/full-agent/moe/
 ```
+
+The SOL58 bridge keeps its task files under `orchestrator/sol58_pes/` and runs the local LoongFlow
+`agents/math_agent/math_evolve_agent.py` with `task_config.yaml`, `task_prompt.txt`,
+`initial_kernel.cu`, and `eval_program_sol58.py`. The SOL evaluator writes each generated candidate
+as `kernel.cu`, runs the official `sol-execbench` CLI over all 16 workloads, and scores all-pass
+candidates as `0.006797 / geomean_latency_ms`.
 
 ## LoongFlow Configuration Shape
 
@@ -87,6 +100,23 @@ evolve:
     storage_type: in_memory
     num_islands: 1
     population_size: 100
+    checkpoint_interval: 1
+    sampling_weight_power: 2
+```
+
+The SOL58 runner uses the same shape with task-specific defaults:
+
+```yaml
+evolve:
+  planner_name: evolve_planner
+  executor_name: evolve_executor_fuse
+  summary_name: evolve_summary
+  max_iterations: 40
+  target_score: 1.0
+  concurrency: 1
+  database:
+    storage_type: in_memory
+    num_islands: 1
     checkpoint_interval: 1
     sampling_weight_power: 2
 ```
@@ -131,4 +161,6 @@ silently downgrading.
 - Do not modify the contest evaluator, task definition, or prompt unless the user explicitly asks.
 - Keep `LLM_API_KEY` and optional base-url values in environment variables; do not commit secrets.
 - If the local contest checkout path differs, set `MLSYS26_FLASHINFER_CONTEST_ROOT`.
+- For SOL58, set `SOL58_CUDA_GENCODE` only when the target GPU architecture needs an explicit
+  override; otherwise the evaluator derives it from PyTorch's current CUDA device.
 - Treat LoongFlow checkpoints and traces as the source of truth for full-agent runs.

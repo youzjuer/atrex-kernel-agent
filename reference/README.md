@@ -39,6 +39,7 @@ Used only when Stage 2 runs a full-agent PES search shape.
 - enabled: false
 - keyword_trigger: pes
 - recommended_entrypoint: orchestrator/pes.sh moe
+- sol58_entrypoint: orchestrator/pes.sh sol58
 - recommended_moe_runner: orchestrator/run_moe_full_agent.sh
 - recommended_state_source: MLSys26 FlashInfer LoongFlow run directory
 - compatibility_runner: orchestrator/evolve.py
