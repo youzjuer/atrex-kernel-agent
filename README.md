@@ -93,6 +93,7 @@ loop. Supported real PES tasks include MLSys26 FlashInfer MoE and SOL-ExecBench 
 
 ```bash
 export LLM_API_KEY=sk-...
+export SOLBENCH_TOKEN=...  # required for sol58 official-v1.1 fitness
 bash orchestrator/pes.sh moe
 bash orchestrator/pes.sh sol58
 ```
@@ -102,6 +103,22 @@ bash orchestrator/pes.sh sol58
 `orchestrator/run_sol58_pes.sh`, using the same LoongFlow `math_evolve_agent.py` with a
 SOL-ExecBench evaluator. LoongFlow owns planner, executor, evaluator, summary, population memory,
 lineage, reflections, checkpoints, and target-score termination.
+
+For `sol58`, `SOL58_OFFICIAL_FITNESS=1` is the default. The evaluator first runs the local
+SOL-ExecBench correctness and local-best gates, then submits only a strict local improvement as a
+private official B200 v1.1 submission. Completed official submissions return the authoritative
+`sol_score`. By default, `SOL58_OFFICIAL_ASYNC_SUBMIT=1` returns
+as soon as the upload is accepted, schedules a one-shot status refresh, and then waits until the
+server's `result_available_at` before refreshing again on a later cache hit. If the official service remains pending,
+the evaluator returns a target-capped local-proxy score so PES keeps exploring. Local proxy scores
+remain monotonic with measured latency and are never accepted as a leaderboard/rank result. Set
+`SOL58_OFFICIAL_FITNESS=0` only for local dry-runs where official fitness is not needed.
+
+Remote submissions are also protected by a local-best gate. Every locally correct candidate is
+measured three complete times (`SOL58_LOCAL_REPEAT_COUNT=3`), and the median geomean latency is
+compared with the persisted local best. Only a strict improvement is uploaded to official v1.1;
+non-improving candidates remain available to PES through provisional local fitness without using a
+remote submission slot.
 
 ## Main Files
 

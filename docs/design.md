@@ -121,6 +121,30 @@ evaluation, checkpointing, and target-score termination. The SOL-ExecBench kerne
 same LoongFlow runner through `orchestrator/run_sol58_pes.sh`, with task files in
 `orchestrator/sol58_pes/`.
 
+For `sol58`, completed official results are the authoritative fitness:
+`SOL58_OFFICIAL_FITNESS=1` makes the evaluator run the local SOL-ExecBench all-workload
+correctness and local-best gates first, then submit each strict local improvement as a private
+official B200 v1.1 submission. Completed official submissions provide the authoritative `sol_score` used for
+database admission, parent selection, MAP-Elites replacement, summaries, and target-score
+termination. Because the official service can leave a submission in `PENDING_RESULT` after the
+worker has finished or report a future `result_available_at`, the evaluator uses bounded polling,
+returns immediately after an accepted upload by default, refreshes a cached submission on a later
+cache hit after a short delay, and then records its next refresh for the official availability time. It can
+emit a target-capped provisional score for pending results.
+That provisional score keeps PES from stalling, but it is kept below the target and must not be
+treated as a leaderboard rank. The default provisional policy uses the uncalibrated local latency
+ratio, preserving ordering between candidates instead of flattening them at the score cap. Legacy
+official/local calibration remains available as an explicit policy and for historical analysis.
+
+The official upload path is gated by repeated local measurement. An all-pass candidate runs the
+full local workload set three times, and any failed repeat rejects the candidate. The evaluator
+uses the median of the three geomean latencies, compares it against a persisted best whose
+historical bootstrap also requires at least three measurements per kernel source, and uploads only
+strict local improvements. Other candidates receive `SKIPPED_NOT_LOCAL_BEST` with provisional
+local-proxy fitness and consume no official submission capacity. A fresh run seeds its population
+from the persisted `local_best_kernel.cu` when available, and the fuse executor switches to ReAct
+once the parent reaches the configured high-score threshold.
+
 The keyword `pes` is the hard trigger for this mode. Atrex routes it through:
 
 ```bash

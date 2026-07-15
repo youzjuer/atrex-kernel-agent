@@ -1,10 +1,11 @@
 You are optimizing SOL-ExecBench kernel 58 for the NVIDIA B200 leaderboard.
 
 Objective:
-- Beat Databricks rank 4 for this kernel.
-- Target latency: geomean latency strictly below 0.006797 ms.
-- Evaluator score is target_latency_ms / measured_geomean_latency_ms.
-- A score >= 1.0 means the target is met.
+- Beat the current official v1.1 B200 leaderboard target configured by SOL58_TARGET_SCORE.
+- Default target: exceed Recursive at official SOL score 0.904134.
+- The local SOL-ExecBench run is only the correctness and fast prefilter.
+- When SOL58_OFFICIAL_FITNESS=1, evaluator fitness is the official v1.1 submission
+  result (`sol_score`) returned by research.nvidia.com, not the local latency proxy.
 
 Problem:
 - Definition: 058_moe_expert_token_radix_sort_with_prefix_sum.
@@ -36,12 +37,36 @@ Output contract:
 Evaluation contract:
 - The evaluator writes your generated text to kernel.cu, creates a SOL-ExecBench CUDA C++ solution.json, and runs the real sol-execbench CLI over every workload.
 - Any compilation failure, runtime failure, wrong answer, missing workload, reward-hack detection, or partial output gives score 0.
-- Only all-pass candidates receive latency score.
+- Only candidates passing the local correctness and local-best gates are submitted to the official
+  v1.1 B200 evaluator.
+- Local performance is measured with three complete repeats; every repeat must pass all workloads,
+  and the median geomean latency is the local comparison metric.
+- Upload to official v1.1 only when that median strictly improves the persisted local best.
+  Non-improving candidates are marked `SKIPPED_NOT_LOCAL_BEST` and are not uploaded.
+- Completed official v1.1 submissions provide the authoritative fitness (`sol_score`).
+- The default asynchronous submit path returns after upload acceptance and refreshes the cached
+  submission on a later cache hit instead of waiting for the official worker or delayed result
+  publication.
+- If the official API leaves a candidate pending or reports a future `result_available_at`, the
+  evaluator may return an
+  evaluator-success result with `metrics.official.provisional=true` and a target-capped
+  provisional score so PES keeps searching. Treat that as a search hint only: it is not proof of
+  leaderboard rank and cannot certify the target until a completed official `sol_score` exceeds
+  the target.
+- Candidates that do not beat the local incumbent receive the uncalibrated local latency ratio as
+  a monotonic search score. Use it to rank local variants; do not interpret it as an official score.
 
 Search guidance:
 - The initial parent is a CUDA Graph tiled stable counting-sort implementation.
 - It uses per-tile histograms, a block-prefix pass, a 256-entry expert prefix pass, and stable scatter.
 - Valid directions include reducing launch/graph overhead, specializing small vs large token counts inside run(), reducing atomics in scatter, using block/warp-local prefix layouts, improving persistent scratch handling, and simplifying graph update overhead.
+- Once the parent is near the local best, preserve its validated topology and make one isolated
+  change at a time. A failed experiment is evidence to revert that change, not to stack more broad
+  rewrites on top of it.
+- CUDA shuffle groups must be hardware-warp aligned. Every lane that executes a `*_sync` intrinsic
+  must be included in its mask; never emulate 72- or 96-thread logical groups by crossing warp
+  boundaries with a single shuffle scan.
+- Preserve proven cooperative launch dimensions and `grid.sync()` topology unless the plan checks
+  residency, uniform barrier participation, all workload sizes, and a non-cooperative fallback.
 - Preserve stability. Unstable sorting by expert id is incorrect even if counts match.
 - Correctness is the hard gate; performance only matters after all 16 workloads pass.
-

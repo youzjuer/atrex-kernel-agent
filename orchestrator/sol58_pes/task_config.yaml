@@ -12,6 +12,7 @@ llm_config:
   url: "${LLM_BASE_URL}"
   api_key: "${LLM_API_KEY}"
   model: "${LLM_MODEL}"
+  model_provider: "${LLM_PROVIDER}"
   temperature: ${LLM_TEMPERATURE}
   context_length: ${LLM_CONTEXT_LENGTH}
   max_tokens: ${LLM_MAX_TOKENS}
@@ -33,7 +34,7 @@ executors:
   evolve_executor_fuse:
     max_rounds: 3
     react_max_steps: 10
-    score_threshold: 0.99
+    score_threshold: ${SOL58_REACT_SCORE_THRESHOLD}
 
 summarizers:
   evolve_summary:
@@ -50,7 +51,7 @@ evolve:
   summary_name: "evolve_summary"
 
   max_iterations: ${SOL58_MAX_ITERATIONS}
-  target_score: 1.0
+  target_score: ${SOL58_TARGET_SCORE}
   concurrency: ${SOL58_PES_CONCURRENCY}
 
   # initial_score is intentionally omitted. The LoongFlow runner default is None,
