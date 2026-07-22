@@ -85,6 +85,19 @@ class TestNcuSummary(unittest.TestCase):
         }
 
         def fake_profile(command, **kwargs):
+            self.assertEqual(
+                kwargs["env"]["PATH"].split(":", 1)[0], "/usr/local/bin"
+            )
+            if command[0].endswith("sol-execbench"):
+                staging = Path(kwargs["cwd"]).parent / "generated_staging"
+                staging.mkdir()
+                (staging / "eval_driver.py").write_text("pass\n")
+                (staging / "benchmark_kernel.so").write_bytes(b"extension")
+                return subprocess.CompletedProcess(
+                    command, 0, "", f"Staging dir: {staging}\n"
+                )
+            self.assertIn("application-only", command)
+            self.assertIn("--clock-control", command)
             report_base = Path(command[command.index("-o") + 1])
             report_base.with_suffix(".ncu-rep").write_bytes(b"report")
             return subprocess.CompletedProcess(command, 0, "profiled", "")
@@ -127,7 +140,7 @@ class TestNcuSummary(unittest.TestCase):
         self.assertEqual(first["findings"][0]["pattern"], "A")
         self.assertIn("parallel work", first["optimization_implications"][0])
         self.assertTrue(second["cache_hit"])
-        self.assertEqual(run_profile.call_count, 1)
+        self.assertEqual(run_profile.call_count, 2)
 
     def test_timeout_is_diagnostic_not_an_exception(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -153,8 +166,13 @@ class TestNcuSummary(unittest.TestCase):
                     run_timeout=10,
                 )
 
+            failure_path = Path(result["artifacts"]["failure"])
+            self.assertTrue(failure_path.is_file())
+            preserved = json.loads(failure_path.read_text())
+
         self.assertEqual(result["status"], "timeout")
         self.assertEqual(result["timeout_s"], 3)
+        self.assertEqual(preserved["status"], "timeout")
 
     def test_policy_can_limit_expensive_profiles(self) -> None:
         self.assertEqual(

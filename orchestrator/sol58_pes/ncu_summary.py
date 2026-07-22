@@ -36,6 +36,7 @@ _CUTE_KERNEL_RE = re.compile(
     r"@(?:cute\.)?kernel\b[\s\S]{0,300}?\bdef\s+(?P<name>[A-Za-z_]\w*)\s*\(",
     re.MULTILINE,
 )
+_STAGING_DIR_RE = re.compile(r"Staging dir:\s*(?P<path>[^\r\n\x1b]+)")
 
 _KEY_METRIC_ALIASES = {
     "gpu__time_duration.sum": "duration_ns",
@@ -264,11 +265,96 @@ def _implications(findings: list[dict[str, Any]]) -> list[str]:
     return actions
 
 
-def _write_log(path: Path, content: str | None, limit: int = 100_000) -> None:
+def _write_log(
+    path: Path, content: str | bytes | None, limit: int = 100_000
+) -> None:
     text = content or ""
+    if isinstance(text, bytes):
+        text = text.decode("utf-8", errors="replace")
     if len(text) > limit:
         text = text[: limit // 2] + "\n...[truncated]...\n" + text[-limit // 2 :]
     path.write_text(text, encoding="utf-8")
+
+
+def _resolve_executable(program: str) -> Path | None:
+    executable = Path(program)
+    if executable.is_file():
+        return executable.absolute()
+    resolved = shutil.which(program)
+    return Path(resolved).absolute() if resolved else None
+
+
+def _profile_environment(sol_execbench: str) -> dict[str, str]:
+    """Use the evaluator CLI's virtualenv for its generated build subprocesses."""
+    env = {
+        **os.environ,
+        "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
+    }
+    executable = _resolve_executable(sol_execbench)
+    if executable is not None:
+        executable_dir = str(executable.parent)
+        path_entries = env.get("PATH", "").split(os.pathsep)
+        env["PATH"] = os.pathsep.join(
+            [executable_dir, *(item for item in path_entries if item != executable_dir)]
+        )
+    return env
+
+
+def _sol_execbench_python(sol_execbench: str) -> str:
+    executable = _resolve_executable(sol_execbench)
+    if executable is not None:
+        for name in ("python", "python3"):
+            candidate = executable.parent / name
+            if candidate.is_file():
+                return str(candidate)
+    return sys.executable
+
+
+def _extract_staging_dir(stdout: str | None, stderr: str | None) -> Path:
+    output = f"{stdout or ''}\n{stderr or ''}"
+    match = _STAGING_DIR_RE.search(output)
+    if not match:
+        raise RuntimeError("sol-execbench preflight did not report its staging directory")
+    staging_dir = Path(match.group("path").strip())
+    if not staging_dir.is_dir():
+        raise RuntimeError(
+            f"sol-execbench preflight staging directory is missing: {staging_dir}"
+        )
+    return staging_dir
+
+
+def _preserve_failed_profile(
+    temp_dir: Path,
+    cache_root: Path,
+    cache_key: str,
+    result: dict[str, Any],
+) -> dict[str, Any]:
+    """Keep the latest failed capture per cache key for reproducible diagnosis."""
+    failure_dir = cache_root / "failed" / cache_key
+    artifacts = {
+        "workspace": str(failure_dir / "workspace"),
+        "staging": str(failure_dir / "staging"),
+        "preflight_stdout_log": str(failure_dir / "preflight_stdout.log"),
+        "preflight_stderr_log": str(failure_dir / "preflight_stderr.log"),
+        "stdout_log": str(failure_dir / "ncu_stdout.log"),
+        "stderr_log": str(failure_dir / "ncu_stderr.log"),
+        "failure": str(failure_dir / "ncu_analysis.json"),
+    }
+    result["artifacts"] = artifacts
+    try:
+        (temp_dir / "ncu_analysis.json").write_text(
+            json.dumps(result, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        failure_dir.parent.mkdir(parents=True, exist_ok=True)
+        if failure_dir.exists():
+            shutil.rmtree(failure_dir)
+        temp_dir.replace(failure_dir)
+    except Exception as exc:
+        result.pop("artifacts", None)
+        result["artifact_error"] = str(exc)[-500:]
+        shutil.rmtree(temp_dir, ignore_errors=True)
+    return result
 
 
 def collect_ncu_analysis(
@@ -332,7 +418,8 @@ def collect_ncu_analysis(
     ncu_set = os.environ.get("SOL58_NCU_SET", "full").strip() or "full"
     launch_count = max(1, int(os.environ.get("SOL58_NCU_LAUNCH_COUNT", "1")))
     identity = {
-        "schema_version": 1,
+        "schema_version": 2,
+        "profile_strategy": "precompile_eval_driver_v1",
         "source_sha256": source_sha256,
         "source_language": source_language,
         "measurement_profile_id": measurement_profile.get("id"),
@@ -381,7 +468,9 @@ def collect_ncu_analysis(
             profile_config = {
                 "warmup_runs": 0,
                 "iterations": 1,
-                "lock_clocks": bool(measurement_profile.get("lock_clocks")),
+                # The outer evaluator owns clock locking. Avoid profiler injection
+                # into nvidia-smi and preserve the already selected frequencies.
+                "lock_clocks": False,
                 "benchmark_reference": False,
                 "seed": int(measurement_profile.get("seed", 200)),
             }
@@ -393,14 +482,59 @@ def collect_ncu_analysis(
             report_path = report_base.with_suffix(".ncu-rep")
             escaped_names = "|".join(re.escape(name) for name in kernel_names)
             kernel_filter = f"regex:.*(?:{escaped_names}).*"
+            profile_env = _profile_environment(sol_execbench)
+            preflight_command = [
+                sol_execbench,
+                ".",
+                "--solution",
+                "solution.json",
+                "--config",
+                "config.json",
+                "--compile-timeout",
+                str(compile_timeout),
+                "--timeout",
+                str(run_timeout),
+                "--keep-staging",
+                "--verbose",
+                "-o",
+                "ncu_preflight_traces.jsonl",
+            ]
+            preflight = _run_profile_command(
+                preflight_command,
+                cwd=profile_workspace,
+                env=profile_env,
+                timeout=max(1.0, compile_timeout + run_timeout + 60),
+            )
+            _write_log(temp_dir / "preflight_stdout.log", preflight.stdout)
+            _write_log(temp_dir / "preflight_stderr.log", preflight.stderr)
+            generated_staging = _extract_staging_dir(
+                preflight.stdout, preflight.stderr
+            )
+            profile_staging = temp_dir / "staging"
+            shutil.move(str(generated_staging), profile_staging)
+            if preflight.returncode != 0:
+                raise RuntimeError(
+                    "sol-execbench NCU preflight failed "
+                    f"(returncode={preflight.returncode}): "
+                    f"{(preflight.stderr or preflight.stdout or '')[-1200:]}"
+                )
+            if not (profile_staging / "eval_driver.py").is_file():
+                raise RuntimeError("sol-execbench preflight produced no eval_driver.py")
+            if source_language == "cuda_cpp" and not (
+                profile_staging / "benchmark_kernel.so"
+            ).is_file():
+                raise RuntimeError("sol-execbench preflight produced no CUDA artifact")
+
             command = [
                 ncu_binary,
                 "--target-processes",
-                "all",
+                "application-only",
                 "--set",
                 ncu_set,
                 "--replay-mode",
                 "kernel",
+                "--clock-control",
+                "none",
                 "--kernel-name-base",
                 "demangled",
                 "--kernel-name",
@@ -414,28 +548,14 @@ def collect_ncu_analysis(
                 "--force-overwrite",
                 "-o",
                 str(report_base),
-                sol_execbench,
-                ".",
-                "--solution",
-                "solution.json",
-                "--config",
-                "config.json",
-                "--compile-timeout",
-                str(compile_timeout),
-                "--timeout",
-                str(run_timeout),
-                "--keep-staging",
-                "-o",
-                "ncu_traces.jsonl",
+                _sol_execbench_python(sol_execbench),
+                "eval_driver.py",
             ]
             timeout = max(1.0, float(os.environ.get("SOL58_NCU_TIMEOUT", "180")))
             proc = _run_profile_command(
                 command,
-                cwd=profile_workspace,
-                env={
-                    **os.environ,
-                    "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
-                },
+                cwd=profile_staging,
+                env=profile_env,
                 timeout=timeout,
             )
             _write_log(temp_dir / "ncu_stdout.log", proc.stdout)
@@ -456,6 +576,8 @@ def collect_ncu_analysis(
                 "report": str(final_dir / "ncu_profile.ncu-rep"),
                 "key_metrics": str(final_dir / "analysis" / "metrics_key_summary.json"),
                 "all_metrics": str(final_dir / "analysis" / "metrics_all_summary.json"),
+                "preflight_stdout_log": str(final_dir / "preflight_stdout.log"),
+                "preflight_stderr_log": str(final_dir / "preflight_stderr.log"),
                 "stdout_log": str(final_dir / "ncu_stdout.log"),
                 "stderr_log": str(final_dir / "ncu_stderr.log"),
             }
@@ -478,13 +600,15 @@ def collect_ncu_analysis(
                 json.dumps(result, indent=2, ensure_ascii=False) + "\n",
                 encoding="utf-8",
             )
+            shutil.rmtree(profile_staging, ignore_errors=True)
             if final_dir.exists():
                 shutil.rmtree(final_dir)
             temp_dir.replace(final_dir)
             return result
         except subprocess.TimeoutExpired as exc:
-            shutil.rmtree(temp_dir, ignore_errors=True)
-            return {
+            _write_log(temp_dir / "ncu_stdout.log", exc.output)
+            _write_log(temp_dir / "ncu_stderr.log", exc.stderr)
+            result = {
                 "enabled": True,
                 "status": "timeout",
                 "workload": workload,
@@ -492,9 +616,9 @@ def collect_ncu_analysis(
                 "timeout_s": exc.timeout,
                 "profile_time_s": time.time() - started,
             }
+            return _preserve_failed_profile(temp_dir, cache_root, cache_key, result)
         except Exception as exc:
-            shutil.rmtree(temp_dir, ignore_errors=True)
-            return {
+            result = {
                 "enabled": True,
                 "status": "failed",
                 "workload": workload,
@@ -502,3 +626,4 @@ def collect_ncu_analysis(
                 "error": str(exc)[-1200:],
                 "profile_time_s": time.time() - started,
             }
+            return _preserve_failed_profile(temp_dir, cache_root, cache_key, result)
