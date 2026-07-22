@@ -23,6 +23,10 @@ Optional:
   MLSYS26_FLASHINFER_CONTEST_ROOT=/path/to/mlsys26-flashinfer-contest
   SOL58_PROBLEM_DIR=/path/to/058_moe_expert_token_radix_sort_with_prefix_sum
   SOL58_TARGET_LATENCY_MS=0.006797
+  SOL58_CODE_LANGUAGE=cuda_cpp|cute_dsl|auto
+  SOL58_NCU_SUMMARY=1
+  bash orchestrator/pes.sh sol58 -- --code-language auto --cutedsl-rate 0.7
+  bash orchestrator/pes.sh sol58 -- --ncu-policy local_best --ncu-timeout 180
 USAGE
 }
 

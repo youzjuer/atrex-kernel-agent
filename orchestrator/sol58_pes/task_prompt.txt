@@ -26,21 +26,57 @@ Workloads:
 - Do not optimize only one shape.
 
 Output contract:
-- Produce the complete contents of a single CUDA C++ source file named kernel.cu.
-- Do not output a diff.
-- Do not output Python, Triton, JSON, or explanatory text as the solution.
-- The source must define a destination-passing-style function:
+- The configured source mode for this run is: ${SOL58_CODE_LANGUAGE}.
+- `cuda_cpp`: produce one complete self-contained CUDA C++ `kernel.cu`.
+- `cute_dsl`: produce one complete self-contained CuTe DSL Python `kernel.py`.
+- `auto`: choose exactly one of those formats for each child. Do not mix C++ and Python sources in
+  one candidate. A parent may use the other format; a deliberate full rewrite is allowed.
+- In `auto` mode, CuTeDSL is mandatory for a configured fraction of iterations. The configured
+  fraction is ${SOL58_CUTEDSL_GENERATION_RATE} over a period of
+  ${SOL58_CUTEDSL_SCHEDULE_PERIOD} iterations. Let K be the current PES iteration, P the period,
+  and C=ceil(fraction*P). If `(K - 1) % P < C`, Planner must select a CuTeDSL architecture and
+  Executor must emit `kernel.py`; CUDA C++ is rejected before compilation for that entire iteration.
+  Remaining slots may choose either language from evidence. Do not evade a mandatory CuTeDSL slot
+  by copying or lightly editing a CUDA parent.
+- Output source code only. Do not output a diff, JSON, Markdown explanation, test harness, or local
+  file references.
+- CUDA C++ candidates must define:
   void run(torch::Tensor topk_idx, torch::Tensor sorted_token_indices, torch::Tensor expert_offsets)
-- The source must include a PYBIND11_MODULE binding for run.
-- If you use a fenced block, use ```python or ```c++ so the executor extracts only the source body.
+  and expose it through `PYBIND11_MODULE`. Never include another local `.cu`/`.cpp`, an absolute
+  path, an Executor workspace path, or a quoted project file.
+- CuTe DSL candidates must import `cutlass.cute`, define CuTe kernels with `@cute.kernel` and/or
+  `@cute.jit`, compile through `cute.compile`, and define the destination-passing entry point:
+  def run(topk_idx, sorted_token_indices, expert_offsets)
+  The function must mutate both output tensors in place. Cache compiled functions at module scope
+  and use dynamic layouts where required so all 16 shapes can reuse compilation.
+- CuTe DSL may use `torch` only for tensor interoperability, stream/device metadata, and wrapper
+  bookkeeping. Do not implement the result with `torch.sort`, `torch.argsort`, `torch.bincount`,
+  `torch.cumsum`, or another high-level fallback.
+- CuTe DSL imports must be self-contained runtime dependencies (`torch`, `cutlass`, `cuda`, or
+  Python standard library). Relative imports and workspace/local-module imports are forbidden.
+- If you use a fenced block, use `c++` for CUDA C++ or `python` for CuTe DSL; emit only one block.
 
 Evaluation contract:
-- The evaluator writes your generated text to kernel.cu, creates a SOL-ExecBench CUDA C++ solution.json, and runs the real sol-execbench CLI over every workload.
+- The evaluator detects the candidate language allowed by the configured source mode, writes
+  `kernel.cu` or `kernel.py`, creates the corresponding SOL-ExecBench `cuda_cpp` or `cute_dsl`
+  solution.json, and runs the real sol-execbench CLI over every workload.
 - Any compilation failure, runtime failure, wrong answer, missing workload, reward-hack detection, or partial output gives score 0.
+- Non-self-contained source dependencies are rejected before local compilation/import and can never update
+  the local best or be submitted remotely.
 - Only candidates passing the local correctness and local-best gates are submitted to the official
   v1.1 B200 evaluator.
 - Local performance is measured with three complete repeats; every repeat must pass all workloads,
   and the median geomean latency is the local comparison metric.
+- The default local measurement profile locks B200 SM/DRAM clocks to 1500/3996 MHz and compiles
+  CUDA C++ to an sm_100 compatibility cubin. This is the closest executable proxy for the official
+  sm_100a worker on the local sm_103 device. Actual clocks are verified around every repeat.
+- Local-best latency is comparable only when its measurement-profile fingerprint matches. A changed
+  profile first remeasures the exact incumbent and preserves its completed official score.
+- CuTe DSL JIT still targets the local sm_103 device. Treat local CuTe/CUDA ordering as a prefilter;
+  only completed official v1.1 fitness resolves architecture-sensitive ranking.
+- An exact source-hash match to the persisted standalone local-best may reuse that kernel's existing
+  completed three-repeat local result and official score. This only deduplicates an unchanged parent;
+  every new source hash still runs all three repeats.
 - Upload to official v1.1 only when that median strictly improves the persisted local best.
   Non-improving candidates are marked `SKIPPED_NOT_LOCAL_BEST` and are not uploaded.
 - Completed official v1.1 submissions provide the authoritative fitness (`sol_score`).
@@ -53,8 +89,25 @@ Evaluation contract:
   provisional score so PES keeps searching. Treat that as a search hint only: it is not proof of
   leaderboard rank and cannot certify the target until a completed official `sol_score` exceeds
   the target.
-- Candidates that do not beat the local incumbent receive the uncalibrated local latency ratio as
-  a monotonic search score. Use it to rank local variants; do not interpret it as an official score.
+- Candidates that do not beat the local incumbent receive an incumbent-anchored provisional score:
+  incumbent official score times incumbent-local-latency / candidate-local-latency. Therefore a
+  locally slower child cannot outrank the completed official incumbent. This remains a search hint,
+  not a new official result.
+
+NCU Summary evidence:
+- After a candidate passes every local correctness repeat and normal timing is complete, the evaluator
+  may profile one user-kernel launch from the slowest representative workload. NCU is a separate
+  diagnostic pass: profiler duration and failures never affect score, correctness, local-best status,
+  or official submission eligibility.
+- Read the structured `metrics.ncu_analysis` object in Summary. A `completed` result contains the
+  exact kernel name, workload, key counters, confidence-labelled A-N findings, evidence, and bounded
+  optimization implications. Raw NCU logs and reports are artifact paths, not LLM context.
+- Treat the report as launch-scoped evidence, not end-to-end performance. Compare parent and child
+  counters only when workload and kernel role are comparable; reconcile counter movement with local
+  latency and the actual code delta. Never invent counters when profiling is skipped, unavailable,
+  timed out, or failed.
+- The default cache identity includes source hash, measurement profile, workload, kernel names, and
+  NCU settings. An unchanged candidate reuses its report instead of profiling again.
 
 Search guidance:
 - The initial parent is a CUDA Graph tiled stable counting-sort implementation.
@@ -70,3 +123,40 @@ Search guidance:
   residency, uniform barrier participation, all workload sizes, and a non-cooperative fallback.
 - Preserve stability. Unstable sorting by expert id is incorrect even if counts match.
 - Correctness is the hard gate; performance only matters after all 16 workloads pass.
+- In `auto` or `cute_dsl` mode, CuTe DSL is a distinct architecture route rather than a syntax-only
+  translation. Use CuTe layout algebra, vectorized copies, warp/block partitioning, and explicit
+  stable rank construction. Account for JIT cache reuse and Python launch overhead on every shape.
+- Do not combine a CuTe DSL wrapper with the parent's inline CUDA extension. A CuTe DSL child must
+  remain a pure Python-language SOL solution with `languages: ["cute_dsl"]`.
+
+Architecture-island policy:
+- The configured run has ${SOL58_NUM_ISLANDS} architecture islands. During Summary, Atrex extracts
+  explicit CUDA/CuTe features, projects the feature vector through standardized PCA, assigns a
+  deterministic cluster, and routes the child to its architecture island before database admission.
+- Island 0 explores warp specialization; island 1 cluster TMA multicast/broadcast; island 2
+  TMA/WGMMA; island 3 persistent/cooperative-grid designs; island 4 CuTe DSL; island 5 cp.async and
+  producer/consumer pipelines. Islands 6 and 7 hold PCA-separated general, CUDA Graph, histogram,
+  and atomic routes. With a non-default island count, metadata in the sampled parent is authoritative.
+- Read `metadata.architecture_label`, `architecture_features`, `pca_coordinates`, and
+  `architecture_island_profile` from the sampled parent. Preserve a strong route when making a
+  local refinement, but use the current island's profile when deliberately changing architecture.
+- Every ${SOL58_ARCHITECTURE_MIGRATION_INTERVAL} completed global iterations, PCA is refit, home
+  members are reclassified, and each island exchanges its top fraction with adjacent islands.
+  Between those boundaries, existing home assignments remain fixed.
+
+Cross-phase empirical memory:
+- The CUDA-specific findings below apply to CUDA C++ descendants. They do not constitute evidence
+  for or against a genuinely different CuTe DSL implementation.
+- Latencies below were collected before the official-like sm_100/1500 MHz profile was introduced.
+  Keep their correctness and directional lessons, but do not compare their absolute numbers with the
+  current local-best gate.
+- Do not retry routing every workload with `n_blocks512 <= 64` through
+  `launch_coop512<64, 64>` unless the 512-token kernel body also changes. On the valid standalone
+  parent this exact dispatch passed 16/16 but regressed the three-repeat median geomean to
+  0.009002 ms versus roughly 0.00795-0.00800 ms for the parent.
+- The narrower `n == 32768` version of the same 512-token/MODE64 dispatch also regressed its
+  three-repeat median to 0.008078 ms. Reducing cooperative block count did not offset the extra
+  per-block work and shared-memory traffic.
+- Removing only the unused CUDA Graph fallback did not produce a reliable runtime improvement;
+  all benchmark shapes use cooperative paths. Prefer changes to executed kernel work, metadata,
+  or synchronization over dead-code deletion.

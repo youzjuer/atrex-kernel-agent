@@ -69,7 +69,9 @@ evolve:
     use_sampling_weight: true
     sampling_weight_power: 2
     exploration_rate: 0.1
-    migration_interval: 10
+    # The Atrex Summary hook interprets this as a global iteration interval,
+    # not the upstream per-island-capacity heuristic.
+    migration_interval: ${SOL58_ARCHITECTURE_MIGRATION_INTERVAL}
     migration_rate: 0.2
     boltzmann_temperature: 1.0
     feature_bins: 8
