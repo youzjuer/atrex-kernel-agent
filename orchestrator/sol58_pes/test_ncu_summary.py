@@ -181,6 +181,66 @@ class TestNcuSummary(unittest.TestCase):
         self.assertEqual(classification["findings"], [])
         sleep.assert_called_once_with(1)
 
+    def test_report_parser_uses_isolated_csv_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            profile_dir = Path(tmp)
+            report_path = profile_dir / "profile.ncu-rep"
+            report_path.write_bytes(b"report")
+            parser_environments = []
+
+            def fake_run(command, **kwargs):
+                parser_environments.append(kwargs["env"])
+                if str(ncu_summary.ANALYZE_REPORTS) in command:
+                    return subprocess.CompletedProcess(command, -11, "", "")
+                if "--import" in command:
+                    csv_output = (
+                        '"ID","Kernel Name","launch__grid_size",'
+                        '"sm__throughput.avg.pct_of_peak_sustained_elapsed"\n'
+                        '"","","block","%"\n'
+                        '"0","histogram_kernel","64","22.5"\n'
+                    )
+                    return subprocess.CompletedProcess(command, 0, csv_output, "")
+                metrics = json.loads(
+                    (profile_dir / "analysis" / "metrics_key_summary.json")
+                    .read_text()
+                )
+                self.assertEqual(metrics["launch__grid_size"], 64)
+                return subprocess.CompletedProcess(
+                    command,
+                    0,
+                    json.dumps({"findings": [], "symptoms": []}),
+                    "",
+                )
+
+            with mock.patch.dict(
+                ncu_summary.os.environ,
+                {
+                    "PYTHONPATH": "/tmp/loongflow-sitecustomize",
+                    "SOL58_NCU_PARSE_RETRIES": "1",
+                },
+            ), mock.patch.object(
+                ncu_summary.shutil, "which", return_value="/usr/local/bin/ncu"
+            ), mock.patch.object(
+                ncu_summary.subprocess, "run", side_effect=fake_run
+            ):
+                metrics, classification = ncu_summary._parse_report(
+                    report_path, profile_dir, 10
+                )
+
+        self.assertEqual(metrics["__kernel_name__"], "histogram_kernel")
+        self.assertEqual(metrics["launch__grid_size"], 64)
+        self.assertEqual(classification["findings"], [])
+        self.assertTrue(parser_environments)
+        self.assertTrue(
+            all("PYTHONPATH" not in environment for environment in parser_environments)
+        )
+        self.assertTrue(
+            all(
+                environment.get("PYTHONNOUSERSITE") == "1"
+                for environment in parser_environments
+            )
+        )
+
     def test_timeout_is_diagnostic_not_an_exception(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

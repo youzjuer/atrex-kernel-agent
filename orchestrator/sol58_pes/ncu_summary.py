@@ -7,8 +7,10 @@ runs. A profiling failure is diagnostic data, never a fitness failure.
 
 from __future__ import annotations
 
+import csv
 import fcntl
 import hashlib
+import io
 import json
 import os
 import re
@@ -225,6 +227,7 @@ def _parse_report(
         "--tag",
         "summary",
     ]
+    parser_env = _isolated_python_environment()
     try:
         parse_retries = max(1, int(os.environ.get("SOL58_NCU_PARSE_RETRIES", "3")))
     except ValueError:
@@ -236,26 +239,29 @@ def _parse_report(
             capture_output=True,
             text=True,
             timeout=timeout,
+            env=parser_env,
         )
         if parse_proc.returncode == 0:
             break
         if attempt + 1 < parse_retries:
             time.sleep(min(4, 2**attempt))
     assert parse_proc is not None
-    if parse_proc.returncode != 0:
-        detail = (parse_proc.stderr or parse_proc.stdout or "no parser output")[-1200:]
-        raise RuntimeError(
-            f"NCU report parser failed after {parse_retries} attempts "
-            f"(returncode={parse_proc.returncode}): {detail}"
-        )
-
     metrics_path = profile_dir / "analysis" / "metrics_key_summary.json"
-    metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
+    if parse_proc.returncode == 0:
+        metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
+    else:
+        metrics = _parse_report_csv(
+            report_path,
+            profile_dir,
+            timeout,
+            parser_env,
+        )
     classify_proc = subprocess.run(
         [sys.executable, str(CLASSIFY_NCU), "--metrics", str(metrics_path), "--json"],
         capture_output=True,
         text=True,
         timeout=timeout,
+        env=parser_env,
     )
     if classify_proc.returncode != 0:
         detail = (classify_proc.stderr or classify_proc.stdout or "no classifier output")[
@@ -266,6 +272,117 @@ def _parse_report(
         )
     classification = json.loads(classify_proc.stdout)
     return metrics, classification
+
+
+def _isolated_python_environment() -> dict[str, str]:
+    """Keep LoongFlow's sitecustomize out of native NCU parser processes."""
+    env = dict(os.environ)
+    env.pop("PYTHONPATH", None)
+    env.pop("PYTHONHOME", None)
+    env["PYTHONNOUSERSITE"] = "1"
+    return env
+
+
+def _csv_value(value: str) -> Any:
+    text = value.strip()
+    if not text or text.lower() in {"n/a", "nan", "inf", "+inf", "-inf"}:
+        return None
+    if re.fullmatch(r"[+-]?\d+", text):
+        try:
+            return int(text)
+        except ValueError:
+            pass
+    try:
+        return float(text)
+    except ValueError:
+        return text
+
+
+def _parse_report_csv(
+    report_path: Path,
+    profile_dir: Path,
+    timeout: float,
+    env: dict[str, str],
+) -> dict[str, Any]:
+    """Extract raw metrics through the NCU CLI when ncu_report crashes."""
+    ncu_binary = shutil.which(os.environ.get("SOL58_NCU_BINARY", "ncu"))
+    if not ncu_binary:
+        raise RuntimeError("NCU Python report parser failed and ncu CLI is unavailable")
+    command = [
+        ncu_binary,
+        "--import",
+        str(report_path),
+        "--csv",
+        "--page",
+        "raw",
+    ]
+    proc = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        env=env,
+    )
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "no CSV parser output")[-1200:]
+        raise RuntimeError(
+            "NCU Python and CSV report parsers failed "
+            f"(csv_returncode={proc.returncode}): {detail}"
+        )
+
+    rows = [row for row in csv.reader(io.StringIO(proc.stdout)) if row]
+    header_index = next(
+        (
+            index
+            for index, row in enumerate(rows)
+            if "Kernel Name" in row and any("__" in field for field in row)
+        ),
+        None,
+    )
+    if header_index is None or header_index + 1 >= len(rows):
+        raise RuntimeError("NCU CSV parser returned no raw metric table")
+    header = rows[header_index]
+    kernel_name_index = header.index("Kernel Name")
+    values = next(
+        (
+            row
+            for row in rows[header_index + 1 :]
+            if len(row) > kernel_name_index and row[kernel_name_index].strip()
+        ),
+        None,
+    )
+    if values is None:
+        raise RuntimeError("NCU CSV parser returned no kernel action row")
+    if len(values) < len(header):
+        values.extend([""] * (len(header) - len(values)))
+
+    exported = {
+        name: _csv_value(value)
+        for name, value in zip(header, values)
+        if name.strip()
+    }
+    metrics = {
+        name: value
+        for name, value in exported.items()
+        if "__" in name
+    }
+    metrics["__kernel_name__"] = exported.get("Kernel Name", "?")
+
+    analysis_dir = profile_dir / "analysis"
+    analysis_dir.mkdir(parents=True, exist_ok=True)
+    (analysis_dir / "metrics_all_summary.json").write_text(
+        json.dumps(
+            [{"name": name, "value": value} for name, value in exported.items()],
+            indent=1,
+            default=str,
+        ),
+        encoding="utf-8",
+    )
+    (analysis_dir / "metrics_key_summary.json").write_text(
+        json.dumps(metrics, indent=2, default=str),
+        encoding="utf-8",
+    )
+    return metrics
 
 
 def _compact_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
