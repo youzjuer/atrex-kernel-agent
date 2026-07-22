@@ -215,23 +215,39 @@ def _run_profile_command(
 def _parse_report(
     report_path: Path, profile_dir: Path, timeout: float
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    parse_proc = subprocess.run(
-        [
-            sys.executable,
-            str(ANALYZE_REPORTS),
-            "--run-dir",
-            str(profile_dir),
-            "--report",
-            str(report_path),
-            "--tag",
-            "summary",
-        ],
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-    )
+    parse_command = [
+        sys.executable,
+        str(ANALYZE_REPORTS),
+        "--run-dir",
+        str(profile_dir),
+        "--report",
+        str(report_path),
+        "--tag",
+        "summary",
+    ]
+    try:
+        parse_retries = max(1, int(os.environ.get("SOL58_NCU_PARSE_RETRIES", "3")))
+    except ValueError:
+        parse_retries = 3
+    parse_proc: subprocess.CompletedProcess[str] | None = None
+    for attempt in range(parse_retries):
+        parse_proc = subprocess.run(
+            parse_command,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        if parse_proc.returncode == 0:
+            break
+        if attempt + 1 < parse_retries:
+            time.sleep(min(4, 2**attempt))
+    assert parse_proc is not None
     if parse_proc.returncode != 0:
-        raise RuntimeError(f"NCU report parser failed: {parse_proc.stderr[-1200:]}")
+        detail = (parse_proc.stderr or parse_proc.stdout or "no parser output")[-1200:]
+        raise RuntimeError(
+            f"NCU report parser failed after {parse_retries} attempts "
+            f"(returncode={parse_proc.returncode}): {detail}"
+        )
 
     metrics_path = profile_dir / "analysis" / "metrics_key_summary.json"
     metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
@@ -242,7 +258,12 @@ def _parse_report(
         timeout=timeout,
     )
     if classify_proc.returncode != 0:
-        raise RuntimeError(f"NCU classifier failed: {classify_proc.stderr[-1200:]}")
+        detail = (classify_proc.stderr or classify_proc.stdout or "no classifier output")[
+            -1200:
+        ]
+        raise RuntimeError(
+            f"NCU classifier failed (returncode={classify_proc.returncode}): {detail}"
+        )
     classification = json.loads(classify_proc.stdout)
     return metrics, classification
 
@@ -290,6 +311,9 @@ def _profile_environment(sol_execbench: str) -> dict[str, str]:
         **os.environ,
         "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
     }
+    # The staged evaluator is self-contained. Inheriting LoongFlow's
+    # sitecustomize path can load ABI-incompatible packages under NCU injection.
+    env.pop("PYTHONPATH", None)
     executable = _resolve_executable(sol_execbench)
     if executable is not None:
         executable_dir = str(executable.parent)

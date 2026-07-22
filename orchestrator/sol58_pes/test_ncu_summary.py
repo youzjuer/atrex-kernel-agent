@@ -88,6 +88,7 @@ class TestNcuSummary(unittest.TestCase):
             self.assertEqual(
                 kwargs["env"]["PATH"].split(":", 1)[0], "/usr/local/bin"
             )
+            self.assertNotIn("PYTHONPATH", kwargs["env"])
             if command[0].endswith("sol-execbench"):
                 staging = Path(kwargs["cwd"]).parent / "generated_staging"
                 staging.mkdir()
@@ -141,6 +142,44 @@ class TestNcuSummary(unittest.TestCase):
         self.assertIn("parallel work", first["optimization_implications"][0])
         self.assertTrue(second["cache_hit"])
         self.assertEqual(run_profile.call_count, 2)
+
+    def test_report_parser_retries_transient_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            profile_dir = Path(tmp)
+            report_path = profile_dir / "profile.ncu-rep"
+            report_path.write_bytes(b"report")
+            parser_calls = 0
+
+            def fake_run(command, **kwargs):
+                nonlocal parser_calls
+                if str(ncu_summary.ANALYZE_REPORTS) in command:
+                    parser_calls += 1
+                    if parser_calls == 1:
+                        return subprocess.CompletedProcess(command, 11, "busy", "")
+                    analysis = profile_dir / "analysis"
+                    analysis.mkdir(exist_ok=True)
+                    (analysis / "metrics_key_summary.json").write_text(
+                        json.dumps({"launch__grid_size": 64})
+                    )
+                    return subprocess.CompletedProcess(command, 0, "parsed", "")
+                return subprocess.CompletedProcess(
+                    command,
+                    0,
+                    json.dumps({"findings": [], "symptoms": []}),
+                    "",
+                )
+
+            with mock.patch.object(
+                ncu_summary.subprocess, "run", side_effect=fake_run
+            ), mock.patch.object(ncu_summary.time, "sleep") as sleep:
+                metrics, classification = ncu_summary._parse_report(
+                    report_path, profile_dir, 10
+                )
+
+        self.assertEqual(parser_calls, 2)
+        self.assertEqual(metrics["launch__grid_size"], 64)
+        self.assertEqual(classification["findings"], [])
+        sleep.assert_called_once_with(1)
 
     def test_timeout_is_diagnostic_not_an_exception(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
