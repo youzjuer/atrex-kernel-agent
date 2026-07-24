@@ -98,6 +98,29 @@ class TestNcuSummaryPrompt(unittest.TestCase):
         self.assertIn("must never change the fitness assessment", prompt)
 
 
+class TestPatchManifest(unittest.TestCase):
+    def test_required_patch_failure_is_not_silent(self) -> None:
+        broken = {
+            "evolution_database": {
+                "required": True,
+                "applied": False,
+                "target": "sentinel missing",
+                "error": "",
+            }
+        }
+        with mock.patch.object(sitecustomize, "PATCH_MANIFEST", broken):
+            with self.assertRaisesRegex(RuntimeError, "evolution_database"):
+                sitecustomize.validate_patch_manifest()
+
+    def test_compaction_keeps_normal_kernel_source_complete(self) -> None:
+        source = "x" * 12000
+        with mock.patch.dict(os.environ, {"ATREX_PES_DB_SOLUTION_CHARS": "65536"}):
+            compact = sitecustomize._compact_solution_record({"solution": source})
+
+        self.assertEqual(compact["solution"], source)
+        self.assertEqual(compact["solution_chars"], len(source))
+
+
 class TestSourceDeduplication(unittest.TestCase):
     def test_hash_ignores_outer_whitespace(self) -> None:
         self.assertEqual(
@@ -276,6 +299,10 @@ class TestArchitectureFeatureAnalysis(unittest.TestCase):
         self.assertEqual(
             architecture_islands.architecture_island_id("cute_dsl", 0, 8), 4
         )
+
+    def test_too_few_islands_is_rejected_instead_of_colliding(self) -> None:
+        with self.assertRaisesRegex(ValueError, "at least 6 islands"):
+            architecture_islands.architecture_island_id("warp_specialization", 0, 4)
 
 
 class TestArchitectureIslandRouting(unittest.TestCase):

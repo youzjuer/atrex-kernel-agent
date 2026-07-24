@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import logging
 import os
@@ -16,8 +17,8 @@ from orchestrator.loongflow_compat.architecture_islands import (
     write_architecture_checkpoint,
 )
 
-
 logger = logging.getLogger("atrex.pes_compat")
+PATCH_MANIFEST: dict[str, dict[str, object]] = {}
 
 _NCU_SUMMARY_MARKER = "Atrex NCU evidence protocol"
 _NCU_SUMMARY_INSTRUCTIONS = f"""
@@ -50,7 +51,7 @@ if os.environ.get("ATREX_LITELLM_DROP_PARAMS", "0") == "1":
 
 
 def _truncate_text(value: object, limit: int) -> object:
-    if not isinstance(value, str) or len(value) <= limit:
+    if not isinstance(value, str) or limit <= 0 or len(value) <= limit:
         return value
     head = max(0, limit * 2 // 3)
     tail = max(0, limit - head)
@@ -70,21 +71,30 @@ def _compact_solution_record(record: object) -> object:
     if isinstance(solution, str):
         compact["solution_sha1"] = hashlib.sha1(solution.encode("utf-8")).hexdigest()
         compact["solution_chars"] = len(solution)
-        compact["solution"] = _truncate_text(solution, 2400)
+        compact["solution"] = _truncate_text(
+            solution, int(os.environ.get("ATREX_PES_DB_SOLUTION_CHARS", "65536"))
+        )
 
     summary = compact.get("summary")
     if isinstance(summary, str):
-        compact["summary"] = _truncate_text(summary, 3500)
+        compact["summary"] = _truncate_text(
+            summary, int(os.environ.get("ATREX_PES_DB_SUMMARY_CHARS", "16384"))
+        )
 
     evaluation = compact.get("evaluation")
     if isinstance(evaluation, str):
         try:
             parsed = json.loads(evaluation)
         except Exception:
-            compact["evaluation"] = _truncate_text(evaluation, 3000)
+            compact["evaluation"] = _truncate_text(
+                evaluation,
+                int(os.environ.get("ATREX_PES_DB_EVALUATION_CHARS", "16384")),
+            )
         else:
             metrics = parsed.get("metrics") if isinstance(parsed, dict) else None
-            per_workload = parsed.get("per_workload") if isinstance(parsed, dict) else None
+            per_workload = (
+                parsed.get("per_workload") if isinstance(parsed, dict) else None
+            )
             compact_eval = {
                 "status": parsed.get("status") if isinstance(parsed, dict) else None,
                 "summary": parsed.get("summary") if isinstance(parsed, dict) else None,
@@ -315,7 +325,9 @@ def _deduplicate_memory_indexes(memory: object) -> int:
                 for duplicate in group:
                     if duplicate.solution_id == canonical.solution_id:
                         continue
-                    duplicate_to_canonical[duplicate.solution_id] = canonical.solution_id
+                    duplicate_to_canonical[duplicate.solution_id] = (
+                        canonical.solution_id
+                    )
                     duplicate_metadata = getattr(duplicate, "metadata", None)
                     if isinstance(duplicate_metadata, dict):
                         duplicate_metadata["duplicate_of"] = canonical.solution_id
@@ -330,7 +342,9 @@ def _deduplicate_memory_indexes(memory: object) -> int:
                 solution_id = duplicate_to_canonical.get(solution_id, solution_id)
                 solution = populations.get(solution_id)
                 if solution is not None:
-                    elite_groups.setdefault(_solution_source_hash(solution), []).append(solution)
+                    elite_groups.setdefault(_solution_source_hash(solution), []).append(
+                        solution
+                    )
             elites.clear()
             for group in elite_groups.values():
                 elites.add(_canonical_solution(group).solution_id)
@@ -359,7 +373,9 @@ def _deduplicate_memory_indexes(memory: object) -> int:
         island_bests = getattr(memory, "island_best_solution", None)
         if isinstance(island_bests, list):
             for index, solution_id in enumerate(island_bests):
-                island_bests[index] = duplicate_to_canonical.get(solution_id, solution_id)
+                island_bests[index] = duplicate_to_canonical.get(
+                    solution_id, solution_id
+                )
 
         if hasattr(memory, "island_capacity"):
             memory.island_capacity = [len(island) for island in islands]
@@ -367,11 +383,19 @@ def _deduplicate_memory_indexes(memory: object) -> int:
     return len(duplicate_to_canonical)
 
 
+def _require_signature(callable_obj: object, expected: tuple[str, ...]) -> None:
+    actual = tuple(inspect.signature(callable_obj).parameters)
+    if actual != expected:
+        name = getattr(callable_obj, "__qualname__", repr(callable_obj))
+        raise RuntimeError(
+            f"LoongFlow compatibility signature mismatch for {name}: "
+            f"expected {expected}, got {actual}"
+        )
+
+
 def _patch_evolution_database_selection() -> None:
     source_dedup_enabled = os.environ.get("ATREX_PES_SOURCE_DEDUP", "1") == "1"
-    architecture_enabled = (
-        os.environ.get("ATREX_PES_ARCHITECTURE_ISLANDS", "1") == "1"
-    )
+    architecture_enabled = os.environ.get("ATREX_PES_ARCHITECTURE_ISLANDS", "1") == "1"
     if not source_dedup_enabled and not architecture_enabled:
         return
     try:
@@ -385,6 +409,16 @@ def _patch_evolution_database_selection() -> None:
 
     if getattr(EvolveDatabase, "_atrex_evolution_patched", False):
         return
+
+    _require_signature(EvolveDatabase.sample_solution, ("self", "island_id"))
+    _require_signature(EvolveDatabase.add_solution, ("self", "solution"))
+    _require_signature(EvolveDatabase.load_checkpoint, ("self", "checkpoint_path"))
+    _require_signature(
+        EvolveDatabase.save_checkpoint, ("self", "checkpoint_path", "tag")
+    )
+    if architecture_enabled:
+        _require_signature(InMemory._prepare_solution, ("self", "solution"))
+        _require_signature(InMemory._check_migration, ("self",))
 
     original_add_solution = EvolveDatabase.add_solution
     original_load_checkpoint = EvolveDatabase.load_checkpoint
@@ -460,13 +494,9 @@ def _patch_evolution_database_selection() -> None:
 
         if architecture_enabled:
             num_islands, migration_interval = architecture_settings(self)
-            initialize_architecture_memory(
-                memory, num_islands, migration_interval
-            )
+            initialize_architecture_memory(memory, num_islands, migration_interval)
         reconciled = _reconcile_authoritative_scores(memory)
-        removed = (
-            _deduplicate_memory_indexes(memory) if source_dedup_enabled else 0
-        )
+        removed = _deduplicate_memory_indexes(memory) if source_dedup_enabled else 0
         recent = memory.list_solutions(filter_type="desc", limit=5)
         recent_scores = [
             float(solution.score)
@@ -508,13 +538,9 @@ def _patch_evolution_database_selection() -> None:
 
         if architecture_enabled:
             num_islands, migration_interval = architecture_settings(self)
-            initialize_architecture_memory(
-                memory, num_islands, migration_interval
-            )
+            initialize_architecture_memory(memory, num_islands, migration_interval)
             if isinstance(source, str) and source.strip():
-                analysis = classify_and_route_solution(
-                    memory, solution, num_islands
-                )
+                analysis = classify_and_route_solution(memory, solution, num_islands)
                 logger.info(
                     "Summary architecture route: label=%s pca_cluster=%d island=%d",
                     analysis["label"],
@@ -534,9 +560,7 @@ def _patch_evolution_database_selection() -> None:
         source_hash = _solution_source_hash(solution)
         island_id = int(getattr(solution, "island_id", 0) or 0)
         island_ids = (
-            memory.islands[island_id]
-            if 0 <= island_id < len(memory.islands)
-            else set()
+            memory.islands[island_id] if 0 <= island_id < len(memory.islands) else set()
         )
         matching = [
             memory.populations[solution_id]
@@ -616,9 +640,7 @@ def _patch_evolution_database_selection() -> None:
         result = await original_save_checkpoint(self, checkpoint_path, tag)
         memory = getattr(self._evolution_memory, "_memory", None)
         if architecture_enabled and memory is not None:
-            if not write_architecture_checkpoint(
-                memory, checkpoint_path, tag
-            ):
+            if not write_architecture_checkpoint(memory, checkpoint_path, tag):
                 logger.warning(
                     "Architecture checkpoint metadata was not written for tag %s",
                     tag,
@@ -661,6 +683,7 @@ def _patch_database_tools() -> None:
         if tool_cls is None or getattr(tool_cls, "_atrex_patched", False):
             continue
         original_init = tool_cls.__init__
+        _require_signature(original_init, ("self", "func"))
 
         def patched_init(self, func=None, _original_init=original_init):
             _original_init(self, _wrap_database_func(func))
@@ -684,13 +707,17 @@ def _patch_planner_write_tool() -> None:
     if getattr(build_tool, "_atrex_write_patched", False):
         return
 
+    _require_signature(build_tool.build_planner_write_tool, ("context",))
+
     def build_planner_write_tool(context):
         async def write_func(file_path: str, content: str):
             planner_base = Path(Workspace.get_planner_path(context))
             planner_base.mkdir(parents=True, exist_ok=True)
 
             requested = Path(file_path)
-            target = requested if requested.is_absolute() else planner_base / requested.name
+            target = (
+                requested if requested.is_absolute() else planner_base / requested.name
+            )
             if not str(target).startswith(str(planner_base)):
                 target = planner_base / target.name
 
@@ -734,6 +761,7 @@ def _patch_planner_empty_plan_fallback() -> None:
         return
 
     original_run = EvolvePlanAgent.run
+    _require_signature(original_run, ("self", "context", "message"))
 
     async def patched_run(self, context, message):
         result = await original_run(self, context, message)
@@ -741,12 +769,22 @@ def _patch_planner_empty_plan_fallback() -> None:
             elements = result.get_elements(ContentElement)
             data = elements[0].data if elements else {}
             best_plan_path = Path(data.get("best_plan_file_path", ""))
-            if best_plan_path.exists() and best_plan_path.read_text(encoding="utf-8").strip():
+            if (
+                best_plan_path.exists()
+                and best_plan_path.read_text(encoding="utf-8").strip()
+            ):
                 return result
 
             planner_dir = best_plan_path.parent
             fallback = ""
-            for name in ("plan_3.txt", "plan3.txt", "plan_2.txt", "plan2.txt", "plan_1.txt", "plan1.txt"):
+            for name in (
+                "plan_3.txt",
+                "plan3.txt",
+                "plan_2.txt",
+                "plan2.txt",
+                "plan_1.txt",
+                "plan1.txt",
+            ):
                 candidate = planner_dir / name
                 if candidate.exists():
                     text = candidate.read_text(encoding="utf-8").strip()
@@ -793,6 +831,17 @@ def _patch_fuse_executor_parallel_cap() -> None:
         return
 
     original_gen_multi_candidate = EvolveExecuteAgentFuse.gen_multi_candidate
+    _require_signature(
+        original_gen_multi_candidate,
+        (
+            "self",
+            "context",
+            "parent_ctx",
+            "round_idx",
+            "parallel_candidates",
+            "previous_attempts",
+        ),
+    )
 
     async def patched_gen_multi_candidate(
         self,
@@ -815,9 +864,170 @@ def _patch_fuse_executor_parallel_cap() -> None:
     EvolveExecuteAgentFuse._atrex_parallel_cap_patched = True
 
 
-_patch_evolution_database_selection()
-_patch_database_tools()
-_patch_planner_write_tool()
-_patch_planner_empty_plan_fallback()
-_patch_fuse_executor_parallel_cap()
-_patch_summary_ncu_interpretation()
+def _enabled(name: str, default: str = "1") -> bool:
+    return os.environ.get(name, default).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _verify_evolution_patch() -> tuple[bool, str]:
+    if not (
+        _enabled("ATREX_PES_SOURCE_DEDUP") or _enabled("ATREX_PES_ARCHITECTURE_ISLANDS")
+    ):
+        return True, "disabled"
+    from loongflow.framework.pes.database.database import EvolveDatabase
+
+    if not getattr(EvolveDatabase, "_atrex_evolution_patched", False):
+        return False, "EvolveDatabase sentinel missing"
+    if _enabled("ATREX_PES_ARCHITECTURE_ISLANDS"):
+        from loongflow.agentsdk.memory.evolution.in_memory import InMemory
+
+        if not getattr(InMemory, "_atrex_architecture_patched", False):
+            return False, "InMemory architecture sentinel missing"
+    return True, "EvolveDatabase/InMemory"
+
+
+def _verify_database_tools_patch() -> tuple[bool, str]:
+    if not _enabled("ATREX_PES_COMPACT_DB_TOOLS"):
+        return True, "disabled"
+    from loongflow.framework.pes.database import database_tool
+
+    names = (
+        "GetSolutionsTool",
+        "GetBestSolutionsTool",
+        "GetParentsByChildIdTool",
+        "GetChildsByParentTool",
+    )
+    missing = [
+        name
+        for name in names
+        if not getattr(getattr(database_tool, name, object), "_atrex_patched", False)
+    ]
+    return (not missing, "database tools" if not missing else f"missing {missing}")
+
+
+def _verify_planner_write_patch() -> tuple[bool, str]:
+    from agents.math_agent.planner import build_tool
+
+    applied = bool(getattr(build_tool, "_atrex_write_patched", False))
+    return applied, (
+        "planner Write tool" if applied else "planner Write sentinel missing"
+    )
+
+
+def _verify_empty_plan_patch() -> tuple[bool, str]:
+    from agents.math_agent.planner.plan_agent import EvolvePlanAgent
+
+    applied = bool(getattr(EvolvePlanAgent, "_atrex_empty_plan_patched", False))
+    return applied, (
+        "planner fallback" if applied else "planner fallback sentinel missing"
+    )
+
+
+def _verify_fuse_patch() -> tuple[bool, str]:
+    if not os.environ.get("ATREX_PES_MAX_PARALLEL_CANDIDATES", ""):
+        return True, "disabled"
+    from agents.math_agent.executor.execute_fuse.execute_agent_fuse import (
+        EvolveExecuteAgentFuse,
+    )
+
+    applied = bool(
+        getattr(EvolveExecuteAgentFuse, "_atrex_parallel_cap_patched", False)
+    )
+    return applied, "fuse parallel cap" if applied else "fuse cap sentinel missing"
+
+
+def _verify_ncu_patch() -> tuple[bool, str]:
+    if not _enabled("SOL58_NCU_SUMMARY", "0"):
+        return True, "disabled"
+    from agents.math_agent.summary import summary_agent
+
+    prompt = getattr(summary_agent, "EVOLVE_SUMMARY_USER_PROMPT", "")
+    applied = isinstance(prompt, str) and _NCU_SUMMARY_MARKER in prompt
+    return applied, "summary NCU prompt" if applied else "summary NCU marker missing"
+
+
+def _apply_manifest_patch(
+    name: str,
+    patcher: object,
+    verifier: object,
+    *,
+    required: bool,
+) -> None:
+    error = ""
+    try:
+        patcher()
+        applied, target = verifier()
+    except Exception as exc:
+        applied, target = False, ""
+        error = f"{type(exc).__name__}: {exc}"
+    PATCH_MANIFEST[name] = {
+        "required": bool(required),
+        "applied": bool(applied),
+        "target": target,
+        "error": error,
+    }
+
+
+def apply_compat_patches() -> None:
+    PATCH_MANIFEST.clear()
+    _apply_manifest_patch(
+        "evolution_database",
+        _patch_evolution_database_selection,
+        _verify_evolution_patch,
+        required=(
+            _enabled("ATREX_PES_SOURCE_DEDUP")
+            or _enabled("ATREX_PES_ARCHITECTURE_ISLANDS")
+        ),
+    )
+    _apply_manifest_patch(
+        "database_tools",
+        _patch_database_tools,
+        _verify_database_tools_patch,
+        required=_enabled("ATREX_PES_COMPACT_DB_TOOLS"),
+    )
+    _apply_manifest_patch(
+        "planner_write",
+        _patch_planner_write_tool,
+        _verify_planner_write_patch,
+        required=True,
+    )
+    _apply_manifest_patch(
+        "planner_empty_plan",
+        _patch_planner_empty_plan_fallback,
+        _verify_empty_plan_patch,
+        required=True,
+    )
+    _apply_manifest_patch(
+        "executor_parallel_cap",
+        _patch_fuse_executor_parallel_cap,
+        _verify_fuse_patch,
+        required=bool(os.environ.get("ATREX_PES_MAX_PARALLEL_CANDIDATES", "")),
+    )
+    _apply_manifest_patch(
+        "summary_ncu",
+        _patch_summary_ncu_interpretation,
+        _verify_ncu_patch,
+        required=_enabled("SOL58_NCU_SUMMARY", "0"),
+    )
+
+
+def validate_patch_manifest() -> dict[str, dict[str, object]]:
+    failures = {
+        name: entry
+        for name, entry in PATCH_MANIFEST.items()
+        if entry.get("required") and not entry.get("applied")
+    }
+    if failures:
+        details = "; ".join(
+            f"{name}: {entry.get('error') or entry.get('target')}"
+            for name, entry in failures.items()
+        )
+        raise RuntimeError(f"required Atrex LoongFlow patches are inactive: {details}")
+    return json.loads(json.dumps(PATCH_MANIFEST))
+
+
+apply_compat_patches()

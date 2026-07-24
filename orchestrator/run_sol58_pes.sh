@@ -166,6 +166,7 @@ export SOL58_TARGET_LATENCY_MS="${SOL58_TARGET_LATENCY_MS:-0.006797}"
 export SOL58_TARGET_SCORE="${SOL58_TARGET_SCORE:-0.904135}"
 export SOL58_LOCAL_REPEAT_COUNT="${SOL58_LOCAL_REPEAT_COUNT:-3}"
 export SOL58_LOCAL_BEST_GATE="${SOL58_LOCAL_BEST_GATE:-1}"
+export SOL58_LOCAL_EVAL_CACHE="${SOL58_LOCAL_EVAL_CACHE:-1}"
 export SOL58_OFFICIAL_FITNESS="${SOL58_OFFICIAL_FITNESS:-1}"
 export SOL58_OFFICIAL_EVAL_STACK_VERSION="${SOL58_OFFICIAL_EVAL_STACK_VERSION:-v1.1}"
 export SOL58_OFFICIAL_SUBMISSION_MODE="${SOL58_OFFICIAL_SUBMISSION_MODE:-private}"
@@ -176,6 +177,8 @@ export SOL58_OFFICIAL_ASYNC_SUBMIT="${SOL58_OFFICIAL_ASYNC_SUBMIT:-1}"
 export SOL58_OFFICIAL_ASYNC_REFRESH_DELAY="${SOL58_OFFICIAL_ASYNC_REFRESH_DELAY:-60}"
 export SOL58_OFFICIAL_PENDING_RESULT_GRACE="${SOL58_OFFICIAL_PENDING_RESULT_GRACE:-60}"
 export SOL58_OFFICIAL_CACHE_REFRESH_TIMEOUT="${SOL58_OFFICIAL_CACHE_REFRESH_TIMEOUT:-0}"
+export SOL58_OFFICIAL_REFRESH_BATCH_SIZE="${SOL58_OFFICIAL_REFRESH_BATCH_SIZE:-2}"
+export SOL58_CALIBRATION_HALF_LIFE_HOURS="${SOL58_CALIBRATION_HALF_LIFE_HOURS:-336}"
 export SOL58_OFFICIAL_PENDING_SCORE_POLICY="${SOL58_OFFICIAL_PENDING_SCORE_POLICY:-local_proxy}"
 DEFAULT_PROVISIONAL_SCORE_CAP="$(awk -v target="${SOL58_TARGET_SCORE}" 'BEGIN { printf "%.6f", target - 0.005 }')"
 export SOL58_OFFICIAL_PROVISIONAL_SCORE_CAP="${SOL58_OFFICIAL_PROVISIONAL_SCORE_CAP:-${DEFAULT_PROVISIONAL_SCORE_CAP}}"
@@ -256,12 +259,16 @@ export LLM_BASE_URL="${LLM_BASE_URL:-https://api.chatanywhere.tech/v1}"
 export LLM_MODEL="${LLM_MODEL:-openai/claude-opus-4-7}"
 export LLM_PROVIDER="${LLM_PROVIDER:-openai}"
 export LLM_TEMPERATURE="${LLM_TEMPERATURE:-0.9}"
-export LLM_CONTEXT_LENGTH="${LLM_CONTEXT_LENGTH:-128000}"
+export LLM_CONTEXT_LENGTH="${LLM_CONTEXT_LENGTH:-1000000}"
 export LLM_MAX_TOKENS="${LLM_MAX_TOKENS:-32768}"
 export LLM_TIMEOUT="${LLM_TIMEOUT:-240}"
 export ATREX_PES_MAX_PARALLEL_CANDIDATES="${ATREX_PES_MAX_PARALLEL_CANDIDATES:-1}"
 export ATREX_PES_SOURCE_DEDUP="${ATREX_PES_SOURCE_DEDUP:-1}"
 export ATREX_PES_ARCHITECTURE_ISLANDS="${ATREX_PES_ARCHITECTURE_ISLANDS:-1}"
+export ATREX_PES_COMPACT_DB_TOOLS="${ATREX_PES_COMPACT_DB_TOOLS:-1}"
+export ATREX_PES_DB_SOLUTION_CHARS="${ATREX_PES_DB_SOLUTION_CHARS:-65536}"
+export ATREX_PES_DB_SUMMARY_CHARS="${ATREX_PES_DB_SUMMARY_CHARS:-16384}"
+export ATREX_PES_DB_EVALUATION_CHARS="${ATREX_PES_DB_EVALUATION_CHARS:-16384}"
 
 if [[ ! "${SOL58_NUM_ISLANDS}" =~ ^[1-9][0-9]*$ ]]; then
   echo "error: SOL58_NUM_ISLANDS must be a positive integer" >&2
@@ -269,6 +276,10 @@ if [[ ! "${SOL58_NUM_ISLANDS}" =~ ^[1-9][0-9]*$ ]]; then
 fi
 if [[ ! "${SOL58_ARCHITECTURE_MIGRATION_INTERVAL}" =~ ^[1-9][0-9]*$ ]]; then
   echo "error: SOL58_ARCHITECTURE_MIGRATION_INTERVAL must be a positive integer" >&2
+  exit 2
+fi
+if [[ "${ATREX_PES_ARCHITECTURE_ISLANDS}" == "1" ]] && ((SOL58_NUM_ISLANDS < 6)); then
+  echo "error: architecture-aware PES requires at least 6 islands; got ${SOL58_NUM_ISLANDS}" >&2
   exit 2
 fi
 
@@ -396,6 +407,15 @@ for required in task_config.yaml task_prompt.txt initial_kernel.cu eval_program_
   fi
 done
 
+echo "[Atrex] Validating required LoongFlow compatibility patches..."
+python - <<'PY'
+import json
+import sitecustomize
+
+manifest = sitecustomize.validate_patch_manifest()
+print("[Atrex] Patch manifest: " + json.dumps(manifest, sort_keys=True))
+PY
+
 mkdir -p "${RUN_DIR}" "${SOL58_PES_WORKSPACE}" "${SOL58_EVAL_ROOT}"
 cd "${RUN_DIR}" || exit 1
 
@@ -465,7 +485,7 @@ echo "        target_score=${SOL58_TARGET_SCORE}"
 echo "        code_language=${SOL58_CODE_LANGUAGE}"
 echo "        cutedsl_rate=${SOL58_CUTEDSL_GENERATION_RATE} period=${SOL58_CUTEDSL_SCHEDULE_PERIOD}"
 echo "        architecture_islands=${SOL58_NUM_ISLANDS} exchange_interval=${SOL58_ARCHITECTURE_MIGRATION_INTERVAL}"
-echo "        local_repeat_count=${SOL58_LOCAL_REPEAT_COUNT} local_best_gate=${SOL58_LOCAL_BEST_GATE}"
+echo "        local_repeat_count=${SOL58_LOCAL_REPEAT_COUNT} local_best_gate=${SOL58_LOCAL_BEST_GATE} local_cache=${SOL58_LOCAL_EVAL_CACHE}"
 echo "        measurement_profile=${SOL58_MEASUREMENT_PROFILE} gpu=${CUDA_VISIBLE_DEVICES:-auto} physical_clock_gpu=${SOL58_CLOCK_GPU_INDEX:-n/a}"
 echo "        clocks=${SOL_EXECBENCH_GPU_CLK_MHZ:-auto}/${SOL_EXECBENCH_DRAM_CLK_MHZ:-auto}MHz lock=${SOL58_LOCK_CLOCKS} cuda_gencode=${SOL58_CUDA_GENCODE:-runtime-native}"
 echo "        local_eval_stack=${SOL58_LOCAL_EVAL_STACK_ID} sol_execbench=${SOL_EXECBENCH:-sol-execbench}"
@@ -473,6 +493,7 @@ echo "        ncu_summary=${SOL58_NCU_SUMMARY} policy=${SOL58_NCU_PROFILE_POLICY
 echo "        initial_file=${INITIAL_FILE} react_score_threshold=${SOL58_REACT_SCORE_THRESHOLD}"
 echo "        official_fitness=${SOL58_OFFICIAL_FITNESS} stack=${SOL58_OFFICIAL_EVAL_STACK_VERSION} mode=${SOL58_OFFICIAL_SUBMISSION_MODE}"
 echo "        official_async_submit=${SOL58_OFFICIAL_ASYNC_SUBMIT} refresh_delay=${SOL58_OFFICIAL_ASYNC_REFRESH_DELAY}s request_timeout=${SOL58_OFFICIAL_REQUEST_TIMEOUT}s"
+echo "        official_refresh_batch=${SOL58_OFFICIAL_REFRESH_BATCH_SIZE} calibration_half_life=${SOL58_CALIBRATION_HALF_LIFE_HOURS}h"
 echo "        official_poll_timeout=${SOL58_OFFICIAL_POLL_TIMEOUT}s pending_policy=${SOL58_OFFICIAL_PENDING_SCORE_POLICY} provisional_cap=${SOL58_OFFICIAL_PROVISIONAL_SCORE_CAP}"
 echo "        run_dir=${RUN_DIR}"
 echo "        workspace=${SOL58_PES_WORKSPACE}"

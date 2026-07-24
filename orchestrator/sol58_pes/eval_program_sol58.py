@@ -10,6 +10,8 @@ standard LoongFlow {status, summary, score, metrics, artifacts} dictionary.
 from __future__ import annotations
 
 import ast
+import contextlib
+import fcntl
 import hashlib
 import json
 import math
@@ -20,6 +22,7 @@ import shutil
 import statistics
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import traceback
@@ -53,21 +56,19 @@ COMPILE_TIMEOUT = int(os.environ.get("SOL58_COMPILE_TIMEOUT", "180"))
 RUN_TIMEOUT = int(os.environ.get("SOL58_SOL_TIMEOUT", "120"))
 LOCAL_REPEAT_COUNT = max(1, int(os.environ.get("SOL58_LOCAL_REPEAT_COUNT", "3")))
 LOCAL_BEST_GATE = _env_bool("SOL58_LOCAL_BEST_GATE", True)
-MEASUREMENT_PROFILE_NAME = os.environ.get(
-    "SOL58_MEASUREMENT_PROFILE", "native"
-).strip().lower()
-CODE_LANGUAGE = os.environ.get("SOL58_CODE_LANGUAGE", "cuda_cpp").strip().lower()
-CUTEDSL_GENERATION_RATE = float(
-    os.environ.get("SOL58_CUTEDSL_GENERATION_RATE", "0.5")
+MEASUREMENT_PROFILE_NAME = (
+    os.environ.get("SOL58_MEASUREMENT_PROFILE", "native").strip().lower()
 )
+CODE_LANGUAGE = os.environ.get("SOL58_CODE_LANGUAGE", "cuda_cpp").strip().lower()
+CUTEDSL_GENERATION_RATE = float(os.environ.get("SOL58_CUTEDSL_GENERATION_RATE", "0.5"))
 CUTEDSL_SCHEDULE_PERIOD = max(
     1,
     int(os.environ.get("SOL58_CUTEDSL_SCHEDULE_PERIOD", "10")),
 )
 NCU_SUMMARY_ENABLED = _env_bool("SOL58_NCU_SUMMARY", False)
-NCU_PROFILE_POLICY = os.environ.get(
-    "SOL58_NCU_PROFILE_POLICY", "all_correct"
-).strip().lower()
+NCU_PROFILE_POLICY = (
+    os.environ.get("SOL58_NCU_PROFILE_POLICY", "all_correct").strip().lower()
+)
 OFFICIAL_FITNESS = _env_bool("SOL58_OFFICIAL_FITNESS", False)
 OFFICIAL_BASE_URL = os.environ.get(
     "SOL58_OFFICIAL_BASE_URL",
@@ -75,23 +76,37 @@ OFFICIAL_BASE_URL = os.environ.get(
 ).rstrip("/")
 OFFICIAL_KERNEL_ID = int(os.environ.get("SOL58_OFFICIAL_KERNEL_ID", "58"))
 OFFICIAL_GPU_TYPE = os.environ.get("SOL58_OFFICIAL_GPU_TYPE", "B200")
-OFFICIAL_EVAL_STACK_VERSION = os.environ.get("SOL58_OFFICIAL_EVAL_STACK_VERSION", "v1.1")
+OFFICIAL_EVAL_STACK_VERSION = os.environ.get(
+    "SOL58_OFFICIAL_EVAL_STACK_VERSION", "v1.1"
+)
 OFFICIAL_SUBMISSION_MODE = os.environ.get("SOL58_OFFICIAL_SUBMISSION_MODE", "private")
 OFFICIAL_POLL_INTERVAL = float(os.environ.get("SOL58_OFFICIAL_POLL_INTERVAL", "10"))
 OFFICIAL_POLL_TIMEOUT = float(os.environ.get("SOL58_OFFICIAL_POLL_TIMEOUT", "180"))
 OFFICIAL_REQUEST_TIMEOUT = float(os.environ.get("SOL58_OFFICIAL_REQUEST_TIMEOUT", "10"))
 OFFICIAL_CACHE = _env_bool("SOL58_OFFICIAL_CACHE", True)
+LOCAL_EVAL_CACHE = _env_bool("SOL58_LOCAL_EVAL_CACHE", True)
 OFFICIAL_ASYNC_SUBMIT = _env_bool("SOL58_OFFICIAL_ASYNC_SUBMIT", True)
 OFFICIAL_ASYNC_REFRESH_DELAY = float(
     os.environ.get("SOL58_OFFICIAL_ASYNC_REFRESH_DELAY", "60")
 )
 OFFICIAL_MIN_LOCAL_SCORE = float(os.environ.get("SOL58_OFFICIAL_MIN_LOCAL_SCORE", "0"))
-OFFICIAL_PENDING_RESULT_GRACE = float(os.environ.get("SOL58_OFFICIAL_PENDING_RESULT_GRACE", "60"))
-OFFICIAL_CACHE_REFRESH_TIMEOUT = float(os.environ.get("SOL58_OFFICIAL_CACHE_REFRESH_TIMEOUT", "0"))
-OFFICIAL_PENDING_SCORE_POLICY = os.environ.get(
-    "SOL58_OFFICIAL_PENDING_SCORE_POLICY",
-    "local_proxy",
-).strip().lower()
+OFFICIAL_PENDING_RESULT_GRACE = float(
+    os.environ.get("SOL58_OFFICIAL_PENDING_RESULT_GRACE", "60")
+)
+OFFICIAL_CACHE_REFRESH_TIMEOUT = float(
+    os.environ.get("SOL58_OFFICIAL_CACHE_REFRESH_TIMEOUT", "0")
+)
+OFFICIAL_REFRESH_BATCH_SIZE = max(
+    1, int(os.environ.get("SOL58_OFFICIAL_REFRESH_BATCH_SIZE", "4"))
+)
+OFFICIAL_PENDING_SCORE_POLICY = (
+    os.environ.get(
+        "SOL58_OFFICIAL_PENDING_SCORE_POLICY",
+        "local_proxy",
+    )
+    .strip()
+    .lower()
+)
 OFFICIAL_TARGET_SCORE = float(os.environ.get("SOL58_TARGET_SCORE", "0.904135"))
 OFFICIAL_PROVISIONAL_SCORE_CAP = float(
     os.environ.get(
@@ -127,6 +142,73 @@ SUPPORTED_CODE_LANGUAGES = {
     SOURCE_LANGUAGE_AUTO,
 }
 
+LOCAL_EVAL_CACHE_SCHEMA_VERSION = 2
+
+
+@contextlib.contextmanager
+def _file_lock(path: Path):
+    """Serialize cross-process updates associated with one state file."""
+    lock_path = Path(f"{path}.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+", encoding="utf-8") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+def _read_json(path: Path, default: Any = None) -> Any:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return default
+
+
+def _atomic_write_json(path: Path, payload: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as temp_file:
+            json.dump(payload, temp_file, indent=2, ensure_ascii=False)
+            temp_file.write("\n")
+            temp_file.flush()
+            os.fsync(temp_file.fileno())
+            temp_path = Path(temp_file.name)
+        os.replace(temp_path, path)
+    finally:
+        if temp_path is not None and temp_path.exists():
+            temp_path.unlink(missing_ok=True)
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as temp_file:
+            temp_file.write(text)
+            temp_file.flush()
+            os.fsync(temp_file.fileno())
+            temp_path = Path(temp_file.name)
+        os.replace(temp_path, path)
+    finally:
+        if temp_path is not None and temp_path.exists():
+            temp_path.unlink(missing_ok=True)
+
 
 def _tail(text: str, limit: int = 4000) -> str:
     if not text:
@@ -156,9 +238,7 @@ def _measurement_profile() -> dict[str, Any]:
         "lock_clocks": _env_bool("SOL58_LOCK_CLOCKS", False),
         "gpu_clock_mhz": int(os.environ.get("SOL_EXECBENCH_GPU_CLK_MHZ", "0") or 0),
         "dram_clock_mhz": int(os.environ.get("SOL_EXECBENCH_DRAM_CLK_MHZ", "0") or 0),
-        "clock_tolerance_mhz": int(
-            os.environ.get("SOL58_CLOCK_TOLERANCE_MHZ", "10")
-        ),
+        "clock_tolerance_mhz": int(os.environ.get("SOL58_CLOCK_TOLERANCE_MHZ", "10")),
         "clock_monitor_interval_seconds": float(
             os.environ.get("SOL58_CLOCK_MONITOR_INTERVAL_SECONDS", "0.1")
         ),
@@ -316,9 +396,7 @@ def _monitor_measurement_clocks(
                 if _env_bool("SOL58_AUTO_RELOCK_CLOCKS", False):
                     _set_measurement_clocks(profile, stabilize=False)
         except Exception as exc:
-            drift_events.append(
-                {"detected_at": time.time(), "monitor_error": str(exc)}
-            )
+            drift_events.append({"detected_at": time.time(), "monitor_error": str(exc)})
         stop.wait(interval)
 
 
@@ -380,7 +458,9 @@ def _required_source_language(
         return mode
 
     rate = CUTEDSL_GENERATION_RATE if cutedsl_rate is None else float(cutedsl_rate)
-    period = CUTEDSL_SCHEDULE_PERIOD if schedule_period is None else int(schedule_period)
+    period = (
+        CUTEDSL_SCHEDULE_PERIOD if schedule_period is None else int(schedule_period)
+    )
     if not 0.0 <= rate <= 1.0:
         raise ValueError("SOL58_CUTEDSL_GENERATION_RATE must be between 0 and 1")
     if period <= 0:
@@ -433,7 +513,10 @@ def _extract_kernel_source(raw: str, code_language: str | None = None) -> str:
                     )
             if mode != SOURCE_LANGUAGE_AUTO:
                 for _, content, path_language in candidates:
-                    if path_language == mode or _detect_source_language(content) == mode:
+                    if (
+                        path_language == mode
+                        or _detect_source_language(content) == mode
+                    ):
                         return content
             else:
                 for _, content, _ in candidates:
@@ -533,7 +616,10 @@ def _python_dependency_violation(kernel_source: str) -> str | None:
 
         for module in modules:
             root = module.split(".", 1)[0]
-            if root not in _ALLOWED_CUTE_IMPORT_ROOTS and root not in _STDLIB_IMPORT_ROOTS:
+            if (
+                root not in _ALLOWED_CUTE_IMPORT_ROOTS
+                and root not in _STDLIB_IMPORT_ROOTS
+            ):
                 return (
                     f"line {node.lineno}: import {module!r} is not an allowed standalone "
                     "CuTe DSL runtime dependency"
@@ -562,7 +648,8 @@ def _cute_dsl_validation_error(kernel_source: str) -> str | None:
         (
             node
             for node in tree.body
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "run"
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == "run"
         ),
         None,
     )
@@ -597,7 +684,10 @@ def _candidate_validation_error(
             "complete CuTe DSL Python source with run()",
         )
     if mode != SOURCE_LANGUAGE_AUTO and detected != mode:
-        return detected, f"candidate language {detected!r} is not allowed in {mode!r} mode"
+        return (
+            detected,
+            f"candidate language {detected!r} is not allowed in {mode!r} mode",
+        )
 
     if detected == SOURCE_LANGUAGE_CUDA:
         if "#include" not in kernel_source or "PYBIND11_MODULE" not in kernel_source:
@@ -655,11 +745,16 @@ def _detect_cuda_gencode_flags() -> list[str]:
         pass
 
     try:
-        out = subprocess.check_output(
-            ["nvidia-smi", "--query-gpu=compute_cap", "--format=csv,noheader"],
-            text=True,
-            stderr=subprocess.DEVNULL,
-        ).strip().splitlines()[0].strip()
+        out = (
+            subprocess.check_output(
+                ["nvidia-smi", "--query-gpu=compute_cap", "--format=csv,noheader"],
+                text=True,
+                stderr=subprocess.DEVNULL,
+            )
+            .strip()
+            .splitlines()[0]
+            .strip()
+        )
         arch = out.replace(".", "")
         return [f"-gencode=arch=compute_{arch},code=sm_{arch}"]
     except Exception:
@@ -674,7 +769,11 @@ def _write_solution(workspace: Path, kernel_source: str, source_language: str) -
     if source_language == SOURCE_LANGUAGE_CUDA:
         source_path = "kernel.cu"
         description = "LoongFlow PES-generated CUDA C++ candidate for SOL kernel 58."
-        cuda_cflags = ["-O3", "--use_fast_math", "-std=c++17"] + _detect_cuda_gencode_flags()
+        cuda_cflags = [
+            "-O3",
+            "--use_fast_math",
+            "-std=c++17",
+        ] + _detect_cuda_gencode_flags()
         spec = {
             "languages": [SOURCE_LANGUAGE_CUDA],
             "target_hardware": ["B200", "LOCAL"],
@@ -738,8 +837,7 @@ def _run_sol_execbench(
     sol_execbench_path = Path(SOL_EXECBENCH)
     if sol_execbench_path.parent != Path(".") and sol_execbench_path.is_file():
         child_env["PATH"] = (
-            f"{sol_execbench_path.resolve().parent}:"
-            f"{child_env.get('PATH', '')}"
+            f"{sol_execbench_path.resolve().parent}:" f"{child_env.get('PATH', '')}"
         )
     return subprocess.run(
         cmd,
@@ -820,7 +918,11 @@ def _parse_traces(
     if not traces_path.exists():
         return {"traces": [], "error": f"no traces produced at {traces_path}"}
 
-    traces = [json.loads(line) for line in traces_path.read_text().splitlines() if line.strip()]
+    traces = [
+        json.loads(line)
+        for line in traces_path.read_text().splitlines()
+        if line.strip()
+    ]
     latencies_ms: list[float] = []
     per_workload: list[dict[str, Any]] = []
     failures: list[str] = []
@@ -854,7 +956,11 @@ def _parse_traces(
         }
         per_workload.append(entry)
 
-        if status == "PASSED" and isinstance(latency_ms, (int, float)) and latency_ms > 0:
+        if (
+            status == "PASSED"
+            and isinstance(latency_ms, (int, float))
+            and latency_ms > 0
+        ):
             latencies_ms.append(float(latency_ms))
         else:
             failures.append(f"{idx}:{status}:{axes}")
@@ -866,7 +972,9 @@ def _parse_traces(
         "failures": failures,
         "per_workload": per_workload,
         "latency_ms_geomean": _geomean(latencies_ms),
-        "latency_ms_arith_mean": (sum(latencies_ms) / len(latencies_ms)) if latencies_ms else 0.0,
+        "latency_ms_arith_mean": (
+            (sum(latencies_ms) / len(latencies_ms)) if latencies_ms else 0.0
+        ),
         "max_abs_err": max_abs,
         "max_rel_err": max_rel,
     }
@@ -889,6 +997,42 @@ def _authoritative_fitness_registry_path() -> Path:
     return EVAL_ROOT / "official_cache" / "authoritative_fitness.json"
 
 
+def _record_authoritative_fitness_by_hash(
+    source_hash: str,
+    *,
+    source_language: str,
+    official_score: float,
+    official_latency_ms: float,
+    local_latency_ms: float,
+    submission_id: Any,
+    measurement_profile_id: str | None = None,
+) -> None:
+    path = _authoritative_fitness_registry_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with _file_lock(path):
+        registry = _read_json(path, {})
+        if not isinstance(registry, dict):
+            registry = {}
+        sources = registry.setdefault("sources", {})
+        sources[source_hash] = {
+            "source_sha256": source_hash,
+            "source_language": source_language,
+            "official_score": float(official_score),
+            "official_latency_ms": float(official_latency_ms),
+            "local_latency_ms": float(local_latency_ms),
+            "measurement_profile_id": (
+                measurement_profile_id or _measurement_profile()["id"]
+            ),
+            "submission_id": submission_id,
+            "evaluation_stack_version": OFFICIAL_EVAL_STACK_VERSION,
+            "gpu_type": OFFICIAL_GPU_TYPE,
+            "status": "COMPLETED",
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        registry["version"] = 1
+        _atomic_write_json(path, registry)
+
+
 def _record_authoritative_source_fitness(
     kernel_source: str,
     *,
@@ -898,37 +1042,18 @@ def _record_authoritative_source_fitness(
     local_latency_ms: float,
     submission_id: Any,
 ) -> None:
-    path = _authoritative_fitness_registry_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        registry = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
-    except Exception:
-        registry = {}
-    sources = registry.setdefault("sources", {})
     source_hash = _kernel_source_hash(kernel_source)
-    sources[source_hash] = {
-        "source_sha256": source_hash,
-        "source_language": source_language,
-        "official_score": float(official_score),
-        "official_latency_ms": float(official_latency_ms),
-        "local_latency_ms": float(local_latency_ms),
-        "measurement_profile_id": _measurement_profile()["id"],
-        "submission_id": submission_id,
-        "evaluation_stack_version": OFFICIAL_EVAL_STACK_VERSION,
-        "gpu_type": OFFICIAL_GPU_TYPE,
-        "status": "COMPLETED",
-        "updated_at": datetime.now(timezone.utc).isoformat(),
-    }
-    registry["version"] = 1
-    temp_path = path.with_suffix(".tmp")
-    temp_path.write_text(
-        json.dumps(registry, indent=2, ensure_ascii=False) + "\n",
-        encoding="utf-8",
+    _record_authoritative_fitness_by_hash(
+        source_hash,
+        source_language=source_language,
+        official_score=official_score,
+        official_latency_ms=official_latency_ms,
+        local_latency_ms=local_latency_ms,
+        submission_id=submission_id,
     )
-    temp_path.replace(path)
 
 
-def _save_local_best(best: dict[str, Any], kernel_source: str | None = None) -> None:
+def _save_local_best(best: dict[str, Any], kernel_source: str | None = None) -> bool:
     path = _local_best_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = dict(best)
@@ -956,27 +1081,45 @@ def _save_local_best(best: dict[str, Any], kernel_source: str | None = None) -> 
     recorded_kernel_path = Path(str(payload.get("kernel_path") or ""))
     if source_language not in {SOURCE_LANGUAGE_CUDA, SOURCE_LANGUAGE_CUTE}:
         source_language = _language_from_source_path(recorded_kernel_path.name) or ""
-    if source_language not in {SOURCE_LANGUAGE_CUDA, SOURCE_LANGUAGE_CUTE} and kernel_source:
+    if (
+        source_language not in {SOURCE_LANGUAGE_CUDA, SOURCE_LANGUAGE_CUTE}
+        and kernel_source
+    ):
         source_language = _detect_source_language(kernel_source) or SOURCE_LANGUAGE_CUDA
     if source_language not in {SOURCE_LANGUAGE_CUDA, SOURCE_LANGUAGE_CUTE}:
         source_language = SOURCE_LANGUAGE_CUDA
     payload["source_language"] = source_language
 
     expected_hash = str(payload.get("kernel_sha256") or "")
-    if kernel_source and (not expected_hash or _kernel_source_hash(kernel_source) == expected_hash):
-        kernel_path = _local_best_kernel_path(source_language)
-        kernel_temp_path = kernel_path.with_suffix(".tmp")
-        kernel_temp_path.write_text(kernel_source, encoding="utf-8")
-        kernel_temp_path.replace(kernel_path)
-        payload["kernel_path"] = str(kernel_path)
+    with _file_lock(path):
+        current = _read_json(path, {})
+        if isinstance(current, dict) and current:
+            current_profile = str(current.get("measurement_profile_id") or "")
+            candidate_profile = str(payload.get("measurement_profile_id") or "")
+            current_hash = str(current.get("kernel_sha256") or "")
+            current_latency = float(current.get("latency_ms_median") or 0.0)
+            candidate_latency = float(payload.get("latency_ms_median") or 0.0)
+            if (
+                current_profile
+                and current_profile == candidate_profile
+                and current_hash
+                and current_hash != expected_hash
+                and current_latency > 0
+                and candidate_latency > 0
+                and candidate_latency >= current_latency
+            ):
+                return False
 
-    payload["updated_at"] = datetime.now(timezone.utc).isoformat()
-    temp_path = path.with_suffix(".tmp")
-    temp_path.write_text(
-        json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
-        encoding="utf-8",
-    )
-    temp_path.replace(path)
+        if kernel_source and (
+            not expected_hash or _kernel_source_hash(kernel_source) == expected_hash
+        ):
+            kernel_path = _local_best_kernel_path(source_language)
+            _atomic_write_text(kernel_path, kernel_source)
+            payload["kernel_path"] = str(kernel_path)
+
+        payload["updated_at"] = datetime.now(timezone.utc).isoformat()
+        _atomic_write_json(path, payload)
+    return True
 
 
 def _discover_local_best() -> dict[str, Any] | None:
@@ -1073,7 +1216,8 @@ def _load_local_best() -> dict[str, Any] | None:
     path = _local_best_path()
     if path.exists():
         try:
-            best = json.loads(path.read_text(encoding="utf-8"))
+            with _file_lock(path):
+                best = _read_json(path, {})
             source_paths: list[Path] = []
             if best.get("kernel_path"):
                 source_paths.append(Path(str(best["kernel_path"])))
@@ -1122,17 +1266,450 @@ def _result(
     metrics: dict[str, Any] | None = None,
     artifacts: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    metrics = dict(metrics or {})
+    official = metrics.get("official")
+    official = official if isinstance(official, dict) else {}
+    provisional_details = official.get("provisional_calibration")
+    provisional_details = (
+        provisional_details if isinstance(provisional_details, dict) else {}
+    )
+    search_score = float(
+        metrics.get(
+            "search_score",
+            official.get(
+                "search_score",
+                provisional_details.get("search_score", score),
+            ),
+        )
+        or 0.0
+    )
+    authoritative = bool(official.get("authoritative"))
+    if OFFICIAL_FITNESS:
+        certified_score: float | None = float(score) if authoritative else None
+        fitness_source = str(official.get("fitness_source") or "uncertified")
+    else:
+        certified_score = float(score) if status == "success" else None
+        fitness_source = "local" if status == "success" else "none"
+    metrics.update(
+        {
+            "search_score": search_score,
+            "selection_score": float(score),
+            "certified_score": certified_score,
+            "fitness_source": fitness_source,
+            "target_certified": bool(
+                certified_score is not None and certified_score >= OFFICIAL_TARGET_SCORE
+            ),
+        }
+    )
     return {
         "status": status,
         "summary": summary,
         "score": float(score),
-        "metrics": metrics or {},
+        "metrics": metrics,
         "artifacts": artifacts or {},
     }
 
 
+def _problem_contract_hash() -> str:
+    digest = hashlib.sha256()
+    for name in ("definition.json", "workload.jsonl", "reference.py"):
+        path = PROBLEM_DIR / name
+        digest.update(name.encode("utf-8"))
+        try:
+            digest.update(path.read_bytes())
+        except OSError:
+            digest.update(b"<missing>")
+    return digest.hexdigest()
+
+
+def _tool_path_identity(command: str) -> dict[str, Any]:
+    resolved = shutil.which(command) or command
+    path = Path(resolved).expanduser()
+    try:
+        stat = path.resolve().stat()
+        return {
+            "path": str(path.resolve()),
+            "size": stat.st_size,
+            "mtime_ns": stat.st_mtime_ns,
+        }
+    except OSError:
+        return {"path": str(path)}
+
+
+def _local_evaluation_contract(
+    source_language: str,
+    measurement_profile: dict[str, Any],
+) -> dict[str, Any]:
+    """Describe every input that can change a reusable local measurement."""
+    return {
+        "schema_version": LOCAL_EVAL_CACHE_SCHEMA_VERSION,
+        "kernel_id": OFFICIAL_KERNEL_ID,
+        "source_language": source_language,
+        "measurement_profile": measurement_profile,
+        "repeat_count": LOCAL_REPEAT_COUNT,
+        "max_local_attempts": max(
+            LOCAL_REPEAT_COUNT,
+            int(
+                os.environ.get("SOL58_MAX_LOCAL_ATTEMPTS", str(LOCAL_REPEAT_COUNT + 3))
+            ),
+        ),
+        "compile_timeout_s": COMPILE_TIMEOUT,
+        "run_timeout_s": RUN_TIMEOUT,
+        "problem_contract_sha256": _problem_contract_hash(),
+        "evaluator_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+        "sol_execbench": _tool_path_identity(SOL_EXECBENCH),
+        "toolchain_id": os.environ.get(
+            "SOL58_LOCAL_EVAL_STACK_ID", measurement_profile.get("local_eval_stack", "")
+        ),
+        "cuda_home": os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH") or "",
+        "torch_cuda_arch_list": os.environ.get("TORCH_CUDA_ARCH_LIST", ""),
+        "cuda_gencode_flags": (
+            _detect_cuda_gencode_flags()
+            if source_language == SOURCE_LANGUAGE_CUDA
+            else []
+        ),
+        "python": f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
+    }
+
+
+def _local_evaluation_cache_path(
+    kernel_source: str,
+    source_language: str,
+    measurement_profile: dict[str, Any],
+) -> tuple[Path, dict[str, Any], str]:
+    contract = _local_evaluation_contract(source_language, measurement_profile)
+    canonical = json.dumps(contract, sort_keys=True, separators=(",", ":"))
+    contract_hash = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    key = hashlib.sha256(
+        json.dumps(
+            {
+                "source_sha256": _kernel_source_hash(kernel_source),
+                "contract_sha256": contract_hash,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    return EVAL_ROOT / "local_cache" / f"{key}.json", contract, contract_hash
+
+
+def _cached_local_evaluation_is_valid(
+    payload: Any,
+    *,
+    source_sha256: str,
+    contract_sha256: str,
+) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    latencies = payload.get("local_latencies_ms")
+    parsed_runs = payload.get("parsed_runs")
+    return bool(
+        payload.get("complete")
+        and payload.get("schema_version") == LOCAL_EVAL_CACHE_SCHEMA_VERSION
+        and payload.get("source_sha256") == source_sha256
+        and payload.get("contract_sha256") == contract_sha256
+        and isinstance(latencies, list)
+        and len(latencies) == LOCAL_REPEAT_COUNT
+        and all(isinstance(value, (int, float)) and value > 0 for value in latencies)
+        and isinstance(parsed_runs, list)
+        and len(parsed_runs) == LOCAL_REPEAT_COUNT
+    )
+
+
+def _collect_local_evaluation(
+    *,
+    workspace: Path,
+    kernel_source: str,
+    source_language: str,
+    source_sha256: str,
+    measurement_profile: dict[str, Any],
+    program_path: str,
+    start: float,
+) -> dict[str, Any]:
+    """Return one complete local measurement, reusing an identical contract result."""
+    _copy_problem_files(workspace)
+    _write_solution(workspace, kernel_source, source_language)
+    expected = _load_workload_count(workspace)
+    cache_path, contract, contract_sha256 = _local_evaluation_cache_path(
+        kernel_source, source_language, measurement_profile
+    )
+    lock_context = (
+        _file_lock(cache_path) if LOCAL_EVAL_CACHE else contextlib.nullcontext()
+    )
+
+    with lock_context:
+        cached = _read_json(cache_path) if LOCAL_EVAL_CACHE else None
+        if _cached_local_evaluation_is_valid(
+            cached,
+            source_sha256=source_sha256,
+            contract_sha256=contract_sha256,
+        ):
+            processes = [
+                subprocess.CompletedProcess(
+                    args=[SOL_EXECBENCH],
+                    returncode=int(item.get("returncode") or 0),
+                    stdout=str(item.get("stdout_tail") or ""),
+                    stderr=str(item.get("stderr_tail") or ""),
+                )
+                for item in cached.get("processes", [])
+                if isinstance(item, dict)
+            ]
+            while len(processes) < LOCAL_REPEAT_COUNT:
+                processes.append(
+                    subprocess.CompletedProcess(
+                        args=[SOL_EXECBENCH], returncode=0, stdout="", stderr=""
+                    )
+                )
+            return {
+                **cached,
+                "processes": processes,
+                "cache_hit": True,
+                "cache_path": str(cache_path),
+            }
+
+        parsed_runs: list[dict[str, Any]] = []
+        processes: list[subprocess.CompletedProcess[str]] = []
+        local_run_records: list[dict[str, Any]] = []
+        local_latencies_ms: list[float] = []
+        rejected_clock_attempts: list[dict[str, Any]] = []
+        max_local_attempts = int(contract["max_local_attempts"])
+        repeat_index = 0
+        attempt_index = 0
+
+        while repeat_index < LOCAL_REPEAT_COUNT:
+            attempt_index += 1
+            traces_filename = (
+                "traces.jsonl"
+                if repeat_index == 0
+                else f"traces_repeat_{repeat_index + 1}.jsonl"
+            )
+            try:
+                clocks_before = _ensure_measurement_clocks()
+            except Exception as exc:
+                return {
+                    "error_result": _result(
+                        "execution_failed",
+                        f"Measurement environment rejected before local repeat "
+                        f"{repeat_index + 1}/{LOCAL_REPEAT_COUNT}: {exc}",
+                        0.0,
+                        metrics={
+                            "eval_time_s": time.time() - start,
+                            "measurement_profile": measurement_profile,
+                            "local_repeat_count_completed": repeat_index,
+                        },
+                        artifacts={
+                            "workspace": str(workspace),
+                            "program_path": program_path,
+                            "local_repeats": local_run_records,
+                        },
+                    )
+                }
+
+            proc, clock_drift_events = _run_sol_execbench_monitored(
+                workspace, traces_filename
+            )
+            parsed = _parse_traces(workspace, traces_filename)
+            try:
+                clocks_after = _ensure_measurement_clocks(allow_relock=False)
+            except Exception as exc:
+                clocks_after = {"validation_error": str(exc)}
+                clock_drift_events.append(
+                    {
+                        "detected_at": time.time(),
+                        "post_repeat_validation_error": str(exc),
+                    }
+                )
+
+            if clock_drift_events:
+                rejected_path = workspace / (
+                    f"traces_clock_rejected_attempt_{attempt_index}.jsonl.rejected"
+                )
+                traces_path = workspace / traces_filename
+                if traces_path.is_file():
+                    traces_path.replace(rejected_path)
+                rejected_clock_attempts.append(
+                    {
+                        "attempt": attempt_index,
+                        "intended_repeat": repeat_index + 1,
+                        "rejected_traces_path": str(rejected_path),
+                        "clock_drift_events": clock_drift_events,
+                        "clocks_before": clocks_before,
+                        "clocks_after": clocks_after,
+                    }
+                )
+                if attempt_index >= max_local_attempts:
+                    return {
+                        "error_result": _result(
+                            "execution_failed",
+                            "Official-like local measurement could not collect "
+                            f"{LOCAL_REPEAT_COUNT} clean repeats in {max_local_attempts} attempts "
+                            "because GPU clocks changed during evaluation.",
+                            0.0,
+                            metrics={
+                                "eval_time_s": time.time() - start,
+                                "measurement_profile": measurement_profile,
+                                "local_repeat_count_completed": repeat_index,
+                                "clock_rejected_attempt_count": len(
+                                    rejected_clock_attempts
+                                ),
+                            },
+                            artifacts={
+                                "workspace": str(workspace),
+                                "program_path": program_path,
+                                "local_repeats": local_run_records,
+                                "rejected_clock_attempts": rejected_clock_attempts,
+                            },
+                        )
+                    }
+                try:
+                    _set_measurement_clocks(measurement_profile, stabilize=True)
+                except Exception as exc:
+                    return {
+                        "error_result": _result(
+                            "execution_failed",
+                            f"Failed to restore clocks after rejected attempt: {exc}",
+                            0.0,
+                            metrics={
+                                "eval_time_s": time.time() - start,
+                                "measurement_profile": measurement_profile,
+                            },
+                            artifacts={
+                                "workspace": str(workspace),
+                                "rejected_clock_attempts": rejected_clock_attempts,
+                            },
+                        )
+                    }
+                continue
+
+            processes.append(proc)
+            parsed_runs.append(parsed)
+            total = int(parsed.get("total", 0))
+            passed = int(parsed.get("passed", 0))
+            failures = parsed.get("failures", [])
+            latency_ms = float(parsed.get("latency_ms_geomean", 0.0) or 0.0)
+            local_run_records.append(
+                {
+                    "repeat": repeat_index + 1,
+                    "attempt": attempt_index,
+                    "traces_path": str(workspace / traces_filename),
+                    "returncode": proc.returncode,
+                    "passed": passed,
+                    "total": total,
+                    "latency_ms_geomean": latency_ms,
+                    "latency_ms_arith_mean": parsed.get("latency_ms_arith_mean", 0.0),
+                    "failures": failures[:6],
+                    "clocks_before": clocks_before,
+                    "clocks_after": clocks_after,
+                }
+            )
+            failure_artifacts = {
+                "workspace": str(workspace),
+                "source_language": source_language,
+                "measurement_profile": measurement_profile,
+                "returncode": proc.returncode,
+                "stdout_tail": _tail(proc.stdout),
+                "stderr_tail": _tail(proc.stderr),
+                "per_workload": parsed.get("per_workload", []),
+                "local_repeats": local_run_records,
+                "rejected_clock_attempts": rejected_clock_attempts,
+            }
+            elapsed = time.time() - start
+
+            if parsed.get("error"):
+                return {
+                    "error_result": _result(
+                        "execution_failed",
+                        f"SOL-ExecBench repeat {repeat_index + 1}/{LOCAL_REPEAT_COUNT} failed "
+                        f"before producing traces: {parsed['error']}. "
+                        f"stderr_tail={_tail(proc.stderr, 1200)}",
+                        0.0,
+                        metrics={
+                            "eval_time_s": elapsed,
+                            "target_latency_ms": TARGET_LATENCY_MS,
+                        },
+                        artifacts=failure_artifacts,
+                    )
+                }
+
+            if (
+                proc.returncode != 0
+                or total != expected
+                or passed != expected
+                or failures
+            ):
+                return {
+                    "error_result": _result(
+                        "validation_failed",
+                        f"Correctness/coverage gate failed on local repeat "
+                        f"{repeat_index + 1}/{LOCAL_REPEAT_COUNT}: passed {passed}/{expected}, "
+                        f"returncode={proc.returncode}. failures={failures[:6]}",
+                        0.0,
+                        metrics={
+                            "eval_time_s": elapsed,
+                            "target_latency_ms": TARGET_LATENCY_MS,
+                            "local_repeat_count_completed": repeat_index + 1,
+                        },
+                        artifacts=failure_artifacts,
+                    )
+                }
+
+            if latency_ms <= 0:
+                return {
+                    "error_result": _result(
+                        "execution_failed",
+                        f"Local repeat {repeat_index + 1}/{LOCAL_REPEAT_COUNT} passed all "
+                        "workloads but produced no positive latency.",
+                        0.0,
+                        metrics={
+                            "eval_time_s": elapsed,
+                            "target_latency_ms": TARGET_LATENCY_MS,
+                        },
+                        artifacts=failure_artifacts,
+                    )
+                }
+            local_latencies_ms.append(latency_ms)
+            repeat_index += 1
+
+        serializable_processes = [
+            {
+                "returncode": proc.returncode,
+                "stdout_tail": _tail(proc.stdout),
+                "stderr_tail": _tail(proc.stderr),
+            }
+            for proc in processes
+        ]
+        payload = {
+            "schema_version": LOCAL_EVAL_CACHE_SCHEMA_VERSION,
+            "complete": True,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "source_sha256": source_sha256,
+            "source_language": source_language,
+            "contract": contract,
+            "contract_sha256": contract_sha256,
+            "measurement_profile_id": measurement_profile["id"],
+            "source_workspace": str(workspace),
+            "expected": expected,
+            "parsed_runs": parsed_runs,
+            "processes": serializable_processes,
+            "local_run_records": local_run_records,
+            "local_latencies_ms": local_latencies_ms,
+            "rejected_clock_attempts": rejected_clock_attempts,
+            "attempt_count": attempt_index,
+        }
+        if LOCAL_EVAL_CACHE:
+            _atomic_write_json(cache_path, payload)
+        return {
+            **payload,
+            "processes": processes,
+            "cache_hit": False,
+            "cache_path": str(cache_path),
+        }
+
+
 def _official_token() -> str:
-    return os.environ.get("SOL58_SOLBENCH_TOKEN") or os.environ.get("SOLBENCH_TOKEN") or ""
+    return (
+        os.environ.get("SOL58_SOLBENCH_TOKEN") or os.environ.get("SOLBENCH_TOKEN") or ""
+    )
 
 
 def _official_compile_options(solution: dict[str, Any]) -> dict[str, Any]:
@@ -1238,7 +1815,9 @@ def _http_json(
         except Exception:
             payload = {"detail": _tail(text, 1000)}
         detail = payload.get("detail") if isinstance(payload, dict) else payload
-        raise RuntimeError(f"official API {method} {path} failed HTTP {exc.code}: {detail}") from exc
+        raise RuntimeError(
+            f"official API {method} {path} failed HTTP {exc.code}: {detail}"
+        ) from exc
 
 
 def _parse_timestamp(value: Any) -> float | None:
@@ -1281,7 +1860,9 @@ def _is_stale_pending_result(data: dict[str, Any], now: float | None = None) -> 
     return (now or time.time()) - ts >= OFFICIAL_PENDING_RESULT_GRACE
 
 
-def _is_deferred_pending_result(data: dict[str, Any], deadline: float, now: float | None = None) -> bool:
+def _is_deferred_pending_result(
+    data: dict[str, Any], deadline: float, now: float | None = None
+) -> bool:
     if _official_status(data) != "PENDING_RESULT" or _has_official_score(data):
         return False
     ts = _parse_timestamp(data.get("result_available_at"))
@@ -1297,22 +1878,29 @@ def _normalize_submission_data(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _get_official_submission(submission_id: Any, token: str) -> dict[str, Any]:
-    primary = _normalize_submission_data(_http_json("GET", f"/api/submissions/{submission_id}", token))
+    primary = _normalize_submission_data(
+        _http_json("GET", f"/api/submissions/{submission_id}", token)
+    )
 
     # A future availability timestamp is an explicit server-side delay. The list
     # endpoint cannot make that result available sooner, so avoid another slow
     # request on the common v1.1 deferred-result path.
     available_at = _parse_timestamp(primary.get("result_available_at"))
     primary_status = _official_status(primary)
-    if _has_official_score(primary) or primary_status in {
-        "PENDING",
-        "QUEUED",
-        "RUNNING",
-        "EVALUATING",
-    } or (
-        primary_status == "PENDING_RESULT"
-        and available_at is not None
-        and available_at - time.time() > OFFICIAL_POLL_INTERVAL
+    if (
+        _has_official_score(primary)
+        or primary_status
+        in {
+            "PENDING",
+            "QUEUED",
+            "RUNNING",
+            "EVALUATING",
+        }
+        or (
+            primary_status == "PENDING_RESULT"
+            and available_at is not None
+            and available_at - time.time() > OFFICIAL_POLL_INTERVAL
+        )
     ):
         return primary
 
@@ -1421,21 +2009,49 @@ def _calibration_path() -> Path:
     return EVAL_ROOT / "official_cache" / "calibration.jsonl"
 
 
-def _discover_official_calibration_ratios() -> list[float]:
-    """Recover calibration from completed legacy eval workspaces."""
-    by_submission: dict[str, float] = {}
+def _calibration_scope() -> dict[str, str]:
+    profile = _measurement_profile()
+    return {
+        "measurement_profile_id": str(profile["id"]),
+        "eval_stack": OFFICIAL_EVAL_STACK_VERSION,
+        "gpu_type": OFFICIAL_GPU_TYPE,
+    }
+
+
+def _discover_official_calibration_ratios() -> list[tuple[float, float]]:
+    """Recover only same-profile calibration from completed legacy workspaces."""
+    scope = _calibration_scope()
+    by_submission: dict[str, tuple[float, float]] = {}
     result_paths = sorted(
         EVAL_ROOT.glob("eval_*/official_submission_result.json"),
         key=lambda path: path.stat().st_mtime,
     )
     for result_path in result_paths:
         try:
-            official = json.loads(result_path.read_text(encoding="utf-8"))
+            official = _read_json(result_path, {})
             if (
                 _official_status(official) != "COMPLETED"
                 or not official.get("is_correct")
                 or float(official.get("sol_score") or 0.0) <= 0
             ):
+                continue
+            if (
+                str(official.get("evaluation_stack_version") or scope["eval_stack"])
+                != scope["eval_stack"]
+            ):
+                continue
+            if str(official.get("gpu_type") or scope["gpu_type"]) != scope["gpu_type"]:
+                continue
+
+            profile_path = result_path.parent / "measurement_profile.json"
+            workspace_profile = (
+                _read_json(profile_path, {}) if profile_path.is_file() else {}
+            )
+            workspace_profile_id = str(workspace_profile.get("id") or "")
+            if workspace_profile_id:
+                if workspace_profile_id != scope["measurement_profile_id"]:
+                    continue
+            elif _measurement_profile()["name"] != "native":
                 continue
 
             parsed = _parse_traces(result_path.parent)
@@ -1447,10 +2063,35 @@ def _discover_official_calibration_ratios() -> list[float]:
 
             local_score = TARGET_LATENCY_MS / local_latency_ms
             submission_id = str(official.get("id") or result_path.parent.name)
-            by_submission[submission_id] = float(official["sol_score"]) / local_score
+            by_submission[submission_id] = (
+                float(official["sol_score"]) / local_score,
+                result_path.stat().st_mtime,
+            )
         except Exception:
             continue
     return list(by_submission.values())
+
+
+def _recency_weighted_median(samples: list[tuple[float, float]]) -> float:
+    if not samples:
+        return 1.0
+    half_life_hours = max(
+        1.0, float(os.environ.get("SOL58_CALIBRATION_HALF_LIFE_HOURS", "336"))
+    )
+    now = time.time()
+    weighted = []
+    for ratio, timestamp in samples:
+        age_hours = max(0.0, (now - timestamp) / 3600.0)
+        weight = 0.5 ** (age_hours / half_life_hours)
+        weighted.append((float(ratio), max(weight, 1e-6)))
+    weighted.sort(key=lambda item: item[0])
+    threshold = sum(weight for _, weight in weighted) / 2.0
+    cumulative = 0.0
+    for ratio, weight in weighted:
+        cumulative += weight
+        if cumulative >= threshold:
+            return ratio
+    return weighted[-1][0]
 
 
 def _load_official_calibration_ratio() -> float:
@@ -1462,27 +2103,30 @@ def _load_official_calibration_ratio() -> float:
             pass
 
     path = _calibration_path()
-    ratios: list[float] = []
+    scope = _calibration_scope()
+    samples: list[tuple[float, float]] = []
     if path.exists():
-        for line in path.read_text(encoding="utf-8").splitlines()[-100:]:
+        with _file_lock(path):
+            lines = path.read_text(encoding="utf-8").splitlines()[-200:]
+        for line in lines:
             try:
                 row = json.loads(line)
             except Exception:
                 continue
+            if any(str(row.get(key) or "") != value for key, value in scope.items()):
+                continue
             local_score = float(row.get("local_score") or 0.0)
             official_score = float(row.get("official_score") or 0.0)
             if local_score > 0 and official_score > 0:
-                ratios.append(official_score / local_score)
-    if not ratios:
-        ratios = _discover_official_calibration_ratios()
-    if not ratios:
+                created_at = _parse_timestamp(row.get("created_at"))
+                samples.append(
+                    (official_score / local_score, created_at or path.stat().st_mtime)
+                )
+    if not samples:
+        samples = _discover_official_calibration_ratios()
+    if not samples:
         return 1.0
-
-    ratios.sort()
-    mid = len(ratios) // 2
-    if len(ratios) % 2:
-        return ratios[mid]
-    return (ratios[mid - 1] + ratios[mid]) / 2.0
+    return _recency_weighted_median(samples)
 
 
 def _record_official_calibration(
@@ -1491,6 +2135,7 @@ def _record_official_calibration(
     local_latency_ms: float,
     official_latency_ms: float,
     submission_id: Any,
+    measurement_profile_id: str | None = None,
 ) -> None:
     if local_score <= 0 or official_score <= 0:
         return
@@ -1506,23 +2151,45 @@ def _record_official_calibration(
         "official_latency_ms": official_latency_ms,
         "eval_stack": OFFICIAL_EVAL_STACK_VERSION,
         "gpu_type": OFFICIAL_GPU_TYPE,
+        "measurement_profile_id": measurement_profile_id
+        or _measurement_profile()["id"],
     }
-    with path.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    with _file_lock(path):
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+
+
+def _project_provisional_search_score(search_score: float) -> float:
+    """Keep provisional ranking strict while reserving target crossing for official fitness."""
+    search_score = max(0.0, float(search_score))
+    target = max(1e-12, float(OFFICIAL_TARGET_SCORE))
+    floor = min(float(OFFICIAL_PROVISIONAL_SCORE_CAP), math.nextafter(target, 0.0))
+    if floor <= 0 or floor >= target:
+        floor = max(0.0, target - max(1e-6, target * 1e-6))
+    if search_score <= floor:
+        return search_score
+
+    span = target - floor
+    projected = target - span / (1.0 + (search_score - floor) / span)
+    return min(math.nextafter(target, 0.0), max(floor, projected))
 
 
 def _provisional_official_score(local_score: float) -> tuple[float, float]:
     ratio = _load_official_calibration_ratio()
-    score = max(0.0, local_score * ratio)
-    return min(score, OFFICIAL_PROVISIONAL_SCORE_CAP), ratio
+    search_score = max(0.0, local_score * ratio)
+    return _project_provisional_search_score(search_score), ratio
 
 
 def _local_provisional_score(local_score: float) -> float:
     """Keep local candidates ordered without allowing them to certify the target."""
-    return min(max(0.0, local_score), OFFICIAL_PROVISIONAL_SCORE_CAP)
+    return _project_provisional_search_score(local_score)
 
 
-def _official_fitness_anchor(local_best: dict[str, Any] | None) -> dict[str, Any] | None:
+def _official_fitness_anchor(
+    local_best: dict[str, Any] | None,
+) -> dict[str, Any] | None:
     """Return a completed official score and its corresponding local-latency anchor."""
     if not local_best:
         return None
@@ -1562,18 +2229,22 @@ def _anchored_provisional_score(
         return score, {
             "source": "historical_calibration",
             "calibration_ratio": calibration_ratio,
+            "search_score": max(0.0, local_score * calibration_ratio),
+            "selection_score": score,
         }
 
     latency_ratio = float(anchor["local_latency_ms"]) / candidate_latency_ms
-    score = float(anchor["score"]) * latency_ratio
-    score = min(max(0.0, score), OFFICIAL_PROVISIONAL_SCORE_CAP)
-    return score, {
+    search_score = max(0.0, float(anchor["score"]) * latency_ratio)
+    selection_score = _project_provisional_search_score(search_score)
+    return selection_score, {
         "source": "incumbent_official_anchor",
         "anchor_score": float(anchor["score"]),
         "anchor_local_latency_ms": float(anchor["local_latency_ms"]),
         "anchor_submission_id": anchor.get("submission_id"),
         "anchor_record_source": anchor["source"],
         "candidate_to_anchor_latency_ratio": latency_ratio,
+        "search_score": search_score,
+        "selection_score": selection_score,
     }
 
 
@@ -1581,7 +2252,9 @@ def _cache_path(kernel_source: str) -> Path:
     cache_key = hashlib.sha256(
         json.dumps(
             {
-                "kernel_sha256": hashlib.sha256(kernel_source.encode("utf-8")).hexdigest(),
+                "kernel_sha256": hashlib.sha256(
+                    kernel_source.encode("utf-8")
+                ).hexdigest(),
                 "kernel_id": OFFICIAL_KERNEL_ID,
                 "gpu_type": OFFICIAL_GPU_TYPE,
                 "eval_stack": OFFICIAL_EVAL_STACK_VERSION,
@@ -1593,19 +2266,62 @@ def _cache_path(kernel_source: str) -> Path:
     return EVAL_ROOT / "official_cache" / f"{cache_key}.json"
 
 
-def _submit_official(
+def _official_cache_metadata(
+    kernel_source: str,
+    *,
+    source_language: str,
+    local_score: float,
+    local_latency_ms: float,
+    measurement_profile: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "source_sha256": _kernel_source_hash(kernel_source),
+        "source_language": source_language,
+        "local_score": float(local_score),
+        "local_latency_ms": float(local_latency_ms),
+        "measurement_profile_id": str(measurement_profile["id"]),
+        "kernel_id": OFFICIAL_KERNEL_ID,
+        "gpu_type": OFFICIAL_GPU_TYPE,
+        "evaluation_stack_version": OFFICIAL_EVAL_STACK_VERSION,
+    }
+
+
+def _with_official_cache_metadata(
+    result: dict[str, Any], metadata: dict[str, Any]
+) -> dict[str, Any]:
+    merged = dict(result)
+    merged["_atrex"] = dict(metadata)
+    return merged
+
+
+def _submit_official_unlocked(
     workspace: Path,
     kernel_source: str,
     *,
+    source_language: str = SOURCE_LANGUAGE_CUDA,
+    local_score: float = 0.0,
+    local_latency_ms: float = 0.0,
+    measurement_profile: dict[str, Any] | None = None,
     allow_upload: bool = True,
 ) -> dict[str, Any]:
     token = _official_token()
     if not token:
-        raise RuntimeError("SOL58_OFFICIAL_FITNESS=1 requires SOLBENCH_TOKEN or SOL58_SOLBENCH_TOKEN")
+        raise RuntimeError(
+            "SOL58_OFFICIAL_FITNESS=1 requires SOLBENCH_TOKEN or SOL58_SOLBENCH_TOKEN"
+        )
 
     cache_path = _cache_path(kernel_source)
+    cache_metadata = _official_cache_metadata(
+        kernel_source,
+        source_language=source_language,
+        local_score=local_score,
+        local_latency_ms=local_latency_ms,
+        measurement_profile=measurement_profile or _measurement_profile(),
+    )
     if OFFICIAL_CACHE and cache_path.exists():
-        cached = json.loads(cache_path.read_text(encoding="utf-8"))
+        cached = _read_json(cache_path, {})
+        cached = _with_official_cache_metadata(cached, cache_metadata)
         cached_status = _official_status(cached)
         next_refresh_at = _parse_timestamp(cached.get("next_refresh_at"))
         refresh_due = next_refresh_at is None or next_refresh_at <= time.time()
@@ -1622,26 +2338,26 @@ def _submit_official(
                 upload=cached.get("upload") or {},
                 poll_timeout=OFFICIAL_CACHE_REFRESH_TIMEOUT,
             )
-            cache_path.parent.mkdir(parents=True, exist_ok=True)
-            cache_path.write_text(
-                json.dumps(refreshed, indent=2, ensure_ascii=False) + "\n",
-                encoding="utf-8",
-            )
-            cached = refreshed
+            cached = _with_official_cache_metadata(refreshed, cache_metadata)
+            _atomic_write_json(cache_path, cached)
             cached_status = _official_status(cached)
 
         if cached_status in OFFICIAL_TERMINAL_STATUSES or _has_official_score(cached):
             cached["cache_hit"] = True
+            _atomic_write_json(cache_path, cached)
             _write_official_result(workspace, cached)
             return cached
 
         if not allow_upload:
             cached["cache_hit"] = True
+            _atomic_write_json(cache_path, cached)
             _write_official_result(workspace, cached)
             return cached
 
     if not allow_upload:
-        raise RuntimeError("No cached official submission exists for the incumbent kernel")
+        raise RuntimeError(
+            "No cached official submission exists for the incumbent kernel"
+        )
 
     submission = _build_official_submission(workspace)
     submission_path = workspace / "official_submission.json"
@@ -1673,7 +2389,7 @@ def _submit_official(
         encoding="utf-8",
     )
 
-    submission_id = ((upload.get("data") or {}).get("submission_id"))
+    submission_id = (upload.get("data") or {}).get("submission_id")
     if not submission_id:
         raise RuntimeError(f"official upload response missing submission_id: {upload}")
 
@@ -1697,10 +2413,200 @@ def _submit_official(
     else:
         last = _poll_official_submission(submission_id, token, workspace, upload=upload)
 
+    last = _with_official_cache_metadata(last, cache_metadata)
     if OFFICIAL_CACHE:
-        cache_path.parent.mkdir(parents=True, exist_ok=True)
-        cache_path.write_text(json.dumps(last, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        _atomic_write_json(cache_path, last)
     return last
+
+
+def _submit_official(
+    workspace: Path,
+    kernel_source: str,
+    *,
+    source_language: str = SOURCE_LANGUAGE_CUDA,
+    local_score: float = 0.0,
+    local_latency_ms: float = 0.0,
+    measurement_profile: dict[str, Any] | None = None,
+    allow_upload: bool = True,
+) -> dict[str, Any]:
+    cache_path = _cache_path(kernel_source)
+    with _file_lock(cache_path):
+        return _submit_official_unlocked(
+            workspace,
+            kernel_source,
+            source_language=source_language,
+            local_score=local_score,
+            local_latency_ms=local_latency_ms,
+            measurement_profile=measurement_profile,
+            allow_upload=allow_upload,
+        )
+
+
+def _official_metadata_from_local_best(result: dict[str, Any]) -> dict[str, Any]:
+    path = _local_best_path()
+    if not path.is_file():
+        return {}
+    with _file_lock(path):
+        best = _read_json(path, {})
+    if not isinstance(best, dict) or str(best.get("official_submission_id")) != str(
+        result.get("id")
+    ):
+        return {}
+    source_hash = str(best.get("kernel_sha256") or "")
+    if not source_hash:
+        return {}
+    return {
+        "schema_version": 1,
+        "source_sha256": source_hash,
+        "source_language": str(best.get("source_language") or SOURCE_LANGUAGE_CUDA),
+        "local_score": float(best.get("local_score") or 0.0),
+        "local_latency_ms": float(best.get("latency_ms_median") or 0.0),
+        "measurement_profile_id": str(best.get("measurement_profile_id") or ""),
+        "kernel_id": OFFICIAL_KERNEL_ID,
+        "gpu_type": OFFICIAL_GPU_TYPE,
+        "evaluation_stack_version": OFFICIAL_EVAL_STACK_VERSION,
+    }
+
+
+def _update_local_best_from_official(
+    metadata: dict[str, Any], result: dict[str, Any]
+) -> bool:
+    path = _local_best_path()
+    if not path.is_file():
+        return False
+    source_hash = str(metadata.get("source_sha256") or "")
+    with _file_lock(path):
+        best = _read_json(path, {})
+        if (
+            not isinstance(best, dict)
+            or str(best.get("kernel_sha256") or "") != source_hash
+        ):
+            return False
+        official_score = float(result.get("sol_score") or 0.0)
+        official_latency_ms = float(result.get("latency_ms") or 0.0)
+        best.update(
+            {
+                "remote_submitted": True,
+                "official_submission_id": result.get("id"),
+                "official_status": "COMPLETED",
+                "official_score": official_score,
+                "official_latency_ms": official_latency_ms,
+                "official_anchor_score": official_score,
+                "official_anchor_latency_ms": float(
+                    metadata.get("local_latency_ms") or 0.0
+                ),
+                "official_anchor_submission_id": result.get("id"),
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+        _atomic_write_json(path, best)
+    return True
+
+
+def _refresh_due_official_results() -> dict[str, Any]:
+    """Refresh a bounded set of pending submissions and publish completed fitness."""
+    report: dict[str, Any] = {
+        "enabled": bool(OFFICIAL_FITNESS and OFFICIAL_CACHE),
+        "checked": 0,
+        "completed": 0,
+        "pending": 0,
+        "errors": [],
+    }
+    token = _official_token()
+    if not report["enabled"] or not token:
+        return report
+
+    cache_root = EVAL_ROOT / "official_cache"
+    paths = sorted(
+        (
+            path
+            for path in cache_root.glob("*.json")
+            if re.fullmatch(r"[0-9a-f]{64}\.json", path.name)
+        ),
+        key=lambda path: path.stat().st_mtime,
+    )
+    now = time.time()
+    for cache_path in paths:
+        if report["checked"] >= OFFICIAL_REFRESH_BATCH_SIZE:
+            break
+        with _file_lock(cache_path):
+            cached = _read_json(cache_path, {})
+            if not isinstance(cached, dict):
+                continue
+            status = _official_status(cached)
+            due_at = _parse_timestamp(cached.get("next_refresh_at"))
+            if (
+                status not in OFFICIAL_REFRESHABLE_STATUSES
+                or not cached.get("id")
+                or (due_at is not None and due_at > now)
+            ):
+                continue
+            metadata = cached.get("_atrex")
+            if not isinstance(metadata, dict) or not metadata.get("source_sha256"):
+                metadata = _official_metadata_from_local_best(cached)
+            if not metadata:
+                continue
+
+            report["checked"] += 1
+            try:
+                remote = _get_official_submission(cached["id"], token)
+                refreshed = dict(cached)
+                refreshed.update(
+                    {key: value for key, value in remote.items() if value is not None}
+                )
+                refreshed["_atrex"] = metadata
+                refreshed_status = _official_status(refreshed)
+                is_authoritative = bool(
+                    refreshed_status == "COMPLETED"
+                    and refreshed.get("is_correct")
+                    and float(refreshed.get("sol_score") or 0.0) > 0
+                )
+                if is_authoritative:
+                    refreshed.pop("next_refresh_at", None)
+                    _record_authoritative_fitness_by_hash(
+                        str(metadata["source_sha256"]),
+                        source_language=str(
+                            metadata.get("source_language") or SOURCE_LANGUAGE_CUDA
+                        ),
+                        official_score=float(refreshed["sol_score"]),
+                        official_latency_ms=float(refreshed.get("latency_ms") or 0.0),
+                        local_latency_ms=float(metadata.get("local_latency_ms") or 0.0),
+                        submission_id=refreshed.get("id"),
+                        measurement_profile_id=str(
+                            metadata.get("measurement_profile_id") or ""
+                        ),
+                    )
+                    _record_official_calibration(
+                        local_score=float(metadata.get("local_score") or 0.0),
+                        official_score=float(refreshed["sol_score"]),
+                        local_latency_ms=float(metadata.get("local_latency_ms") or 0.0),
+                        official_latency_ms=float(refreshed.get("latency_ms") or 0.0),
+                        submission_id=refreshed.get("id"),
+                        measurement_profile_id=str(
+                            metadata.get("measurement_profile_id") or ""
+                        ),
+                    )
+                    _update_local_best_from_official(metadata, refreshed)
+                    report["completed"] += 1
+                else:
+                    available_at = _parse_timestamp(
+                        refreshed.get("result_available_at")
+                    )
+                    next_refresh = max(
+                        time.time() + OFFICIAL_ASYNC_REFRESH_DELAY,
+                        available_at or 0.0,
+                    )
+                    refreshed["next_refresh_at"] = _format_timestamp(next_refresh)
+                    report["pending"] += 1
+                _atomic_write_json(cache_path, refreshed)
+            except Exception as exc:
+                cached["next_refresh_at"] = _format_timestamp(
+                    time.time() + OFFICIAL_ASYNC_REFRESH_DELAY
+                )
+                cached["refresh_error"] = _tail(str(exc), 500)
+                _atomic_write_json(cache_path, cached)
+                report["errors"].append(_tail(str(exc), 300))
+    return report
 
 
 def evaluate(program_path: str) -> dict[str, Any]:
@@ -1708,6 +2614,7 @@ def evaluate(program_path: str) -> dict[str, Any]:
     eval_id = uuid.uuid4().hex[:12]
     workspace = EVAL_ROOT / f"eval_{eval_id}"
     workspace.mkdir(parents=True, exist_ok=True)
+    official_refresh = _refresh_due_official_results()
 
     try:
         raw = Path(program_path).read_text(encoding="utf-8")
@@ -1764,7 +2671,11 @@ def evaluate(program_path: str) -> dict[str, Any]:
         profile_recalibration = bool(
             local_best_before and same_as_local_best and not local_best_profile_matches
         )
-        if local_best_before and not local_best_profile_matches and not same_as_local_best:
+        if (
+            local_best_before
+            and not local_best_profile_matches
+            and not same_as_local_best
+        ):
             return _result(
                 "framework_error",
                 "Persisted local best belongs to a different measurement profile. "
@@ -1818,6 +2729,7 @@ def evaluate(program_path: str) -> dict[str, Any]:
                 "source_language": source_language,
                 "required_source_language": required_source_language,
                 "measurement_profile": measurement_profile,
+                "official_refresh": official_refresh,
                 "local_eval_reused": True,
                 "latency_ms_geomean": recorded_latency_ms,
                 "local_repeat_count": int(
@@ -1873,198 +2785,29 @@ def evaluate(program_path: str) -> dict[str, Any]:
                 artifacts=reused_artifacts,
             )
 
-        _copy_problem_files(workspace)
-        _write_solution(workspace, kernel_source, source_language)
-        expected = _load_workload_count(workspace)
-        parsed_runs: list[dict[str, Any]] = []
-        processes: list[subprocess.CompletedProcess[str]] = []
-        local_run_records: list[dict[str, Any]] = []
-        local_latencies_ms: list[float] = []
-        rejected_clock_attempts: list[dict[str, Any]] = []
-        max_local_attempts = max(
-            LOCAL_REPEAT_COUNT,
-            int(
-                os.environ.get(
-                    "SOL58_MAX_LOCAL_ATTEMPTS", str(LOCAL_REPEAT_COUNT + 3)
-                )
-            ),
+        local_evaluation = _collect_local_evaluation(
+            workspace=workspace,
+            kernel_source=kernel_source,
+            source_language=source_language,
+            source_sha256=kernel_sha256,
+            measurement_profile=measurement_profile,
+            program_path=program_path,
+            start=start,
         )
-        repeat_index = 0
-        attempt_index = 0
+        if local_evaluation.get("error_result") is not None:
+            return local_evaluation["error_result"]
 
-        while repeat_index < LOCAL_REPEAT_COUNT:
-            attempt_index += 1
-            traces_filename = (
-                "traces.jsonl"
-                if repeat_index == 0
-                else f"traces_repeat_{repeat_index + 1}.jsonl"
-            )
-            try:
-                clocks_before = _ensure_measurement_clocks()
-            except Exception as exc:
-                return _result(
-                    "execution_failed",
-                    f"Measurement environment rejected before local repeat "
-                    f"{repeat_index + 1}/{LOCAL_REPEAT_COUNT}: {exc}",
-                    0.0,
-                    metrics={
-                        "eval_time_s": time.time() - start,
-                        "measurement_profile": measurement_profile,
-                        "local_repeat_count_completed": repeat_index,
-                    },
-                    artifacts={
-                        "workspace": str(workspace),
-                        "program_path": program_path,
-                        "local_repeats": local_run_records,
-                    },
-                )
-            proc, clock_drift_events = _run_sol_execbench_monitored(
-                workspace, traces_filename
-            )
-            parsed = _parse_traces(workspace, traces_filename)
-            try:
-                clocks_after = _ensure_measurement_clocks(allow_relock=False)
-            except Exception as exc:
-                clocks_after = {"validation_error": str(exc)}
-                clock_drift_events.append(
-                    {
-                        "detected_at": time.time(),
-                        "post_repeat_validation_error": str(exc),
-                    }
-                )
-
-            if clock_drift_events:
-                rejected_path = workspace / (
-                    f"traces_clock_rejected_attempt_{attempt_index}.jsonl.rejected"
-                )
-                traces_path = workspace / traces_filename
-                if traces_path.is_file():
-                    traces_path.replace(rejected_path)
-                rejected_clock_attempts.append(
-                    {
-                        "attempt": attempt_index,
-                        "intended_repeat": repeat_index + 1,
-                        "rejected_traces_path": str(rejected_path),
-                        "clock_drift_events": clock_drift_events,
-                        "clocks_before": clocks_before,
-                        "clocks_after": clocks_after,
-                    }
-                )
-                if attempt_index >= max_local_attempts:
-                    return _result(
-                        "execution_failed",
-                        "Official-like local measurement could not collect "
-                        f"{LOCAL_REPEAT_COUNT} clean repeats in {max_local_attempts} attempts "
-                        "because GPU clocks changed during evaluation.",
-                        0.0,
-                        metrics={
-                            "eval_time_s": time.time() - start,
-                            "measurement_profile": measurement_profile,
-                            "local_repeat_count_completed": repeat_index,
-                            "clock_rejected_attempt_count": len(
-                                rejected_clock_attempts
-                            ),
-                        },
-                        artifacts={
-                            "workspace": str(workspace),
-                            "program_path": program_path,
-                            "local_repeats": local_run_records,
-                            "rejected_clock_attempts": rejected_clock_attempts,
-                        },
-                    )
-                try:
-                    _set_measurement_clocks(measurement_profile, stabilize=True)
-                except Exception as exc:
-                    return _result(
-                        "execution_failed",
-                        f"Failed to restore clocks after rejected attempt: {exc}",
-                        0.0,
-                        metrics={
-                            "eval_time_s": time.time() - start,
-                            "measurement_profile": measurement_profile,
-                        },
-                        artifacts={
-                            "workspace": str(workspace),
-                            "rejected_clock_attempts": rejected_clock_attempts,
-                        },
-                    )
-                continue
-
-            processes.append(proc)
-            parsed_runs.append(parsed)
-
-            total = int(parsed.get("total", 0))
-            passed = int(parsed.get("passed", 0))
-            failures = parsed.get("failures", [])
-            latency_ms = float(parsed.get("latency_ms_geomean", 0.0) or 0.0)
-            local_run_records.append(
-                {
-                    "repeat": repeat_index + 1,
-                    "attempt": attempt_index,
-                    "traces_path": str(workspace / traces_filename),
-                    "returncode": proc.returncode,
-                    "passed": passed,
-                    "total": total,
-                    "latency_ms_geomean": latency_ms,
-                    "latency_ms_arith_mean": parsed.get("latency_ms_arith_mean", 0.0),
-                    "failures": failures[:6],
-                    "clocks_before": clocks_before,
-                    "clocks_after": clocks_after,
-                }
-            )
-            failure_artifacts = {
-                "workspace": str(workspace),
-                "source_language": source_language,
-                "measurement_profile": measurement_profile,
-                "returncode": proc.returncode,
-                "stdout_tail": _tail(proc.stdout),
-                "stderr_tail": _tail(proc.stderr),
-                "per_workload": parsed.get("per_workload", []),
-                "local_repeats": local_run_records,
-                "rejected_clock_attempts": rejected_clock_attempts,
-            }
-            elapsed = time.time() - start
-
-            if parsed.get("error"):
-                return _result(
-                    "execution_failed",
-                    f"SOL-ExecBench repeat {repeat_index + 1}/{LOCAL_REPEAT_COUNT} failed "
-                    f"before producing traces: {parsed['error']}. "
-                    f"stderr_tail={_tail(proc.stderr, 1200)}",
-                    0.0,
-                    metrics={"eval_time_s": elapsed, "target_latency_ms": TARGET_LATENCY_MS},
-                    artifacts=failure_artifacts,
-                )
-
-            if proc.returncode != 0 or total != expected or passed != expected or failures:
-                summary = (
-                    f"Correctness/coverage gate failed on local repeat "
-                    f"{repeat_index + 1}/{LOCAL_REPEAT_COUNT}: passed {passed}/{expected}, "
-                    f"returncode={proc.returncode}. failures={failures[:6]}"
-                )
-                return _result(
-                    "validation_failed",
-                    summary,
-                    0.0,
-                    metrics={
-                        "eval_time_s": elapsed,
-                        "target_latency_ms": TARGET_LATENCY_MS,
-                        "local_repeat_count_completed": repeat_index + 1,
-                    },
-                    artifacts=failure_artifacts,
-                )
-
-            if latency_ms <= 0:
-                return _result(
-                    "execution_failed",
-                    f"Local repeat {repeat_index + 1}/{LOCAL_REPEAT_COUNT} passed all "
-                    "workloads but produced no positive latency.",
-                    0.0,
-                    metrics={"eval_time_s": elapsed, "target_latency_ms": TARGET_LATENCY_MS},
-                    artifacts=failure_artifacts,
-                )
-            local_latencies_ms.append(latency_ms)
-            repeat_index += 1
+        expected = int(local_evaluation["expected"])
+        parsed_runs = list(local_evaluation["parsed_runs"])
+        processes = list(local_evaluation["processes"])
+        local_run_records = list(local_evaluation["local_run_records"])
+        local_latencies_ms = [
+            float(value) for value in local_evaluation["local_latencies_ms"]
+        ]
+        rejected_clock_attempts = list(
+            local_evaluation.get("rejected_clock_attempts") or []
+        )
+        attempt_index = int(local_evaluation.get("attempt_count") or LOCAL_REPEAT_COUNT)
 
         latency_ms = float(statistics.median(local_latencies_ms))
         representative_index = min(
@@ -2082,7 +2825,12 @@ def evaluate(program_path: str) -> dict[str, Any]:
             "source_language": source_language,
             "measurement_profile_path": str(workspace / "measurement_profile.json"),
             "source_path": str(
-                workspace / ("kernel.py" if source_language == SOURCE_LANGUAGE_CUTE else "kernel.cu")
+                workspace
+                / (
+                    "kernel.py"
+                    if source_language == SOURCE_LANGUAGE_CUTE
+                    else "kernel.cu"
+                )
             ),
             "returncode": proc.returncode,
             "stdout_tail": _tail(proc.stdout),
@@ -2090,6 +2838,7 @@ def evaluate(program_path: str) -> dict[str, Any]:
             "per_workload": parsed.get("per_workload", []),
             "local_repeats": local_run_records,
             "rejected_clock_attempts": rejected_clock_attempts,
+            "local_evaluation_cache_path": local_evaluation["cache_path"],
         }
 
         metrics = {
@@ -2099,6 +2848,7 @@ def evaluate(program_path: str) -> dict[str, Any]:
             "configured_code_language": code_language,
             "required_source_language": required_source_language,
             "measurement_profile": measurement_profile,
+            "official_refresh": official_refresh,
             "profile_recalibration": profile_recalibration,
             "target_latency_ms": TARGET_LATENCY_MS,
             "latency_ms_geomean": latency_ms,
@@ -2112,11 +2862,21 @@ def evaluate(program_path: str) -> dict[str, Any]:
             "local_repeat_count": LOCAL_REPEAT_COUNT,
             "local_attempt_count": attempt_index,
             "clock_rejected_attempt_count": len(rejected_clock_attempts),
+            "local_eval_cache": {
+                "enabled": LOCAL_EVAL_CACHE,
+                "hit": bool(local_evaluation.get("cache_hit")),
+                "contract_sha256": local_evaluation.get("contract_sha256"),
+                "source_workspace": local_evaluation.get("source_workspace"),
+            },
             "passed": passed,
             "total": total,
             "expected_total": expected,
-            "max_abs_err": max(float(run.get("max_abs_err") or 0.0) for run in parsed_runs),
-            "max_rel_err": max(float(run.get("max_rel_err") or 0.0) for run in parsed_runs),
+            "max_abs_err": max(
+                float(run.get("max_abs_err") or 0.0) for run in parsed_runs
+            ),
+            "max_rel_err": max(
+                float(run.get("max_rel_err") or 0.0) for run in parsed_runs
+            ),
         }
 
         local_score = TARGET_LATENCY_MS / latency_ms
@@ -2200,11 +2960,30 @@ def evaluate(program_path: str) -> dict[str, Any]:
                 new_local_best_record.update(
                     {
                         "official_anchor_score": fitness_anchor["score"],
-                        "official_anchor_latency_ms": fitness_anchor["local_latency_ms"],
-                        "official_anchor_submission_id": fitness_anchor.get("submission_id"),
+                        "official_anchor_latency_ms": fitness_anchor[
+                            "local_latency_ms"
+                        ],
+                        "official_anchor_submission_id": fitness_anchor.get(
+                            "submission_id"
+                        ),
                     }
                 )
-            _save_local_best(new_local_best_record, kernel_source)
+            if not _save_local_best(new_local_best_record, kernel_source):
+                concurrent_best = _load_local_best()
+                concurrent_latency = float(
+                    (concurrent_best or {}).get("latency_ms_median") or 0.0
+                )
+                metrics["local_best"].update(
+                    {
+                        "strictly_improved": False,
+                        "lost_concurrent_update": True,
+                        "previous_latency_ms_median": concurrent_latency or None,
+                    }
+                )
+                best_latency_before = concurrent_latency
+                local_best_before = concurrent_best
+                beats_local_best = False
+                new_local_best_record = None
         ncu_analysis = _ncu_summary_evidence(
             workspace=workspace,
             kernel_source=kernel_source,
@@ -2323,8 +3102,9 @@ def evaluate(program_path: str) -> dict[str, Any]:
                     ),
                     "provisional": True,
                     "provisional_score": provisional_score,
+                    "search_score": provisional_details["search_score"],
                     "provisional_local_score": scoring_local_score,
-                    "provisional_score_cap": OFFICIAL_PROVISIONAL_SCORE_CAP,
+                    "provisional_projection_floor": OFFICIAL_PROVISIONAL_SCORE_CAP,
                     "provisional_calibration": provisional_details,
                 }
                 if same_as_local_best:
@@ -2351,6 +3131,10 @@ def evaluate(program_path: str) -> dict[str, Any]:
             official = _submit_official(
                 workspace,
                 kernel_source,
+                source_language=source_language,
+                local_score=local_score,
+                local_latency_ms=latency_ms,
+                measurement_profile=measurement_profile,
                 allow_upload=not same_as_local_best,
             )
             official_request_time = time.time() - official_started
@@ -2368,7 +3152,9 @@ def evaluate(program_path: str) -> dict[str, Any]:
             official_correct = bool(official.get("is_correct"))
             official_score = float(official.get("sol_score") or 0.0)
             official_latency_ms = float(official.get("latency_ms") or 0.0)
-            official_stack = official.get("evaluation_stack_version") or OFFICIAL_EVAL_STACK_VERSION
+            official_stack = (
+                official.get("evaluation_stack_version") or OFFICIAL_EVAL_STACK_VERSION
+            )
             official_metrics = {
                 "enabled": True,
                 "submitted": True,
@@ -2389,13 +3175,19 @@ def evaluate(program_path: str) -> dict[str, Any]:
                 "request_time_s": official_request_time,
             }
             if official_latency_ms > 0:
-                official_metrics["local_to_official_latency_ratio"] = latency_ms / official_latency_ms
+                official_metrics["local_to_official_latency_ratio"] = (
+                    latency_ms / official_latency_ms
+                )
             metrics["official"] = official_metrics
             common_artifacts["official_submission_id"] = official.get("id")
             common_artifacts["official_status"] = official_status
-            common_artifacts["official_result_path"] = str(workspace / "official_submission_result.json")
+            common_artifacts["official_result_path"] = str(
+                workspace / "official_submission_result.json"
+            )
             if (workspace / "official_submission.json").exists():
-                common_artifacts["official_submission_path"] = str(workspace / "official_submission.json")
+                common_artifacts["official_submission_path"] = str(
+                    workspace / "official_submission.json"
+                )
 
             authoritative_score = (
                 official_status == "COMPLETED"
@@ -2455,10 +3247,14 @@ def evaluate(program_path: str) -> dict[str, Any]:
                     artifacts=common_artifacts,
                 )
 
-            pending_like = official_status in OFFICIAL_REFRESHABLE_STATUSES or official_status in {
-                "TIMEOUT",
-                "STALE_PENDING_RESULT",
-            }
+            pending_like = (
+                official_status in OFFICIAL_REFRESHABLE_STATUSES
+                or official_status
+                in {
+                    "TIMEOUT",
+                    "STALE_PENDING_RESULT",
+                }
+            )
             if pending_like and OFFICIAL_PENDING_SCORE_POLICY in {
                 "provisional",
                 "calibrated",
@@ -2480,15 +3276,18 @@ def evaluate(program_path: str) -> dict[str, Any]:
                     provisional_ratio = provisional_details[
                         "candidate_to_anchor_latency_ratio"
                     ]
+                    provisional_search_score = provisional_details["search_score"]
                     provisional_label = "incumbent-anchored"
                 elif OFFICIAL_PENDING_SCORE_POLICY in {"local", "local_proxy"}:
                     provisional_score = _local_provisional_score(scoring_local_score)
                     provisional_ratio = 1.0
+                    provisional_search_score = scoring_local_score
                     provisional_label = "local-proxy fallback"
                 else:
                     provisional_score, provisional_ratio = _provisional_official_score(
                         scoring_local_score
                     )
+                    provisional_search_score = scoring_local_score * provisional_ratio
                     provisional_label = "calibrated"
                 official_metrics.update(
                     {
@@ -2496,8 +3295,9 @@ def evaluate(program_path: str) -> dict[str, Any]:
                         "fitness_source": "provisional",
                         "provisional": True,
                         "provisional_score": provisional_score,
+                        "search_score": provisional_search_score,
                         "provisional_ratio": provisional_ratio,
-                        "provisional_score_cap": OFFICIAL_PROVISIONAL_SCORE_CAP,
+                        "provisional_projection_floor": OFFICIAL_PROVISIONAL_SCORE_CAP,
                         "pending_policy": OFFICIAL_PENDING_SCORE_POLICY,
                         "provisional_calibration": provisional_details,
                     }
@@ -2505,13 +3305,17 @@ def evaluate(program_path: str) -> dict[str, Any]:
                 if official.get("upstream_status") == "QUEUED":
                     pending_detail = "was accepted and queued asynchronously"
                 else:
-                    pending_detail = f"is {official_status} after bounded polling/cache refresh"
+                    pending_detail = (
+                        f"is {official_status} after bounded polling/cache refresh"
+                    )
                 summary = (
                     f"{local_summary} Official {official_stack} B200 submission "
                     f"{official.get('id')} {pending_detail}; "
-                    f"using provisional {provisional_label} score {provisional_score:.6f} "
-                    f"(ratio={provisional_ratio:.4f}, cap={OFFICIAL_PROVISIONAL_SCORE_CAP:.6f}) "
-                    "so PES can continue. This provisional score is capped below target and "
+                    f"using provisional {provisional_label} search_score "
+                    f"{provisional_search_score:.6f}, selection_score={provisional_score:.6f} "
+                    f"(ratio={provisional_ratio:.4f}, projection_floor="
+                    f"{OFFICIAL_PROVISIONAL_SCORE_CAP:.6f}) so PES can continue. The projected "
+                    "selection score remains below target and "
                     "does not certify leaderboard rank."
                 )
                 return _result(
@@ -2522,7 +3326,11 @@ def evaluate(program_path: str) -> dict[str, Any]:
                     artifacts=common_artifacts,
                 )
 
-            if official_status != "COMPLETED" or not official_correct or official_score <= 0:
+            if (
+                official_status != "COMPLETED"
+                or not official_correct
+                or official_score <= 0
+            ):
                 summary = (
                     f"{local_summary} Official {official_stack} fitness failed: status={official_status}, "
                     f"is_correct={official_correct}, sol_score={official_score:.6f}; "
@@ -2550,7 +3358,10 @@ def evaluate(program_path: str) -> dict[str, Any]:
             "execution_failed",
             f"SOL-ExecBench timed out: {exc}",
             0.0,
-            metrics={"eval_time_s": time.time() - start, "target_latency_ms": TARGET_LATENCY_MS},
+            metrics={
+                "eval_time_s": time.time() - start,
+                "target_latency_ms": TARGET_LATENCY_MS,
+            },
             artifacts={"workspace": str(workspace), "program_path": program_path},
         )
     except Exception as exc:
@@ -2558,7 +3369,10 @@ def evaluate(program_path: str) -> dict[str, Any]:
             "framework_error",
             f"Evaluation failed: {exc}",
             0.0,
-            metrics={"eval_time_s": time.time() - start, "target_latency_ms": TARGET_LATENCY_MS},
+            metrics={
+                "eval_time_s": time.time() - start,
+                "target_latency_ms": TARGET_LATENCY_MS,
+            },
             artifacts={
                 "workspace": str(workspace),
                 "program_path": program_path,

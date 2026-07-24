@@ -63,6 +63,7 @@ _SEMANTIC_ANCHORS = {
     "cute_dsl": 4,
     "async_pipeline": 5,
 }
+MIN_ARCHITECTURE_ISLANDS = len(_SEMANTIC_ANCHORS)
 
 ISLAND_PROFILES = (
     "warp_specialization",
@@ -345,10 +346,21 @@ def cluster_pca_coordinates(
     return labels.tolist(), centroid_array.tolist()
 
 
+def validate_architecture_island_count(num_islands: int) -> int:
+    num_islands = int(num_islands)
+    if num_islands < MIN_ARCHITECTURE_ISLANDS:
+        raise ValueError(
+            "architecture-aware routing requires at least "
+            f"{MIN_ARCHITECTURE_ISLANDS} islands for distinct semantic anchors; "
+            f"received {num_islands}"
+        )
+    return num_islands
+
+
 def architecture_island_id(label: str, pca_cluster: int, num_islands: int) -> int:
-    num_islands = max(1, int(num_islands))
+    num_islands = validate_architecture_island_count(num_islands)
     if label in _SEMANTIC_ANCHORS:
-        return _SEMANTIC_ANCHORS[label] % num_islands
+        return _SEMANTIC_ANCHORS[label]
     general = list(range(min(6, num_islands), num_islands))
     if not general:
         return int(pca_cluster) % num_islands
@@ -476,7 +488,7 @@ def fit_architecture_population(
 
 def ensure_architecture_islands(memory: object, num_islands: int) -> int:
     """Resize old checkpoints and all island indexes to the configured topology."""
-    target = max(2, int(num_islands))
+    target = validate_architecture_island_count(num_islands)
     with _lock_context(memory):
         old_islands = list(getattr(memory, "islands", []) or [])
         islands = [
