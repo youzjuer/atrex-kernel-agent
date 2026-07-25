@@ -12,6 +12,10 @@ from unittest import mock
 
 from orchestrator.loongflow_compat import architecture_islands
 from orchestrator.loongflow_compat import sitecustomize
+from orchestrator.loongflow_compat.sol58_seed_bank import (
+    load_seed_bank,
+    seed_bank_fingerprint,
+)
 
 
 def _solution(
@@ -87,6 +91,84 @@ class TestAdaptiveExploration(unittest.TestCase):
         )
 
 
+class TestStagnationArchitectureEscape(unittest.TestCase):
+    def test_plateau_age_uses_first_best_iteration(self) -> None:
+        first_best = _solution("best", "a", iteration=4, score=0.9, weight=1)
+        equal_later = _solution("tie", "b", iteration=11, score=0.9, weight=1)
+        weaker = _solution("weak", "c", iteration=18, score=0.8, weight=1)
+        state = sitecustomize._stagnation_state(
+            _memory(first_best, equal_later, weaker, last_iteration=20)
+        )
+
+        self.assertEqual(state["best_iteration"], 4)
+        self.assertEqual(state["plateau_rounds"], 16)
+        self.assertEqual(state["best_score"], 0.9)
+
+    def test_stagnation_seeds_are_deterministic_and_once_per_bucket(self) -> None:
+        best = _solution("best", "kernel", iteration=1, score=0.9, weight=1)
+        memory = _memory(best, last_iteration=17)
+        environment = {
+            "ATREX_PES_STAGNATION_SEEDS": "1",
+            "ATREX_PES_STAGNATION_ARCHITECTURE_ROUNDS": "12",
+            "ATREX_PES_STAGNATION_SEED_INTERVAL": "4",
+            "SOL58_CODE_LANGUAGE": "cuda_cpp",
+        }
+        with mock.patch.dict(os.environ, environment):
+            first = sitecustomize._stagnation_seed_parent(
+                memory, requested_island=0, num_islands=8
+            )
+            repeated = sitecustomize._stagnation_seed_parent(
+                memory, requested_island=0, num_islands=8
+            )
+            memory.last_iteration = 21
+            second = sitecustomize._stagnation_seed_parent(
+                memory, requested_island=0, num_islands=8
+            )
+
+        self.assertEqual(first["solution_id"], "")
+        self.assertEqual(
+            first["metadata"]["architecture_label"], "expert_parallel_scan"
+        )
+        self.assertEqual(first["island_id"], 7)
+        self.assertTrue(first["metadata"]["stagnation_escape"]["required"])
+        self.assertIsNone(repeated)
+        self.assertEqual(second["metadata"]["architecture_label"], "cub_radix_sort")
+        self.assertEqual(second["island_id"], 6)
+
+    def test_seed_bank_is_complete_and_fingerprinted(self) -> None:
+        seeds = load_seed_bank()
+        self.assertEqual(
+            {seed.family for seed in seeds},
+            {"cub_radix_sort", "expert_parallel_scan"},
+        )
+        self.assertEqual(len(seed_bank_fingerprint(seeds)), 64)
+
+    def test_new_best_resets_forced_seed_buckets(self) -> None:
+        old_best = _solution("old", "kernel-a", iteration=1, score=0.9, weight=1)
+        memory = _memory(old_best, last_iteration=13)
+        environment = {
+            "ATREX_PES_STAGNATION_SEEDS": "1",
+            "ATREX_PES_STAGNATION_ARCHITECTURE_ROUNDS": "12",
+            "ATREX_PES_STAGNATION_SEED_INTERVAL": "4",
+            "SOL58_CODE_LANGUAGE": "cuda_cpp",
+        }
+        with mock.patch.dict(os.environ, environment):
+            self.assertIsNotNone(
+                sitecustomize._stagnation_seed_parent(
+                    memory, requested_island=0, num_islands=8
+                )
+            )
+            new_best = _solution("new", "kernel-b", iteration=14, score=0.91, weight=1)
+            memory.populations[new_best.solution_id] = new_best
+            memory.last_iteration = 26
+            reset = sitecustomize._stagnation_seed_parent(
+                memory, requested_island=0, num_islands=8
+            )
+
+        self.assertIsNotNone(reset)
+        self.assertEqual(reset["metadata"]["stagnation_escape"]["best_iteration"], 14)
+
+
 class TestNcuSummaryPrompt(unittest.TestCase):
     def test_ncu_interpretation_contract_is_added_once(self) -> None:
         prompt = sitecustomize._append_ncu_summary_instructions("Base summary prompt")
@@ -113,7 +195,7 @@ class TestPatchManifest(unittest.TestCase):
             self.assertTrue(sitecustomize._enabled("ATREX_PES_COMPACT_DB_TOOLS"))
 
     def test_database_constructor_rejects_too_few_architecture_islands(self) -> None:
-        with self.assertRaisesRegex(ValueError, "at least 6 islands"):
+        with self.assertRaisesRegex(ValueError, "at least 8 islands"):
             sitecustomize._architecture_num_islands(SimpleNamespace(num_islands=4))
         self.assertEqual(
             sitecustomize._architecture_num_islands(SimpleNamespace(num_islands=8)),
@@ -276,6 +358,31 @@ class TestArchitectureFeatureAnalysis(unittest.TestCase):
         self.assertEqual(cute["cute_dsl"], 1)
         self.assertEqual(architecture_islands.architecture_label(cute), "cute_dsl")
 
+    def test_detects_sort_families_and_hierarchical_histograms(self) -> None:
+        cub = architecture_islands.extract_architecture_features(
+            "cub::DeviceRadixSort::SortPairs(nullptr, bytes, a, b, c, d, n, 0, 8);"
+        )
+        expert = architecture_islands.extract_architecture_features(
+            "__global__ void expert_parallel_stable_scan() { "
+            "const int expert = blockIdx.x; }"
+        )
+        hierarchical = architecture_islands.extract_architecture_features(
+            "__shared__ int histogram_banks[4][256]; int block_offsets[256];"
+        )
+
+        self.assertEqual(cub["cub_radix_sort"], 1)
+        self.assertEqual(cub["radix_bits"], 8)
+        self.assertEqual(architecture_islands.architecture_label(cub), "cub_radix_sort")
+        self.assertEqual(
+            architecture_islands.architecture_label(expert), "expert_parallel_scan"
+        )
+        self.assertEqual(hierarchical["bank_replicated_histogram"], 1)
+        self.assertEqual(hierarchical["hierarchical_histogram"], 1)
+        self.assertEqual(
+            architecture_islands.architecture_label(hierarchical),
+            "hierarchical_histogram",
+        )
+
     def test_pca_and_cluster_output_is_finite_and_deterministic(self) -> None:
         sources = [
             "__global__ void plain() {}",
@@ -320,9 +427,17 @@ class TestArchitectureFeatureAnalysis(unittest.TestCase):
         self.assertEqual(
             architecture_islands.architecture_island_id("cute_dsl", 0, 8), 4
         )
+        self.assertEqual(
+            architecture_islands.architecture_island_id("cub_radix_sort", 0, 8),
+            6,
+        )
+        self.assertEqual(
+            architecture_islands.architecture_island_id("expert_parallel_scan", 0, 8),
+            7,
+        )
 
     def test_too_few_islands_is_rejected_instead_of_colliding(self) -> None:
-        with self.assertRaisesRegex(ValueError, "at least 6 islands"):
+        with self.assertRaisesRegex(ValueError, "at least 8 islands"):
             architecture_islands.architecture_island_id("warp_specialization", 0, 4)
 
 

@@ -10,12 +10,21 @@ import os
 from pathlib import Path
 
 from orchestrator.loongflow_compat.architecture_islands import (
+    architecture_island_id,
+    architecture_label,
+    architecture_tags,
     classify_and_route_solution,
+    extract_architecture_features,
     initialize_architecture_memory,
+    island_profile,
     maybe_exchange_islands,
     restore_architecture_checkpoint,
     validate_architecture_island_count,
     write_architecture_checkpoint,
+)
+from orchestrator.loongflow_compat.sol58_seed_bank import (
+    load_seed_bank,
+    seed_bank_fingerprint,
 )
 
 logger = logging.getLogger("atrex.pes_compat")
@@ -167,6 +176,160 @@ def _adaptive_exploration_rate(base_rate: float, recent_scores: list[float]) -> 
         elif all(delta < 0.01 for delta in deltas):
             rate *= 2
     return min(rate, 0.9)
+
+
+def _positive_int_env(name: str, default: int) -> int:
+    try:
+        value = int(os.environ.get(name, str(default)))
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be a positive integer") from exc
+    if value <= 0:
+        raise ValueError(f"{name} must be a positive integer")
+    return value
+
+
+def _stagnation_state(memory: object) -> dict[str, float | int]:
+    """Measure plateau age from the first iteration that reached the best score."""
+    populations = getattr(memory, "populations", {})
+    candidates = list(populations.values()) if isinstance(populations, dict) else []
+    current_iteration = max(0, int(getattr(memory, "last_iteration", 0) or 0))
+    if not candidates:
+        return {
+            "current_iteration": current_iteration,
+            "best_iteration": current_iteration,
+            "plateau_rounds": 0,
+            "best_score": 0.0,
+        }
+
+    def score(item: object) -> float:
+        try:
+            return float(getattr(item, "score", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    best_score = max(score(candidate) for candidate in candidates)
+    best_iterations = [
+        max(0, int(getattr(candidate, "iteration", 0) or 0))
+        for candidate in candidates
+        if abs(score(candidate) - best_score) <= 1e-12
+    ]
+    best_iteration = min(best_iterations, default=current_iteration)
+    current_iteration = max(
+        current_iteration,
+        max(
+            (int(getattr(candidate, "iteration", 0) or 0) for candidate in candidates),
+            default=0,
+        ),
+    )
+    return {
+        "current_iteration": current_iteration,
+        "best_iteration": best_iteration,
+        "plateau_rounds": max(0, current_iteration - best_iteration),
+        "best_score": best_score,
+    }
+
+
+def _stagnation_seed_parent(
+    memory: object,
+    *,
+    requested_island: int | None,
+    num_islands: int,
+) -> dict[str, object] | None:
+    """Return an unscored architecture seed at most once per plateau bucket."""
+    if not _enabled("ATREX_PES_STAGNATION_SEEDS", "0"):
+        return None
+    if os.environ.get("SOL58_CODE_LANGUAGE", "cuda_cpp").strip().lower() not in {
+        "cuda",
+        "cuda_cpp",
+        "auto",
+    }:
+        return None
+
+    threshold = _positive_int_env("ATREX_PES_STAGNATION_ARCHITECTURE_ROUNDS", 12)
+    interval = _positive_int_env("ATREX_PES_STAGNATION_SEED_INTERVAL", 20)
+    state = _stagnation_state(memory)
+    best_marker = (
+        int(state["best_iteration"]),
+        round(float(state["best_score"]), 12),
+    )
+    if getattr(memory, "_atrex_stagnation_best_marker", None) != best_marker:
+        memory._atrex_stagnation_best_marker = best_marker
+        memory._atrex_stagnation_seed_bucket = None
+    plateau_rounds = int(state["plateau_rounds"])
+    if plateau_rounds < threshold:
+        return None
+    bucket = (plateau_rounds - threshold) // interval
+    if getattr(memory, "_atrex_stagnation_seed_bucket", None) == bucket:
+        return None
+
+    seeds = load_seed_bank(language="cuda_cpp")
+    seed = seeds[bucket % len(seeds)]
+    features = extract_architecture_features(seed.source)
+    detected_family = architecture_label(features)
+    if detected_family != seed.family:
+        raise RuntimeError(
+            f"SOL58 seed {seed.seed_id!r} declares {seed.family!r} but feature "
+            f"analysis classified it as {detected_family!r}"
+        )
+    if num_islands >= 8:
+        seed_island = architecture_island_id(detected_family, 0, num_islands)
+    else:
+        seed_island = int(requested_island or 0) % max(1, int(num_islands))
+
+    directive = (
+        "MANDATORY STAGNATION ESCAPE: treat this unscored seed as a different "
+        f"algorithm-family starting point ({seed.family}). Produce a complete, "
+        "self-contained CUDA architecture experiment. Do not fall back to a "
+        "constant-only or launch-bound-only edit of the incumbent. Preserve "
+        "stable ordering and all 16-workload correctness."
+    )
+    memory._atrex_stagnation_seed_bucket = bucket
+    memory._atrex_last_stagnation_seed_id = seed.seed_id
+    logger.warning(
+        "Forced stagnation escape at iteration %d (best iteration %d, plateau %d): "
+        "seed=%s family=%s island=%d bank=%s",
+        int(state["current_iteration"]),
+        int(state["best_iteration"]),
+        plateau_rounds,
+        seed.seed_id,
+        seed.family,
+        seed_island,
+        seed_bank_fingerprint(seeds)[:12],
+    )
+    return {
+        "solution": seed.source,
+        "solution_id": "",
+        "generate_plan": directive,
+        "parent_id": "",
+        "island_id": seed_island,
+        "iteration": int(state["current_iteration"]),
+        "generation": 0,
+        "sample_cnt": 0,
+        "sample_weight": 0.05,
+        "score": 0.0,
+        "evaluation": "Unscored architecture seed; evaluator evidence is required.",
+        "summary": f"{directive} Seed purpose: {seed.purpose}",
+        "metadata": {
+            "trace": [],
+            "stagnation_escape": {
+                "required": True,
+                "seed_id": seed.seed_id,
+                "seed_family": seed.family,
+                "current_iteration": int(state["current_iteration"]),
+                "best_iteration": int(state["best_iteration"]),
+                "plateau_rounds": plateau_rounds,
+                "incumbent_score": float(state["best_score"]),
+                "directive": directive,
+            },
+            "source_sha256": seed.source_sha256,
+            "architecture_features": features,
+            "architecture_tags": architecture_tags(features),
+            "architecture_label": detected_family,
+            "architecture_island_id": seed_island,
+            "architecture_home_island_id": seed_island,
+            "architecture_island_profile": island_profile(seed_island),
+        },
+    }
 
 
 def _canonical_solution(solutions: list[object]) -> object:
@@ -403,7 +566,12 @@ def _architecture_num_islands(config: object) -> int:
 def _patch_evolution_database_selection() -> None:
     source_dedup_enabled = _enabled("ATREX_PES_SOURCE_DEDUP")
     architecture_enabled = _enabled("ATREX_PES_ARCHITECTURE_ISLANDS")
-    if not source_dedup_enabled and not architecture_enabled:
+    stagnation_seeds_enabled = _enabled("ATREX_PES_STAGNATION_SEEDS", "0")
+    if (
+        not source_dedup_enabled
+        and not architecture_enabled
+        and not stagnation_seeds_enabled
+    ):
         return
     try:
         from loongflow.agentsdk.memory.evolution.in_memory import InMemory
@@ -513,6 +681,18 @@ def _patch_evolution_database_selection() -> None:
             initialize_architecture_memory(memory, num_islands, migration_interval)
         reconciled = _reconcile_authoritative_scores(memory)
         removed = _deduplicate_memory_indexes(memory) if source_dedup_enabled else 0
+        configured_islands = (
+            architecture_settings(self)[0]
+            if architecture_enabled
+            else max(1, int(getattr(self.config, "num_islands", 1) or 1))
+        )
+        forced_seed = _stagnation_seed_parent(
+            memory,
+            requested_island=island_id,
+            num_islands=configured_islands,
+        )
+        if forced_seed is not None:
+            return forced_seed
         recent = memory.list_solutions(filter_type="desc", limit=5)
         recent_scores = [
             float(solution.score)
@@ -668,6 +848,7 @@ def _patch_evolution_database_selection() -> None:
     EvolveDatabase.add_solution = patched_add_solution
     EvolveDatabase.load_checkpoint = patched_load_checkpoint
     EvolveDatabase.save_checkpoint = patched_save_checkpoint
+    patched_sample_solution._atrex_stagnation_seed_patched = True
     EvolveDatabase._atrex_evolution_patched = True
 
 
@@ -892,7 +1073,9 @@ def _enabled(name: str, default: str = "1") -> bool:
 
 def _verify_evolution_patch() -> tuple[bool, str]:
     if not (
-        _enabled("ATREX_PES_SOURCE_DEDUP") or _enabled("ATREX_PES_ARCHITECTURE_ISLANDS")
+        _enabled("ATREX_PES_SOURCE_DEDUP")
+        or _enabled("ATREX_PES_ARCHITECTURE_ISLANDS")
+        or _enabled("ATREX_PES_STAGNATION_SEEDS", "0")
     ):
         return True, "disabled"
     from loongflow.framework.pes.database.database import EvolveDatabase
@@ -908,7 +1091,23 @@ def _verify_evolution_patch() -> tuple[bool, str]:
             return False, "EvolveDatabase config validation sentinel missing"
         if not getattr(InMemory, "_atrex_architecture_patched", False):
             return False, "InMemory architecture sentinel missing"
+    if _enabled("ATREX_PES_STAGNATION_SEEDS", "0") and not getattr(
+        EvolveDatabase.sample_solution, "_atrex_stagnation_seed_patched", False
+    ):
+        return False, "stagnation seed sampler sentinel missing"
     return True, "EvolveDatabase/InMemory"
+
+
+def _verify_stagnation_seed_bank() -> tuple[bool, str]:
+    if not _enabled("ATREX_PES_STAGNATION_SEEDS", "0"):
+        return True, "disabled"
+    seeds = load_seed_bank(language="cuda_cpp")
+    families = {seed.family for seed in seeds}
+    required = {"cub_radix_sort", "expert_parallel_scan"}
+    missing = sorted(required - families)
+    if missing:
+        return False, f"missing architecture seed families {missing}"
+    return True, f"{len(seeds)} CUDA seeds sha256={seed_bank_fingerprint(seeds)[:12]}"
 
 
 def _verify_database_tools_patch() -> tuple[bool, str]:
@@ -1002,7 +1201,14 @@ def apply_compat_patches() -> None:
         required=(
             _enabled("ATREX_PES_SOURCE_DEDUP")
             or _enabled("ATREX_PES_ARCHITECTURE_ISLANDS")
+            or _enabled("ATREX_PES_STAGNATION_SEEDS", "0")
         ),
+    )
+    _apply_manifest_patch(
+        "stagnation_seed_bank",
+        lambda: None,
+        _verify_stagnation_seed_bank,
+        required=_enabled("ATREX_PES_STAGNATION_SEEDS", "0"),
     )
     _apply_manifest_patch(
         "database_tools",

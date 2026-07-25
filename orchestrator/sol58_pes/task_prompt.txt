@@ -90,9 +90,9 @@ Evaluation contract:
   submission on a later cache hit instead of waiting for the official worker or delayed result
   publication.
 - If the official API leaves a candidate pending or reports a future `result_available_at`, the
-  evaluator may return an
-  evaluator-success result with `metrics.official.provisional=true` and a target-capped
-  provisional score so PES keeps searching. Treat that as a search hint only: it is not proof of
+  evaluator may return an evaluator-success result with
+  `metrics.official.provisional=true` and a projected search score so PES keeps searching. Treat
+  that as a search hint only: it is not proof of
   leaderboard rank and cannot certify the target until a completed official `sol_score` exceeds
   the target.
 - Candidates that do not beat the local incumbent receive an incumbent-anchored provisional score:
@@ -119,9 +119,12 @@ Search guidance:
 - The initial parent is a CUDA Graph tiled stable counting-sort implementation.
 - It uses per-tile histograms, a block-prefix pass, a 256-entry expert prefix pass, and stable scatter.
 - Valid directions include reducing launch/graph overhead, specializing small vs large token counts inside run(), reducing atomics in scatter, using block/warp-local prefix layouts, improving persistent scratch handling, and simplifying graph update overhead.
-- Once the parent is near the local best, preserve its validated topology and make one isolated
-  change at a time. A failed experiment is evidence to revert that change, not to stack more broad
-  rewrites on top of it.
+- Outside a declared stagnation escape, a strong parent may be refined with one isolated change at
+  a time. During a forced stagnation escape (`metadata.stagnation_escape.required=true`), this
+  local-refinement rule is suspended: Planner must name a different algorithm family, account for
+  its full-array passes/launches/scratch traffic, and Executor must emit a complete architecture
+  experiment based on the supplied seed. Constant-only, launch-bound-only, comment-only, and
+  dead-code-only edits do not satisfy that requirement.
 - CUDA shuffle groups must be hardware-warp aligned. Every lane that executes a `*_sync` intrinsic
   must be included in its mask; never emulate 72- or 96-thread logical groups by crossing warp
   boundaries with a single shuffle scan.
@@ -141,14 +144,24 @@ Architecture-island policy:
   deterministic cluster, and routes the child to its architecture island before database admission.
 - Island 0 explores warp specialization; island 1 cluster TMA multicast/broadcast; island 2
   TMA/WGMMA; island 3 persistent/cooperative-grid designs; island 4 CuTe DSL; island 5 cp.async and
-  producer/consumer pipelines. Islands 6 and 7 hold PCA-separated general, CUDA Graph, histogram,
-  and atomic routes. With a non-default island count, metadata in the sampled parent is authoritative.
+  producer/consumer pipelines. Island 6 anchors CUB/bitwise radix families. Island 7 anchors
+  expert-parallel stable scans and hierarchical/bank-replicated histogram routes. PCA still uses
+  all named features inside and beyond these semantic anchors. Metadata in the sampled parent is
+  authoritative.
 - Read `metadata.architecture_label`, `architecture_features`, `pca_coordinates`, and
   `architecture_island_profile` from the sampled parent. Preserve a strong route when making a
   local refinement, but use the current island's profile when deliberately changing architecture.
 - Every ${SOL58_ARCHITECTURE_MIGRATION_INTERVAL} completed global iterations, PCA is refit, home
   members are reclassified, and each island exchanges its top fraction with adjacent islands.
   Between those boundaries, existing home assignments remain fixed.
+
+Knowledge-grounding policy:
+- The runner appends a versioned SOL58 knowledge pack below this task. Planner, Executor, and
+  Summary must use its evidence boundaries and algorithm-family comparison.
+- A leaderboard participant name is not implementation evidence. Never infer source architecture
+  from `Recursive` or another public display name.
+- Architecture seeds are deliberately unscored. Their code is a correctness-ready search starting
+  point, not proof that the family is fast. Only evaluator measurements promote descendants.
 
 Cross-phase empirical memory:
 - The CUDA-specific findings below apply to CUDA C++ descendants. They do not constitute evidence

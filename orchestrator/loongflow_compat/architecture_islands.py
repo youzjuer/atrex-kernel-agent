@@ -17,7 +17,7 @@ import numpy as np
 
 logger = logging.getLogger("atrex.pes_architecture")
 
-ANALYSIS_VERSION = 1
+ANALYSIS_VERSION = 2
 PCA_COMPONENTS = 3
 
 FEATURE_NAMES = (
@@ -31,6 +31,17 @@ FEATURE_NAMES = (
     "persistent_kernel",
     "cuda_graph",
     "shared_memory_histogram",
+    "hierarchical_histogram",
+    "bank_replicated_histogram",
+    "per_cta_offsets",
+    "radix_sort",
+    "cub_radix_sort",
+    "block_radix_sort",
+    "bitwise_radix_sort",
+    "expert_parallel_scan",
+    "stable_rank",
+    "radix_passes",
+    "radix_bits",
     "atomic_ops",
     "warp_collectives",
     "cute_dsl",
@@ -62,8 +73,13 @@ _SEMANTIC_ANCHORS = {
     "persistent_cooperative": 3,
     "cute_dsl": 4,
     "async_pipeline": 5,
+    "cub_radix_sort": 6,
+    "bitwise_radix_sort": 6,
+    "expert_parallel_scan": 7,
+    "hierarchical_histogram": 7,
+    "graph_histogram": 7,
 }
-MIN_ARCHITECTURE_ISLANDS = len(_SEMANTIC_ANCHORS)
+MIN_ARCHITECTURE_ISLANDS = max(_SEMANTIC_ANCHORS.values()) + 1
 
 ISLAND_PROFILES = (
     "warp_specialization",
@@ -72,8 +88,27 @@ ISLAND_PROFILES = (
     "persistent_cooperative",
     "cute_dsl",
     "async_pipeline",
-    "pca_general_a",
-    "pca_general_b",
+    "radix_family",
+    "hierarchical_stable_bucket",
+)
+
+_TAG_FEATURES = tuple(
+    name
+    for name in FEATURE_NAMES
+    if name
+    not in {
+        "radix_passes",
+        "radix_bits",
+        "atomic_ops",
+        "warp_collectives",
+        "vectorized_io",
+        "barrier_pipeline",
+        "shared_memory_uses",
+        "kernel_definitions",
+        "launch_sites",
+        "code_chars",
+        "code_lines",
+    }
 )
 
 
@@ -93,6 +128,15 @@ def _count(code: str, pattern: str) -> int:
 
 def _present(code: str, pattern: str) -> int:
     return int(bool(re.search(pattern, code, flags=re.IGNORECASE | re.MULTILINE)))
+
+
+def _integer_constant(code: str, names: str) -> int:
+    match = re.search(
+        rf"\b(?:{names})\b\s*(?:=|:)\s*(\d+)",
+        code,
+        flags=re.IGNORECASE | re.MULTILINE,
+    )
+    return int(match.group(1)) if match else 0
 
 
 def extract_architecture_features(source: str) -> dict[str, int]:
@@ -150,6 +194,71 @@ def extract_architecture_features(source: str) -> dict[str, int]:
     )
     shared_uses = _count(code, r"__shared__|extern\s+__shared__|SharedStorage")
     histogram = _present(code, r"\bhist(?:ogram)?\w*|\bbins?\b")
+    per_cta_offsets = _present(
+        code,
+        r"per[_ ]?cta|cta[_ ]?(?:base|offset)|block[_ ]?offset|"
+        r"tile[_ ]?(?:base|offset|count)",
+    )
+    bank_replicated_histogram = int(
+        bool(histogram)
+        and bool(
+            _present(
+                code,
+                r"local_cnts_rep|hist(?:ogram)?[_ ]?(?:rep|bank)|"
+                r"(?:NUM|k)[_ ]?(?:HIST[_ ]?)?BANKS|warp[_ ]?bank",
+            )
+        )
+    )
+    hierarchical_histogram = int(
+        bool(histogram)
+        and bool(
+            per_cta_offsets
+            or _present(
+                code,
+                r"partial[_ ]?(?:hist|count)|global[_ ]?(?:hist|count)|"
+                r"prefix[_ ]?(?:hist|count)|merge[_ ]?(?:hist|count)",
+            )
+        )
+    )
+    cub_radix_sort = _present(code, r"cub::DeviceRadixSort|DeviceRadixSort")
+    block_radix_sort = _present(code, r"cub::BlockRadixSort|BlockRadixSort")
+    explicit_radix = _present(
+        code,
+        r"\bradix[_ ]?(?:sort|pass|bits?|digit)|\bRadixSort\b|"
+        r"begin[_ ]?bit|end[_ ]?bit",
+    )
+    bitwise_radix_sort = int(
+        bool(explicit_radix)
+        and not bool(cub_radix_sort or block_radix_sort)
+        and bool(
+            _present(
+                code,
+                r"bitwise[_ ]?radix|radix[_ ]?(?:pass|bits?|digit)|"
+                r"digit[_ ]?bits?|\bbit[_ ]?pass",
+            )
+        )
+    )
+    radix_sort = int(bool(cub_radix_sort or block_radix_sort or explicit_radix))
+    radix_bits = _integer_constant(
+        code, r"RADIX_BITS|kRadixBits|radix_bits|DIGIT_BITS|kDigitBits"
+    )
+    if radix_sort and radix_bits == 0 and (cub_radix_sort or block_radix_sort):
+        radix_bits = 8
+    radix_passes = _integer_constant(
+        code, r"RADIX_PASSES|kRadixPasses|radix_passes|NUM_PASSES|kNumPasses"
+    )
+    if bitwise_radix_sort and radix_passes == 0 and radix_bits > 0:
+        radix_passes = max(1, math.ceil(8 / radix_bits))
+    expert_parallel_scan = _present(
+        code,
+        r"expert[_ ]?parallel|expert[_ ]?(?:owned|scan)|"
+        r"(?:const\s+)?int\s+expert\s*=\s*blockIdx\.x",
+    )
+    stable_rank = _present(
+        code,
+        r"stable[_ ]?(?:rank|scan|scatter)|rank[_ ]?in[_ ]?(?:warp|block)|"
+        r"local[_ ]?rank|exclusive[_ ]?(?:scan|prefix)",
+    )
     atomic_ops = _count(
         code,
         r"\batomic(?:Add|Sub|Exch|Min|Max|Inc|Dec|CAS|And|Or|Xor)\s*\(",
@@ -176,6 +285,17 @@ def extract_architecture_features(source: str) -> dict[str, int]:
         "persistent_kernel": int(persistent),
         "cuda_graph": graph,
         "shared_memory_histogram": int(bool(shared_uses) and bool(histogram)),
+        "hierarchical_histogram": hierarchical_histogram,
+        "bank_replicated_histogram": bank_replicated_histogram,
+        "per_cta_offsets": per_cta_offsets,
+        "radix_sort": radix_sort,
+        "cub_radix_sort": cub_radix_sort,
+        "block_radix_sort": block_radix_sort,
+        "bitwise_radix_sort": bitwise_radix_sort,
+        "expert_parallel_scan": expert_parallel_scan,
+        "stable_rank": stable_rank,
+        "radix_passes": radix_passes,
+        "radix_bits": radix_bits,
         "atomic_ops": atomic_ops,
         "warp_collectives": warp_collectives,
         "cute_dsl": cute_dsl,
@@ -202,6 +322,16 @@ def extract_architecture_features(source: str) -> dict[str, int]:
 def architecture_label(features: dict[str, int]) -> str:
     if features.get("cluster_tma_broadcast"):
         return "cluster_tma_broadcast"
+    if features.get("cub_radix_sort") or features.get("block_radix_sort"):
+        return "cub_radix_sort"
+    if features.get("bitwise_radix_sort"):
+        return "bitwise_radix_sort"
+    if features.get("expert_parallel_scan"):
+        return "expert_parallel_scan"
+    if features.get("hierarchical_histogram") or features.get(
+        "bank_replicated_histogram"
+    ):
+        return "hierarchical_histogram"
     if features.get("warp_specialization"):
         return "warp_specialization"
     if features.get("tma") or features.get("wgmma"):
@@ -222,8 +352,7 @@ def architecture_label(features: dict[str, int]) -> str:
 
 
 def architecture_tags(features: dict[str, int]) -> list[str]:
-    keys = FEATURE_NAMES[:13]
-    return [name for name in keys if int(features.get(name, 0) or 0) > 0]
+    return [name for name in _TAG_FEATURES if int(features.get(name, 0) or 0) > 0]
 
 
 def _feature_vector(features: dict[str, int]) -> np.ndarray:
@@ -361,7 +490,9 @@ def architecture_island_id(label: str, pca_cluster: int, num_islands: int) -> in
     num_islands = validate_architecture_island_count(num_islands)
     if label in _SEMANTIC_ANCHORS:
         return _SEMANTIC_ANCHORS[label]
-    general = list(range(min(6, num_islands), num_islands))
+    general = list(range(MIN_ARCHITECTURE_ISLANDS, num_islands))
+    if not general:
+        general = list(range(min(6, num_islands), num_islands))
     if not general:
         return int(pca_cluster) % num_islands
     return general[int(pca_cluster) % len(general)]
@@ -466,7 +597,14 @@ def fit_architecture_population(
         for index, label in enumerate(semantic_labels)
         if label not in _SEMANTIC_ANCHORS
     ]
-    general_cluster_count = max(1, int(num_islands) - len(_SEMANTIC_ANCHORS))
+    general_cluster_count = max(
+        1,
+        (
+            int(num_islands) - MIN_ARCHITECTURE_ISLANDS
+            if int(num_islands) > MIN_ARCHITECTURE_ISLANDS
+            else int(num_islands) - 6
+        ),
+    )
     general_labels, general_centroids = cluster_pca_coordinates(
         [model["coordinates"][index] for index in general_indexes],
         general_cluster_count,

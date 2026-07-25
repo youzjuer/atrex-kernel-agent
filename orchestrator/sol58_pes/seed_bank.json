@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "seeds": [
+    {
+      "id": "cub_device_radix",
+      "family": "cub_radix_sort",
+      "language": "cuda_cpp",
+      "path": "seeds/cub_device_radix.cu",
+      "purpose": "Stable 8-bit CUB SortPairs probe with explicit offsets; specialize or replace library passes from evidence."
+    },
+    {
+      "id": "expert_parallel_scan",
+      "family": "expert_parallel_scan",
+      "language": "cuda_cpp",
+      "path": "seeds/expert_parallel_scan.cu",
+      "purpose": "Correct expert-owned stable scan probe; reduce its repeated input traffic through hierarchy or bitmasks."
+    }
+  ]
+}

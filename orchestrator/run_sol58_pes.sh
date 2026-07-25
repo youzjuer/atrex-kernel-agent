@@ -196,6 +196,8 @@ export SOL58_MAX_ITERATIONS="${SOL58_MAX_ITERATIONS:-40}"
 export SOL58_PES_CONCURRENCY="${SOL58_PES_CONCURRENCY:-1}"
 export SOL58_NUM_ISLANDS="${SOL58_NUM_ISLANDS:-8}"
 export SOL58_ARCHITECTURE_MIGRATION_INTERVAL="${SOL58_ARCHITECTURE_MIGRATION_INTERVAL:-20}"
+export SOL58_PES_KNOWLEDGE_GROUNDING="${SOL58_PES_KNOWLEDGE_GROUNDING:-1}"
+export SOL58_PES_KNOWLEDGE_PACK="${SOL58_PES_KNOWLEDGE_PACK:-${TASK_DIR}/knowledge_pack.md}"
 export SOL58_REACT_SCORE_THRESHOLD="${SOL58_REACT_SCORE_THRESHOLD:-0.84}"
 export SOL58_SEED_LOCAL_BEST="${SOL58_SEED_LOCAL_BEST:-1}"
 export SOL58_EVAL_TIMEOUT="${SOL58_EVAL_TIMEOUT:-1200}"
@@ -273,6 +275,10 @@ export LLM_TIMEOUT="${LLM_TIMEOUT:-240}"
 export ATREX_PES_MAX_PARALLEL_CANDIDATES="${ATREX_PES_MAX_PARALLEL_CANDIDATES:-1}"
 export ATREX_PES_SOURCE_DEDUP="${ATREX_PES_SOURCE_DEDUP:-1}"
 export ATREX_PES_ARCHITECTURE_ISLANDS="${ATREX_PES_ARCHITECTURE_ISLANDS:-1}"
+export ATREX_PES_STAGNATION_SEEDS="${ATREX_PES_STAGNATION_SEEDS:-1}"
+export ATREX_PES_STAGNATION_ARCHITECTURE_ROUNDS="${ATREX_PES_STAGNATION_ARCHITECTURE_ROUNDS:-12}"
+export ATREX_PES_STAGNATION_SEED_INTERVAL="${ATREX_PES_STAGNATION_SEED_INTERVAL:-20}"
+export ATREX_PES_SEED_MANIFEST="${ATREX_PES_SEED_MANIFEST:-${TASK_DIR}/seed_bank.json}"
 export ATREX_PES_COMPACT_DB_TOOLS="${ATREX_PES_COMPACT_DB_TOOLS:-1}"
 export ATREX_PES_DB_SOLUTION_CHARS="${ATREX_PES_DB_SOLUTION_CHARS:-65536}"
 export ATREX_PES_DB_SUMMARY_CHARS="${ATREX_PES_DB_SUMMARY_CHARS:-16384}"
@@ -293,9 +299,19 @@ if [[ ! "${SOL58_ARCHITECTURE_MIGRATION_INTERVAL}" =~ ^[1-9][0-9]*$ ]]; then
   echo "error: SOL58_ARCHITECTURE_MIGRATION_INTERVAL must be a positive integer" >&2
   exit 2
 fi
-if is_truthy "${ATREX_PES_ARCHITECTURE_ISLANDS}" && ((SOL58_NUM_ISLANDS < 6)); then
-  echo "error: architecture-aware PES requires at least 6 islands; got ${SOL58_NUM_ISLANDS}" >&2
+if is_truthy "${ATREX_PES_ARCHITECTURE_ISLANDS}" && ((SOL58_NUM_ISLANDS < 8)); then
+  echo "error: architecture-aware PES requires at least 8 islands; got ${SOL58_NUM_ISLANDS}" >&2
   exit 2
+fi
+for integer_setting in ATREX_PES_STAGNATION_ARCHITECTURE_ROUNDS ATREX_PES_STAGNATION_SEED_INTERVAL; do
+  if [[ ! "${!integer_setting}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "error: ${integer_setting} must be a positive integer" >&2
+    exit 2
+  fi
+done
+if is_truthy "${SOL58_PES_KNOWLEDGE_GROUNDING}" && [[ ! -f "${SOL58_PES_KNOWLEDGE_PACK}" ]]; then
+  echo "error: SOL58 knowledge pack not found: ${SOL58_PES_KNOWLEDGE_PACK}" >&2
+  exit 1
 fi
 
 CLOCKS_LOCKED_BY_RUNNER=0
@@ -408,7 +424,7 @@ fi
 
 bash "${SCRIPT_DIR}/ensure_loongflow_compat.sh" "${PROJECT_ROOT}"
 
-for required in task_config.yaml task_prompt.txt initial_kernel.cu eval_program_sol58.py; do
+for required in task_config.yaml task_prompt.txt initial_kernel.cu eval_program_sol58.py seed_bank.json; do
   if [[ ! -f "${TASK_DIR}/${required}" ]]; then
     echo "error: missing SOL58 PES task file: ${TASK_DIR}/${required}" >&2
     exit 1
@@ -486,6 +502,25 @@ RENDERED_TASK="$(mktemp -t sol58_task_prompt.XXXXXX).txt"
 envsubst < "${TASK_DIR}/task_config.yaml" > "${RENDERED_CONFIG}"
 envsubst '${SOL58_CODE_LANGUAGE} ${SOL58_CUTEDSL_GENERATION_RATE} ${SOL58_CUTEDSL_SCHEDULE_PERIOD} ${SOL58_NUM_ISLANDS} ${SOL58_ARCHITECTURE_MIGRATION_INTERVAL}' \
   < "${TASK_DIR}/task_prompt.txt" > "${RENDERED_TASK}"
+KNOWLEDGE_FINGERPRINT="disabled"
+if is_truthy "${SOL58_PES_KNOWLEDGE_GROUNDING}"; then
+  python - "${RENDERED_TASK}" "${SOL58_PES_KNOWLEDGE_PACK}" <<'PY'
+import sys
+from pathlib import Path
+
+task_path = Path(sys.argv[1])
+knowledge_path = Path(sys.argv[2])
+task = task_path.read_text(encoding="utf-8").rstrip()
+knowledge = knowledge_path.read_text(encoding="utf-8").strip()
+task_path.write_text(
+    task + "\n\n--- BEGIN INJECTED SOL58 KNOWLEDGE PACK ---\n\n"
+    + knowledge
+    + "\n\n--- END INJECTED SOL58 KNOWLEDGE PACK ---\n",
+    encoding="utf-8",
+)
+PY
+  KNOWLEDGE_FINGERPRINT="$(sha256sum "${SOL58_PES_KNOWLEDGE_PACK}" | awk '{print substr($1, 1, 12)}')"
+fi
 
 echo "[Atrex] Starting real LoongFlow PES for SOL-ExecBench kernel 58"
 echo "        target_latency_ms=${SOL58_TARGET_LATENCY_MS}"
@@ -493,6 +528,9 @@ echo "        target_score=${SOL58_TARGET_SCORE}"
 echo "        code_language=${SOL58_CODE_LANGUAGE}"
 echo "        cutedsl_rate=${SOL58_CUTEDSL_GENERATION_RATE} period=${SOL58_CUTEDSL_SCHEDULE_PERIOD}"
 echo "        architecture_islands=${SOL58_NUM_ISLANDS} exchange_interval=${SOL58_ARCHITECTURE_MIGRATION_INTERVAL}"
+echo "        knowledge_grounding=${SOL58_PES_KNOWLEDGE_GROUNDING} knowledge_sha256=${KNOWLEDGE_FINGERPRINT}"
+echo "        stagnation_seeds=${ATREX_PES_STAGNATION_SEEDS} threshold=${ATREX_PES_STAGNATION_ARCHITECTURE_ROUNDS} interval=${ATREX_PES_STAGNATION_SEED_INTERVAL}"
+echo "        seed_manifest=${ATREX_PES_SEED_MANIFEST}"
 echo "        local_repeat_count=${SOL58_LOCAL_REPEAT_COUNT} local_best_gate=${SOL58_LOCAL_BEST_GATE} local_cache=${SOL58_LOCAL_EVAL_CACHE}"
 echo "        local_gate=sigma:${SOL58_LOCAL_GATE_SIGMA_MULTIPLIER} noise_floor:${SOL58_LOCAL_GATE_RELATIVE_NOISE_FLOOR} recheck_pairs:${SOL58_LOCAL_GATE_RECHECK_PAIRS} uncertain_tolerance:${SOL58_LOCAL_GATE_UNCERTAIN_RELATIVE_TOLERANCE} cooldown:${SOL58_LOCAL_GATE_CHALLENGER_COOLDOWN_S}s"
 echo "        measurement_profile=${SOL58_MEASUREMENT_PROFILE} gpu=${CUDA_VISIBLE_DEVICES:-auto} physical_clock_gpu=${SOL58_CLOCK_GPU_INDEX:-n/a}"
