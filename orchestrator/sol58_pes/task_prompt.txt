@@ -76,9 +76,15 @@ Evaluation contract:
   only completed official v1.1 fitness resolves architecture-sensitive ranking.
 - An exact source-hash match to the persisted standalone local-best may reuse that kernel's existing
   completed three-repeat local result and official score. This only deduplicates an unchanged parent;
-  every new source hash still runs all three repeats.
-- Upload to official v1.1 only when that median strictly improves the persisted local best.
-  Non-improving candidates are marked `SKIPPED_NOT_LOCAL_BEST` and are not uploaded.
+  every new source hash still runs all three initial repeats.
+- The local-best gate is uncertainty-aware. Clearly slower candidates are rejected. Candidates at or
+  above the incumbent within the configured noise band are measured again in alternating
+  candidate/incumbent pairs to cancel clock and thermal drift. Only a statistically confirmed paired
+  improvement replaces the persisted local best.
+- A paired result that remains inside the uncertainty band may consume a rate-limited official
+  challenger slot when its point estimate is within the configured tolerance. This prevents a real
+  hard-tail improvement from being permanently rejected by local noise without allowing noisy
+  samples to overwrite the local incumbent.
 - Completed official v1.1 submissions provide the authoritative fitness (`sol_score`).
 - The default asynchronous submit path returns after upload acceptance and refreshes the cached
   submission on a later cache hit instead of waiting for the official worker or delayed result

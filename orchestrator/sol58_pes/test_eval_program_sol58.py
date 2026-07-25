@@ -445,6 +445,122 @@ class TestCuTeDslSource(unittest.TestCase):
 
 
 class TestLocalBestGate(unittest.TestCase):
+    def test_clear_slowdown_skips_paired_recheck(self) -> None:
+        with mock.patch.object(
+            evaluator, "LOCAL_GATE_RELATIVE_NOISE_FLOOR", 0.01
+        ), mock.patch.object(evaluator, "_collect_local_evaluation") as collect:
+            result = evaluator._evaluate_local_best_gate(
+                workspace=Path("/tmp/unused"),
+                kernel_source="candidate",
+                source_language="cuda_cpp",
+                source_sha256=evaluator._kernel_source_hash("candidate"),
+                candidate_latencies_ms=[0.0080, 0.0081, 0.0082],
+                local_best={
+                    "kernel_sha256": evaluator._kernel_source_hash("incumbent"),
+                    "latency_ms_median": 0.0075,
+                    "repeat_latencies_ms": [0.00749, 0.00750, 0.00751],
+                },
+                measurement_profile={"id": "profile"},
+                program_path="candidate.cu",
+                start=time.time(),
+            )
+
+        self.assertEqual(result["status"], "confirmed_slower")
+        self.assertFalse(result["submit_official"])
+        collect.assert_not_called()
+
+    def test_paired_recheck_confirms_drift_normalized_improvement(self) -> None:
+        candidate = "candidate"
+        incumbent = "incumbent"
+        measurements = [0.00740, 0.00760, 0.00762, 0.00742]
+
+        def measured(value: float) -> dict:
+            return {"local_latencies_ms": [value]}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            incumbent_path = root / "incumbent.cu"
+            incumbent_path.write_text(incumbent)
+            with mock.patch.object(
+                evaluator, "LOCAL_GATE_RELATIVE_NOISE_FLOOR", 0.01
+            ), mock.patch.object(
+                evaluator, "LOCAL_GATE_RECHECK_PAIRS", 2
+            ), mock.patch.object(
+                evaluator,
+                "_collect_local_evaluation",
+                side_effect=[measured(value) for value in measurements],
+            ) as collect:
+                result = evaluator._evaluate_local_best_gate(
+                    workspace=root / "eval",
+                    kernel_source=candidate,
+                    source_language="cuda_cpp",
+                    source_sha256=evaluator._kernel_source_hash(candidate),
+                    candidate_latencies_ms=[0.00748, 0.00750, 0.00752],
+                    local_best={
+                        "kernel_sha256": evaluator._kernel_source_hash(incumbent),
+                        "kernel_path": str(incumbent_path),
+                        "source_language": "cuda_cpp",
+                        "latency_ms_median": 0.0075,
+                        "repeat_latencies_ms": [0.00749, 0.00750, 0.00751],
+                    },
+                    measurement_profile={"id": "profile"},
+                    program_path="candidate.cu",
+                    start=time.time(),
+                )
+
+        self.assertEqual(result["status"], "confirmed_faster")
+        self.assertTrue(result["update_local_best"])
+        self.assertTrue(result["submit_official"])
+        self.assertLess(result["candidate_latency_ms"], 0.0075)
+        self.assertEqual(collect.call_count, 4)
+
+    def test_uncertain_paired_result_can_claim_limited_official_slot(self) -> None:
+        candidate = "candidate"
+        incumbent = "incumbent"
+        measurements = [0.00761, 0.00760, 0.00760, 0.00761]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            incumbent_path = root / "incumbent.cu"
+            incumbent_path.write_text(incumbent)
+            with mock.patch.object(evaluator, "EVAL_ROOT", root), mock.patch.object(
+                evaluator, "LOCAL_GATE_RELATIVE_NOISE_FLOOR", 0.01
+            ), mock.patch.object(
+                evaluator, "LOCAL_GATE_RECHECK_PAIRS", 2
+            ), mock.patch.object(
+                evaluator, "LOCAL_GATE_UNCERTAIN_RELATIVE_TOLERANCE", 0.005
+            ), mock.patch.object(
+                evaluator, "LOCAL_GATE_CHALLENGER_COOLDOWN_S", 0.0
+            ), mock.patch.object(
+                evaluator, "LOCAL_GATE_ALLOW_UNCERTAIN_OFFICIAL", True
+            ), mock.patch.object(
+                evaluator,
+                "_collect_local_evaluation",
+                side_effect=[{"local_latencies_ms": [value]} for value in measurements],
+            ):
+                result = evaluator._evaluate_local_best_gate(
+                    workspace=root / "eval",
+                    kernel_source=candidate,
+                    source_language="cuda_cpp",
+                    source_sha256=evaluator._kernel_source_hash(candidate),
+                    candidate_latencies_ms=[0.00749, 0.00750, 0.00751],
+                    local_best={
+                        "kernel_sha256": evaluator._kernel_source_hash(incumbent),
+                        "kernel_path": str(incumbent_path),
+                        "source_language": "cuda_cpp",
+                        "latency_ms_median": 0.0075,
+                        "repeat_latencies_ms": [0.00749, 0.00750, 0.00751],
+                    },
+                    measurement_profile={"id": "profile"},
+                    program_path="candidate.cu",
+                    start=time.time(),
+                )
+
+        self.assertEqual(result["status"], "uncertain")
+        self.assertFalse(result["update_local_best"])
+        self.assertTrue(result["submit_official"])
+        self.assertTrue(result["challenger_claimed"])
+
     def test_ncu_timeout_is_attached_without_changing_fitness(self) -> None:
         proc = SimpleNamespace(returncode=0, stdout="", stderr="")
         source = "#include <torch/extension.h>\nPYBIND11_MODULE(x, m) {}\n"
@@ -851,8 +967,50 @@ class TestLocalEvaluationCache(unittest.TestCase):
         self.assertNotEqual(path_a, path_b)
         self.assertNotEqual(path_a, path_repeat)
 
+    def test_contract_uses_measurement_ast_not_whole_evaluator_file(self) -> None:
+        contract = evaluator._local_evaluation_contract(
+            evaluator.SOURCE_LANGUAGE_CUDA,
+            {"id": "profile", "name": "native"},
+        )
+
+        self.assertNotIn("evaluator_sha256", contract)
+        self.assertEqual(
+            contract["measurement_contract_version"],
+            evaluator.LOCAL_EVAL_MEASUREMENT_CONTRACT_VERSION,
+        )
+        self.assertRegex(
+            contract["measurement_implementation_sha256"], r"^[0-9a-f]{64}$"
+        )
+
 
 class TestConcurrentState(unittest.TestCase):
+    def test_corrupt_local_best_recovers_from_profile_index_without_glob(self) -> None:
+        source = "kernel"
+        profile = evaluator._measurement_profile()
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+            evaluator, "EVAL_ROOT", Path(tmp)
+        ):
+            evaluator._save_local_best(
+                {
+                    "kernel_sha256": evaluator._kernel_source_hash(source),
+                    "source_language": "cuda_cpp",
+                    "latency_ms_median": 0.007,
+                    "local_score": evaluator.TARGET_LATENCY_MS / 0.007,
+                    "measurement_profile_id": profile["id"],
+                    "measurement_profile": profile,
+                },
+                source,
+            )
+            evaluator._local_best_path().write_text("{broken")
+            with mock.patch.object(evaluator, "_discover_local_best") as discover:
+                recovered = evaluator._load_local_best()
+
+        self.assertIsNotNone(recovered)
+        self.assertEqual(
+            recovered["kernel_sha256"], evaluator._kernel_source_hash(source)
+        )
+        discover.assert_not_called()
+
     def test_slower_writer_cannot_replace_faster_local_best(self) -> None:
         profile = evaluator._measurement_profile()
         barrier = threading.Barrier(2)
@@ -883,12 +1041,50 @@ class TestConcurrentState(unittest.TestCase):
             for thread in threads:
                 thread.join()
             best = json.loads(evaluator._local_best_path().read_text())
+            recovery = json.loads(evaluator._local_best_recovery_path().read_text())
 
         self.assertEqual(best["latency_ms_median"], 0.007)
         self.assertEqual(best["kernel_sha256"], evaluator._kernel_source_hash("fast"))
+        recovered = recovery["profiles"][profile["id"]]
+        self.assertEqual(recovered["latency_ms_median"], 0.007)
+        self.assertEqual(
+            recovered["kernel_sha256"], evaluator._kernel_source_hash("fast")
+        )
 
 
 class TestOfficialRefresh(unittest.TestCase):
+    def test_zero_refresh_budget_avoids_due_network_request(self) -> None:
+        pending = {
+            "id": 123,
+            "status": "DEFERRED_RESULT",
+            "next_refresh_at": datetime.fromtimestamp(
+                time.time() - 10, timezone.utc
+            ).isoformat(),
+            "_atrex": {
+                "source_sha256": "a" * 64,
+                "source_language": "cuda_cpp",
+            },
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cache_path = root / "official_cache" / ("a" * 64 + ".json")
+            cache_path.parent.mkdir()
+            cache_path.write_text(json.dumps(pending))
+            with mock.patch.object(evaluator, "EVAL_ROOT", root), mock.patch.object(
+                evaluator, "OFFICIAL_FITNESS", True
+            ), mock.patch.object(evaluator, "OFFICIAL_CACHE", True), mock.patch.object(
+                evaluator, "OFFICIAL_REFRESH_TIME_BUDGET", 0.0
+            ), mock.patch.object(
+                evaluator, "_official_token", return_value="token"
+            ), mock.patch.object(
+                evaluator, "_get_official_submission"
+            ) as request:
+                report = evaluator._refresh_due_official_results()
+
+        self.assertTrue(report["budget_exhausted"])
+        self.assertEqual(report["checked"], 0)
+        request.assert_not_called()
+
     def test_due_pending_result_populates_authoritative_registry(self) -> None:
         source_hash = evaluator._kernel_source_hash("kernel")
         metadata = {

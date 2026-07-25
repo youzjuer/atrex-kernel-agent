@@ -99,6 +99,27 @@ class TestNcuSummaryPrompt(unittest.TestCase):
 
 
 class TestPatchManifest(unittest.TestCase):
+    def test_truthy_patch_flags_use_one_parser(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            {
+                "ATREX_PES_SOURCE_DEDUP": "true",
+                "ATREX_PES_ARCHITECTURE_ISLANDS": "YES",
+                "ATREX_PES_COMPACT_DB_TOOLS": "On",
+            },
+        ):
+            self.assertTrue(sitecustomize._enabled("ATREX_PES_SOURCE_DEDUP"))
+            self.assertTrue(sitecustomize._enabled("ATREX_PES_ARCHITECTURE_ISLANDS"))
+            self.assertTrue(sitecustomize._enabled("ATREX_PES_COMPACT_DB_TOOLS"))
+
+    def test_database_constructor_rejects_too_few_architecture_islands(self) -> None:
+        with self.assertRaisesRegex(ValueError, "at least 6 islands"):
+            sitecustomize._architecture_num_islands(SimpleNamespace(num_islands=4))
+        self.assertEqual(
+            sitecustomize._architecture_num_islands(SimpleNamespace(num_islands=8)),
+            8,
+        )
+
     def test_required_patch_failure_is_not_silent(self) -> None:
         broken = {
             "evolution_database": {

@@ -14,6 +14,7 @@ from orchestrator.loongflow_compat.architecture_islands import (
     initialize_architecture_memory,
     maybe_exchange_islands,
     restore_architecture_checkpoint,
+    validate_architecture_island_count,
     write_architecture_checkpoint,
 )
 
@@ -393,9 +394,15 @@ def _require_signature(callable_obj: object, expected: tuple[str, ...]) -> None:
         )
 
 
+def _architecture_num_islands(config: object) -> int:
+    return validate_architecture_island_count(
+        int(getattr(config, "num_islands", 8) or 8)
+    )
+
+
 def _patch_evolution_database_selection() -> None:
-    source_dedup_enabled = os.environ.get("ATREX_PES_SOURCE_DEDUP", "1") == "1"
-    architecture_enabled = os.environ.get("ATREX_PES_ARCHITECTURE_ISLANDS", "1") == "1"
+    source_dedup_enabled = _enabled("ATREX_PES_SOURCE_DEDUP")
+    architecture_enabled = _enabled("ATREX_PES_ARCHITECTURE_ISLANDS")
     if not source_dedup_enabled and not architecture_enabled:
         return
     try:
@@ -410,6 +417,7 @@ def _patch_evolution_database_selection() -> None:
     if getattr(EvolveDatabase, "_atrex_evolution_patched", False):
         return
 
+    _require_signature(EvolveDatabase.__init__, ("self", "config"))
     _require_signature(EvolveDatabase.sample_solution, ("self", "island_id"))
     _require_signature(EvolveDatabase.add_solution, ("self", "solution"))
     _require_signature(EvolveDatabase.load_checkpoint, ("self", "checkpoint_path"))
@@ -420,16 +428,24 @@ def _patch_evolution_database_selection() -> None:
         _require_signature(InMemory._prepare_solution, ("self", "solution"))
         _require_signature(InMemory._check_migration, ("self",))
 
+    original_init = EvolveDatabase.__init__
     original_add_solution = EvolveDatabase.add_solution
     original_load_checkpoint = EvolveDatabase.load_checkpoint
     original_save_checkpoint = EvolveDatabase.save_checkpoint
 
     def architecture_settings(database):
-        num_islands = max(2, int(getattr(database.config, "num_islands", 8) or 8))
+        num_islands = _architecture_num_islands(database.config)
         migration_interval = max(
             1, int(getattr(database.config, "migration_interval", 20) or 20)
         )
         return num_islands, migration_interval
+
+    def patched_init(self, config):
+        if architecture_enabled:
+            _architecture_num_islands(config)
+        original_init(self, config)
+
+    patched_init._atrex_island_config_validated = True
 
     if architecture_enabled and not getattr(
         InMemory, "_atrex_architecture_patched", False
@@ -449,7 +465,7 @@ def _patch_evolution_database_selection() -> None:
         async def patched_check_migration(self):
             maybe_exchange_islands(
                 self,
-                max(2, int(self.num_islands)),
+                validate_architecture_island_count(self.num_islands),
                 max(1, int(self.migration_interval)),
             )
 
@@ -647,6 +663,7 @@ def _patch_evolution_database_selection() -> None:
                 )
         return result
 
+    EvolveDatabase.__init__ = patched_init
     EvolveDatabase.sample_solution = patched_sample_solution
     EvolveDatabase.add_solution = patched_add_solution
     EvolveDatabase.load_checkpoint = patched_load_checkpoint
@@ -666,7 +683,7 @@ def _wrap_database_func(func):
 
 
 def _patch_database_tools() -> None:
-    if os.environ.get("ATREX_PES_COMPACT_DB_TOOLS", "1") != "1":
+    if not _enabled("ATREX_PES_COMPACT_DB_TOOLS"):
         return
     try:
         from loongflow.framework.pes.database import database_tool
@@ -885,6 +902,10 @@ def _verify_evolution_patch() -> tuple[bool, str]:
     if _enabled("ATREX_PES_ARCHITECTURE_ISLANDS"):
         from loongflow.agentsdk.memory.evolution.in_memory import InMemory
 
+        if not getattr(
+            EvolveDatabase.__init__, "_atrex_island_config_validated", False
+        ):
+            return False, "EvolveDatabase config validation sentinel missing"
         if not getattr(InMemory, "_atrex_architecture_patched", False):
             return False, "InMemory architecture sentinel missing"
     return True, "EvolveDatabase/InMemory"

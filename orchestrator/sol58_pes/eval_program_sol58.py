@@ -56,6 +56,25 @@ COMPILE_TIMEOUT = int(os.environ.get("SOL58_COMPILE_TIMEOUT", "180"))
 RUN_TIMEOUT = int(os.environ.get("SOL58_SOL_TIMEOUT", "120"))
 LOCAL_REPEAT_COUNT = max(1, int(os.environ.get("SOL58_LOCAL_REPEAT_COUNT", "3")))
 LOCAL_BEST_GATE = _env_bool("SOL58_LOCAL_BEST_GATE", True)
+LOCAL_GATE_SIGMA_MULTIPLIER = max(
+    0.0, float(os.environ.get("SOL58_LOCAL_GATE_SIGMA_MULTIPLIER", "2.0"))
+)
+LOCAL_GATE_RELATIVE_NOISE_FLOOR = max(
+    0.0, float(os.environ.get("SOL58_LOCAL_GATE_RELATIVE_NOISE_FLOOR", "0.01"))
+)
+LOCAL_GATE_RECHECK_PAIRS = max(
+    0, int(os.environ.get("SOL58_LOCAL_GATE_RECHECK_PAIRS", "2"))
+)
+LOCAL_GATE_UNCERTAIN_RELATIVE_TOLERANCE = max(
+    0.0,
+    float(os.environ.get("SOL58_LOCAL_GATE_UNCERTAIN_RELATIVE_TOLERANCE", "0.005")),
+)
+LOCAL_GATE_ALLOW_UNCERTAIN_OFFICIAL = _env_bool(
+    "SOL58_LOCAL_GATE_ALLOW_UNCERTAIN_OFFICIAL", True
+)
+LOCAL_GATE_CHALLENGER_COOLDOWN_S = max(
+    0.0, float(os.environ.get("SOL58_LOCAL_GATE_CHALLENGER_COOLDOWN_S", "900"))
+)
 MEASUREMENT_PROFILE_NAME = (
     os.environ.get("SOL58_MEASUREMENT_PROFILE", "native").strip().lower()
 )
@@ -98,6 +117,15 @@ OFFICIAL_CACHE_REFRESH_TIMEOUT = float(
 )
 OFFICIAL_REFRESH_BATCH_SIZE = max(
     1, int(os.environ.get("SOL58_OFFICIAL_REFRESH_BATCH_SIZE", "4"))
+)
+OFFICIAL_REFRESH_TIME_BUDGET = max(
+    0.0,
+    float(
+        os.environ.get(
+            "SOL58_OFFICIAL_REFRESH_TIME_BUDGET",
+            str(OFFICIAL_REQUEST_TIMEOUT),
+        )
+    ),
 )
 OFFICIAL_PENDING_SCORE_POLICY = (
     os.environ.get(
@@ -142,7 +170,10 @@ SUPPORTED_CODE_LANGUAGES = {
     SOURCE_LANGUAGE_AUTO,
 }
 
-LOCAL_EVAL_CACHE_SCHEMA_VERSION = 2
+LOCAL_EVAL_CACHE_SCHEMA_VERSION = 3
+LOCAL_EVAL_MEASUREMENT_CONTRACT_VERSION = os.environ.get(
+    "SOL58_LOCAL_EVAL_CONTRACT_VERSION", "sol58-v3"
+)
 
 
 @contextlib.contextmanager
@@ -984,6 +1015,10 @@ def _local_best_path() -> Path:
     return EVAL_ROOT / "official_cache" / "local_best.json"
 
 
+def _local_best_recovery_path() -> Path:
+    return EVAL_ROOT / "official_cache" / "local_best_recovery.json"
+
+
 def _local_best_kernel_path(source_language: str = SOURCE_LANGUAGE_CUDA) -> Path:
     suffix = ".py" if source_language == SOURCE_LANGUAGE_CUTE else ".cu"
     return EVAL_ROOT / "official_cache" / f"local_best_kernel{suffix}"
@@ -1053,7 +1088,53 @@ def _record_authoritative_source_fitness(
     )
 
 
-def _save_local_best(best: dict[str, Any], kernel_source: str | None = None) -> bool:
+def _record_local_best_recovery(best: dict[str, Any]) -> None:
+    profile_id = str(best.get("measurement_profile_id") or "")
+    if not profile_id:
+        return
+    path = _local_best_recovery_path()
+    with _file_lock(path):
+        registry = _read_json(path, {})
+        if not isinstance(registry, dict):
+            registry = {}
+        profiles = registry.get("profiles")
+        if not isinstance(profiles, dict):
+            profiles = {}
+        current = profiles.get(profile_id)
+        if (
+            isinstance(current, dict)
+            and current.get("kernel_sha256") == best.get("kernel_sha256")
+            and current.get("updated_at") == best.get("updated_at")
+        ):
+            return
+        if isinstance(current, dict):
+            current_hash = str(current.get("kernel_sha256") or "")
+            candidate_hash = str(best.get("kernel_sha256") or "")
+            current_latency = float(current.get("latency_ms_median") or 0.0)
+            candidate_latency = float(best.get("latency_ms_median") or 0.0)
+            if (
+                current_hash
+                and candidate_hash
+                and current_hash != candidate_hash
+                and current_latency > 0
+                and candidate_latency >= current_latency
+            ):
+                return
+            if current_hash == candidate_hash and str(
+                current.get("updated_at") or ""
+            ) > str(best.get("updated_at") or ""):
+                return
+        profiles[profile_id] = dict(best)
+        registry.update({"schema_version": 1, "profiles": profiles})
+        _atomic_write_json(path, registry)
+
+
+def _save_local_best(
+    best: dict[str, Any],
+    kernel_source: str | None = None,
+    *,
+    force: bool = False,
+) -> bool:
     path = _local_best_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = dict(best)
@@ -1093,7 +1174,7 @@ def _save_local_best(best: dict[str, Any], kernel_source: str | None = None) -> 
     expected_hash = str(payload.get("kernel_sha256") or "")
     with _file_lock(path):
         current = _read_json(path, {})
-        if isinstance(current, dict) and current:
+        if not force and isinstance(current, dict) and current:
             current_profile = str(current.get("measurement_profile_id") or "")
             candidate_profile = str(payload.get("measurement_profile_id") or "")
             current_hash = str(current.get("kernel_sha256") or "")
@@ -1119,10 +1200,75 @@ def _save_local_best(best: dict[str, Any], kernel_source: str | None = None) -> 
 
         payload["updated_at"] = datetime.now(timezone.utc).isoformat()
         _atomic_write_json(path, payload)
+    _record_local_best_recovery(payload)
     return True
 
 
+def _discover_local_best_from_cache() -> dict[str, Any] | None:
+    current_profile = _measurement_profile()
+    candidates: list[dict[str, Any]] = []
+    for cache_path in (EVAL_ROOT / "local_cache").glob("*.json"):
+        cached = _read_json(cache_path, {})
+        if (
+            not isinstance(cached, dict)
+            or not cached.get("complete")
+            or cached.get("schema_version") != LOCAL_EVAL_CACHE_SCHEMA_VERSION
+            or str(cached.get("measurement_profile_id") or "") != current_profile["id"]
+        ):
+            continue
+        latencies = [
+            float(value)
+            for value in (cached.get("local_latencies_ms") or [])
+            if isinstance(value, (int, float)) and float(value) > 0
+        ]
+        if len(latencies) < LOCAL_REPEAT_COUNT:
+            continue
+        workspace = Path(str(cached.get("source_workspace") or ""))
+        source_language = str(cached.get("source_language") or SOURCE_LANGUAGE_CUDA)
+        expected_contract = _local_evaluation_contract(
+            source_language,
+            current_profile,
+        )
+        expected_contract_hash = hashlib.sha256(
+            json.dumps(expected_contract, sort_keys=True, separators=(",", ":")).encode(
+                "utf-8"
+            )
+        ).hexdigest()
+        if cached.get("contract_sha256") != expected_contract_hash:
+            continue
+        source_path = workspace / (
+            "kernel.py" if source_language == SOURCE_LANGUAGE_CUTE else "kernel.cu"
+        )
+        if not source_path.is_file():
+            continue
+        source = source_path.read_text(encoding="utf-8")
+        source_hash = str(cached.get("source_sha256") or "")
+        if not source_hash or _kernel_source_hash(source) != source_hash:
+            continue
+        median_latency = float(statistics.median(latencies))
+        candidates.append(
+            {
+                "kernel_sha256": source_hash,
+                "source_language": source_language,
+                "latency_ms_median": median_latency,
+                "local_score": TARGET_LATENCY_MS / median_latency,
+                "repeat_count": len(latencies),
+                "repeat_latencies_ms": latencies,
+                "workspace": str(workspace),
+                "source": "local_cache_recovery",
+                "measurement_profile_id": current_profile["id"],
+                "measurement_profile": current_profile,
+            }
+        )
+    if not candidates:
+        return None
+    return min(candidates, key=lambda row: float(row["latency_ms_median"]))
+
+
 def _discover_local_best() -> dict[str, Any] | None:
+    cached_best = _discover_local_best_from_cache()
+    if cached_best is not None:
+        return cached_best
     samples: dict[str, dict[str, Any]] = {}
     current_profile = _measurement_profile()
     for workspace in EVAL_ROOT.glob("eval_*"):
@@ -1212,46 +1358,47 @@ def _discover_local_best() -> dict[str, Any] | None:
     return min(candidates, key=lambda row: float(row["latency_ms_median"]))
 
 
+def _validated_local_best(
+    best: Any,
+) -> tuple[dict[str, Any], str] | None:
+    if not isinstance(best, dict) or float(best.get("latency_ms_median") or 0.0) <= 0:
+        return None
+    source_data = _read_local_best_source(best)
+    if source_data is None:
+        return None
+    kernel_source, source_language = source_data
+    dependency_violation = (
+        _source_dependency_violation(kernel_source)
+        if source_language == SOURCE_LANGUAGE_CUDA
+        else _python_dependency_violation(kernel_source)
+    )
+    if dependency_violation:
+        return None
+    validated = dict(best)
+    validated["source_language"] = source_language
+    return validated, kernel_source
+
+
 def _load_local_best() -> dict[str, Any] | None:
     path = _local_best_path()
     if path.exists():
-        try:
-            with _file_lock(path):
-                best = _read_json(path, {})
-            source_paths: list[Path] = []
-            if best.get("kernel_path"):
-                source_paths.append(Path(str(best["kernel_path"])))
-            if best.get("workspace"):
-                workspace = Path(str(best["workspace"]))
-                source_paths.extend((workspace / "kernel.cu", workspace / "kernel.py"))
-            for source_path in source_paths:
-                if not source_path.is_file():
-                    continue
-                kernel_source = source_path.read_text(encoding="utf-8")
-                source_language = (
-                    str(best.get("source_language") or "").strip().lower()
-                    or _language_from_source_path(source_path.name)
-                    or _detect_source_language(kernel_source)
-                    or SOURCE_LANGUAGE_CUDA
-                )
-                dependency_violation = (
-                    _source_dependency_violation(kernel_source)
-                    if source_language == SOURCE_LANGUAGE_CUDA
-                    else _python_dependency_violation(kernel_source)
-                )
-                if (
-                    float(best.get("latency_ms_median") or 0.0) > 0
-                    and not dependency_violation
-                    and (
-                        not best.get("kernel_sha256")
-                        or _kernel_source_hash(kernel_source) == best["kernel_sha256"]
-                    )
-                ):
-                    best["source_language"] = source_language
-                    best.setdefault("kernel_path", str(source_path))
-                    return best
-        except Exception:
-            pass
+        with _file_lock(path):
+            validated = _validated_local_best(_read_json(path, {}))
+        if validated is not None:
+            best, _ = validated
+            _record_local_best_recovery(best)
+            return best
+
+    recovery_path = _local_best_recovery_path()
+    with _file_lock(recovery_path):
+        recovery = _read_json(recovery_path, {})
+    profiles = recovery.get("profiles") if isinstance(recovery, dict) else None
+    if isinstance(profiles, dict):
+        recovered = _validated_local_best(profiles.get(_measurement_profile()["id"]))
+        if recovered is not None:
+            best, kernel_source = recovered
+            _save_local_best(best, kernel_source, force=True)
+            return _read_json(path, best)
 
     best = _discover_local_best()
     if best is not None:
@@ -1336,27 +1483,74 @@ def _tool_path_identity(command: str) -> dict[str, Any]:
         return {"path": str(path)}
 
 
+_MEASUREMENT_IMPLEMENTATION_SHA256: str | None = None
+_MEASUREMENT_FUNCTIONS = {
+    "_measurement_profile",
+    "_clock_state_matches",
+    "_ensure_measurement_clocks",
+    "_run_sol_execbench_monitored",
+    "_copy_problem_files",
+    "_write_solution",
+    "_run_sol_execbench",
+    "_parse_traces",
+    "_collect_local_evaluation",
+}
+
+
+def _measurement_implementation_hash() -> str:
+    """Hash measurement semantics while ignoring comments and formatting."""
+    global _MEASUREMENT_IMPLEMENTATION_SHA256
+    if _MEASUREMENT_IMPLEMENTATION_SHA256 is not None:
+        return _MEASUREMENT_IMPLEMENTATION_SHA256
+
+    source_tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+    selected = [
+        node
+        for node in source_tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name in _MEASUREMENT_FUNCTIONS
+    ]
+    found = {node.name for node in selected}
+    missing = sorted(_MEASUREMENT_FUNCTIONS - found)
+    if missing:
+        raise RuntimeError(
+            "local evaluation contract is missing measurement functions: "
+            + ", ".join(missing)
+        )
+    canonical = ast.dump(
+        ast.Module(body=selected, type_ignores=[]),
+        annotate_fields=True,
+        include_attributes=False,
+    )
+    _MEASUREMENT_IMPLEMENTATION_SHA256 = hashlib.sha256(
+        canonical.encode("utf-8")
+    ).hexdigest()
+    return _MEASUREMENT_IMPLEMENTATION_SHA256
+
+
 def _local_evaluation_contract(
     source_language: str,
     measurement_profile: dict[str, Any],
+    *,
+    repeat_count: int | None = None,
 ) -> dict[str, Any]:
     """Describe every input that can change a reusable local measurement."""
+    required_repeats = LOCAL_REPEAT_COUNT if repeat_count is None else repeat_count
     return {
         "schema_version": LOCAL_EVAL_CACHE_SCHEMA_VERSION,
+        "measurement_contract_version": LOCAL_EVAL_MEASUREMENT_CONTRACT_VERSION,
+        "measurement_implementation_sha256": _measurement_implementation_hash(),
         "kernel_id": OFFICIAL_KERNEL_ID,
         "source_language": source_language,
         "measurement_profile": measurement_profile,
-        "repeat_count": LOCAL_REPEAT_COUNT,
+        "repeat_count": required_repeats,
         "max_local_attempts": max(
-            LOCAL_REPEAT_COUNT,
-            int(
-                os.environ.get("SOL58_MAX_LOCAL_ATTEMPTS", str(LOCAL_REPEAT_COUNT + 3))
-            ),
+            required_repeats,
+            int(os.environ.get("SOL58_MAX_LOCAL_ATTEMPTS", str(required_repeats + 3))),
         ),
         "compile_timeout_s": COMPILE_TIMEOUT,
         "run_timeout_s": RUN_TIMEOUT,
         "problem_contract_sha256": _problem_contract_hash(),
-        "evaluator_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
         "sol_execbench": _tool_path_identity(SOL_EXECBENCH),
         "toolchain_id": os.environ.get(
             "SOL58_LOCAL_EVAL_STACK_ID", measurement_profile.get("local_eval_stack", "")
@@ -1376,8 +1570,14 @@ def _local_evaluation_cache_path(
     kernel_source: str,
     source_language: str,
     measurement_profile: dict[str, Any],
+    *,
+    repeat_count: int | None = None,
 ) -> tuple[Path, dict[str, Any], str]:
-    contract = _local_evaluation_contract(source_language, measurement_profile)
+    contract = _local_evaluation_contract(
+        source_language,
+        measurement_profile,
+        repeat_count=repeat_count,
+    )
     canonical = json.dumps(contract, sort_keys=True, separators=(",", ":"))
     contract_hash = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
     key = hashlib.sha256(
@@ -1398,7 +1598,9 @@ def _cached_local_evaluation_is_valid(
     *,
     source_sha256: str,
     contract_sha256: str,
+    repeat_count: int | None = None,
 ) -> bool:
+    required_repeats = LOCAL_REPEAT_COUNT if repeat_count is None else repeat_count
     if not isinstance(payload, dict):
         return False
     latencies = payload.get("local_latencies_ms")
@@ -1409,10 +1611,10 @@ def _cached_local_evaluation_is_valid(
         and payload.get("source_sha256") == source_sha256
         and payload.get("contract_sha256") == contract_sha256
         and isinstance(latencies, list)
-        and len(latencies) == LOCAL_REPEAT_COUNT
+        and len(latencies) == required_repeats
         and all(isinstance(value, (int, float)) and value > 0 for value in latencies)
         and isinstance(parsed_runs, list)
-        and len(parsed_runs) == LOCAL_REPEAT_COUNT
+        and len(parsed_runs) == required_repeats
     )
 
 
@@ -1425,24 +1627,32 @@ def _collect_local_evaluation(
     measurement_profile: dict[str, Any],
     program_path: str,
     start: float,
+    repeat_count: int | None = None,
+    cache_enabled: bool | None = None,
 ) -> dict[str, Any]:
     """Return one complete local measurement, reusing an identical contract result."""
+    required_repeats = LOCAL_REPEAT_COUNT if repeat_count is None else repeat_count
+    use_cache = LOCAL_EVAL_CACHE if cache_enabled is None else cache_enabled
+    if required_repeats < 1:
+        raise ValueError("repeat_count must be positive")
     _copy_problem_files(workspace)
     _write_solution(workspace, kernel_source, source_language)
     expected = _load_workload_count(workspace)
     cache_path, contract, contract_sha256 = _local_evaluation_cache_path(
-        kernel_source, source_language, measurement_profile
+        kernel_source,
+        source_language,
+        measurement_profile,
+        repeat_count=required_repeats,
     )
-    lock_context = (
-        _file_lock(cache_path) if LOCAL_EVAL_CACHE else contextlib.nullcontext()
-    )
+    lock_context = _file_lock(cache_path) if use_cache else contextlib.nullcontext()
 
     with lock_context:
-        cached = _read_json(cache_path) if LOCAL_EVAL_CACHE else None
+        cached = _read_json(cache_path) if use_cache else None
         if _cached_local_evaluation_is_valid(
             cached,
             source_sha256=source_sha256,
             contract_sha256=contract_sha256,
+            repeat_count=required_repeats,
         ):
             processes = [
                 subprocess.CompletedProcess(
@@ -1454,7 +1664,7 @@ def _collect_local_evaluation(
                 for item in cached.get("processes", [])
                 if isinstance(item, dict)
             ]
-            while len(processes) < LOCAL_REPEAT_COUNT:
+            while len(processes) < required_repeats:
                 processes.append(
                     subprocess.CompletedProcess(
                         args=[SOL_EXECBENCH], returncode=0, stdout="", stderr=""
@@ -1476,7 +1686,7 @@ def _collect_local_evaluation(
         repeat_index = 0
         attempt_index = 0
 
-        while repeat_index < LOCAL_REPEAT_COUNT:
+        while repeat_index < required_repeats:
             attempt_index += 1
             traces_filename = (
                 "traces.jsonl"
@@ -1490,7 +1700,7 @@ def _collect_local_evaluation(
                     "error_result": _result(
                         "execution_failed",
                         f"Measurement environment rejected before local repeat "
-                        f"{repeat_index + 1}/{LOCAL_REPEAT_COUNT}: {exc}",
+                        f"{repeat_index + 1}/{required_repeats}: {exc}",
                         0.0,
                         metrics={
                             "eval_time_s": time.time() - start,
@@ -1542,7 +1752,7 @@ def _collect_local_evaluation(
                         "error_result": _result(
                             "execution_failed",
                             "Official-like local measurement could not collect "
-                            f"{LOCAL_REPEAT_COUNT} clean repeats in {max_local_attempts} attempts "
+                            f"{required_repeats} clean repeats in {max_local_attempts} attempts "
                             "because GPU clocks changed during evaluation.",
                             0.0,
                             metrics={
@@ -1619,7 +1829,7 @@ def _collect_local_evaluation(
                 return {
                     "error_result": _result(
                         "execution_failed",
-                        f"SOL-ExecBench repeat {repeat_index + 1}/{LOCAL_REPEAT_COUNT} failed "
+                        f"SOL-ExecBench repeat {repeat_index + 1}/{required_repeats} failed "
                         f"before producing traces: {parsed['error']}. "
                         f"stderr_tail={_tail(proc.stderr, 1200)}",
                         0.0,
@@ -1641,7 +1851,7 @@ def _collect_local_evaluation(
                     "error_result": _result(
                         "validation_failed",
                         f"Correctness/coverage gate failed on local repeat "
-                        f"{repeat_index + 1}/{LOCAL_REPEAT_COUNT}: passed {passed}/{expected}, "
+                        f"{repeat_index + 1}/{required_repeats}: passed {passed}/{expected}, "
                         f"returncode={proc.returncode}. failures={failures[:6]}",
                         0.0,
                         metrics={
@@ -1657,7 +1867,7 @@ def _collect_local_evaluation(
                 return {
                     "error_result": _result(
                         "execution_failed",
-                        f"Local repeat {repeat_index + 1}/{LOCAL_REPEAT_COUNT} passed all "
+                        f"Local repeat {repeat_index + 1}/{required_repeats} passed all "
                         "workloads but produced no positive latency.",
                         0.0,
                         metrics={
@@ -1696,7 +1906,7 @@ def _collect_local_evaluation(
             "rejected_clock_attempts": rejected_clock_attempts,
             "attempt_count": attempt_index,
         }
-        if LOCAL_EVAL_CACHE:
+        if use_cache:
             _atomic_write_json(cache_path, payload)
         return {
             **payload,
@@ -1704,6 +1914,299 @@ def _collect_local_evaluation(
             "cache_hit": False,
             "cache_path": str(cache_path),
         }
+
+
+def _gate_uncertainty_band(
+    candidate_latencies_ms: list[float],
+    incumbent_latencies_ms: list[float],
+) -> float:
+    """Return a relative uncertainty band for two independent repeat sets."""
+    candidate_logs = [math.log(value) for value in candidate_latencies_ms if value > 0]
+    incumbent_logs = [math.log(value) for value in incumbent_latencies_ms if value > 0]
+    standard_error = 0.0
+    if len(candidate_logs) >= 2:
+        standard_error += statistics.variance(candidate_logs) / len(candidate_logs)
+    if len(incumbent_logs) >= 2:
+        standard_error += statistics.variance(incumbent_logs) / len(incumbent_logs)
+    return max(
+        LOCAL_GATE_RELATIVE_NOISE_FLOOR,
+        LOCAL_GATE_SIGMA_MULTIPLIER * math.sqrt(max(0.0, standard_error)),
+    )
+
+
+def _classify_gate_delta(relative_delta: float, uncertainty: float) -> str:
+    if relative_delta + uncertainty < 0:
+        return "confirmed_faster"
+    if relative_delta - uncertainty > 0:
+        return "confirmed_slower"
+    return "uncertain"
+
+
+def _read_local_best_source(best: dict[str, Any]) -> tuple[str, str] | None:
+    paths: list[Path] = []
+    if best.get("kernel_path"):
+        paths.append(Path(str(best["kernel_path"])))
+    if best.get("workspace"):
+        workspace = Path(str(best["workspace"]))
+        paths.extend((workspace / "kernel.cu", workspace / "kernel.py"))
+    expected_hash = str(best.get("kernel_sha256") or "")
+    for path in paths:
+        if not path.is_file():
+            continue
+        try:
+            source = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        if expected_hash and _kernel_source_hash(source) != expected_hash:
+            continue
+        language = (
+            str(best.get("source_language") or "").strip().lower()
+            or _language_from_source_path(path.name)
+            or _detect_source_language(source)
+            or SOURCE_LANGUAGE_CUDA
+        )
+        return source, language
+    return None
+
+
+def _claim_uncertain_challenger(source_sha256: str) -> tuple[bool, str]:
+    if not LOCAL_GATE_ALLOW_UNCERTAIN_OFFICIAL:
+        return False, "uncertain official submissions disabled"
+    path = EVAL_ROOT / "official_cache" / "local_gate_challengers.json"
+    now = time.time()
+    with _file_lock(path):
+        registry = _read_json(path, {})
+        if not isinstance(registry, dict):
+            registry = {}
+        sources = registry.get("sources")
+        if not isinstance(sources, dict):
+            sources = {}
+        if source_sha256 in sources:
+            return False, "source already claimed as an uncertain challenger"
+        last_claimed_at = float(registry.get("last_claimed_at") or 0.0)
+        remaining = LOCAL_GATE_CHALLENGER_COOLDOWN_S - (now - last_claimed_at)
+        if remaining > 0:
+            return (
+                False,
+                f"uncertain challenger cooldown has {remaining:.1f}s remaining",
+            )
+        sources[source_sha256] = {
+            "claimed_at": now,
+            "claimed_at_iso": _format_timestamp(now),
+        }
+        registry.update(
+            {
+                "schema_version": 1,
+                "last_claimed_at": now,
+                "sources": sources,
+            }
+        )
+        _atomic_write_json(path, registry)
+    return True, "uncertain challenger slot claimed"
+
+
+def _evaluate_local_best_gate(
+    *,
+    workspace: Path,
+    kernel_source: str,
+    source_language: str,
+    source_sha256: str,
+    candidate_latencies_ms: list[float],
+    local_best: dict[str, Any] | None,
+    measurement_profile: dict[str, Any],
+    program_path: str,
+    start: float,
+) -> dict[str, Any]:
+    """Use paired remeasurement to separate a real improvement from clock drift."""
+    candidate_median = float(statistics.median(candidate_latencies_ms))
+    if not LOCAL_BEST_GATE:
+        return {
+            "status": "disabled",
+            "update_local_best": True,
+            "submit_official": True,
+            "candidate_latency_ms": candidate_median,
+            "candidate_repeats_ms": candidate_latencies_ms,
+        }
+    if not local_best:
+        return {
+            "status": "no_incumbent",
+            "update_local_best": True,
+            "submit_official": True,
+            "candidate_latency_ms": candidate_median,
+            "candidate_repeats_ms": candidate_latencies_ms,
+        }
+
+    incumbent_latency = float(local_best.get("latency_ms_median") or 0.0)
+    if incumbent_latency <= 0:
+        return {
+            "status": "invalid_incumbent",
+            "update_local_best": True,
+            "submit_official": True,
+            "candidate_latency_ms": candidate_median,
+            "candidate_repeats_ms": candidate_latencies_ms,
+        }
+    if str(local_best.get("kernel_sha256") or "") == source_sha256:
+        return {
+            "status": "same_source",
+            "update_local_best": False,
+            "submit_official": False,
+            "candidate_latency_ms": candidate_median,
+            "candidate_repeats_ms": candidate_latencies_ms,
+        }
+
+    incumbent_repeats = [
+        float(value)
+        for value in (local_best.get("repeat_latencies_ms") or [incumbent_latency])
+        if isinstance(value, (int, float)) and float(value) > 0
+    ]
+    initial_delta = candidate_median / incumbent_latency - 1.0
+    initial_uncertainty = _gate_uncertainty_band(
+        candidate_latencies_ms, incumbent_repeats
+    )
+    initial_classification = _classify_gate_delta(initial_delta, initial_uncertainty)
+    result: dict[str, Any] = {
+        "status": initial_classification,
+        "initial_relative_delta": initial_delta,
+        "initial_uncertainty": initial_uncertainty,
+        "rechecked": False,
+        "update_local_best": False,
+        "submit_official": False,
+        "candidate_latency_ms": candidate_median,
+        "candidate_repeats_ms": candidate_latencies_ms,
+    }
+    if initial_classification == "confirmed_slower":
+        return result
+
+    incumbent_source = _read_local_best_source(local_best)
+    if LOCAL_GATE_RECHECK_PAIRS <= 0 or incumbent_source is None:
+        result["status"] = f"{initial_classification}_without_paired_recheck"
+        result["update_local_best"] = initial_classification == "confirmed_faster"
+        if result["update_local_best"]:
+            result["submit_official"] = True
+        elif initial_delta <= LOCAL_GATE_UNCERTAIN_RELATIVE_TOLERANCE:
+            claimed, reason = _claim_uncertain_challenger(source_sha256)
+            result.update(
+                {
+                    "submit_official": claimed,
+                    "challenger_claimed": claimed,
+                    "challenger_reason": reason,
+                }
+            )
+        if incumbent_source is None:
+            result["recheck_error"] = "incumbent source unavailable"
+        return result
+
+    incumbent_kernel, incumbent_language = incumbent_source
+    candidate_pairs: list[float] = []
+    incumbent_pairs: list[float] = []
+    pair_records: list[dict[str, Any]] = []
+    recheck_root = workspace / "local_gate_recheck"
+    for pair_index in range(LOCAL_GATE_RECHECK_PAIRS):
+        order = (
+            ("candidate", "incumbent")
+            if pair_index % 2 == 0
+            else ("incumbent", "candidate")
+        )
+        measured: dict[str, float] = {}
+        for label in order:
+            source = kernel_source if label == "candidate" else incumbent_kernel
+            language = source_language if label == "candidate" else incumbent_language
+            source_hash = (
+                source_sha256
+                if label == "candidate"
+                else _kernel_source_hash(incumbent_kernel)
+            )
+            pair_workspace = recheck_root / f"pair_{pair_index + 1}_{label}"
+            pair_workspace.mkdir(parents=True, exist_ok=True)
+            measurement = _collect_local_evaluation(
+                workspace=pair_workspace,
+                kernel_source=source,
+                source_language=language,
+                source_sha256=source_hash,
+                measurement_profile=measurement_profile,
+                program_path=program_path,
+                start=start,
+                repeat_count=1,
+                cache_enabled=False,
+            )
+            if measurement.get("error_result"):
+                error_result = measurement["error_result"]
+                result.update(
+                    {
+                        "status": "recheck_failed",
+                        "rechecked": True,
+                        "recheck_error": str(error_result.get("summary") or "")[:500],
+                        "pair_records": pair_records,
+                    }
+                )
+                return result
+            measured[label] = float(measurement["local_latencies_ms"][0])
+        candidate_pairs.append(measured["candidate"])
+        incumbent_pairs.append(measured["incumbent"])
+        pair_records.append(
+            {
+                "pair": pair_index + 1,
+                "order": list(order),
+                "candidate_latency_ms": measured["candidate"],
+                "incumbent_latency_ms": measured["incumbent"],
+                "ratio": measured["candidate"] / measured["incumbent"],
+            }
+        )
+
+    log_ratios = [
+        math.log(candidate / incumbent)
+        for candidate, incumbent in zip(candidate_pairs, incumbent_pairs)
+    ]
+    paired_log_delta = float(statistics.median(log_ratios))
+    paired_delta = math.exp(paired_log_delta) - 1.0
+    paired_standard_error = (
+        statistics.stdev(log_ratios) / math.sqrt(len(log_ratios))
+        if len(log_ratios) >= 2
+        else 0.0
+    )
+    paired_uncertainty = max(
+        LOCAL_GATE_RELATIVE_NOISE_FLOOR,
+        LOCAL_GATE_SIGMA_MULTIPLIER * paired_standard_error,
+    )
+    classification = _classify_gate_delta(paired_delta, paired_uncertainty)
+    normalized_repeats = [
+        incumbent_latency * candidate / incumbent
+        for candidate, incumbent in zip(candidate_pairs, incumbent_pairs)
+    ]
+    normalized_latency = float(statistics.median(normalized_repeats))
+    update_local_best = classification == "confirmed_faster"
+    submit_official = update_local_best
+    challenger_claimed = False
+    challenger_reason = ""
+    if (
+        classification == "uncertain"
+        and paired_delta <= LOCAL_GATE_UNCERTAIN_RELATIVE_TOLERANCE
+    ):
+        challenger_claimed, challenger_reason = _claim_uncertain_challenger(
+            source_sha256
+        )
+        submit_official = challenger_claimed
+
+    result.update(
+        {
+            "status": classification,
+            "rechecked": True,
+            "relative_delta": paired_delta,
+            "uncertainty": paired_uncertainty,
+            "paired_standard_error": paired_standard_error,
+            "pair_records": pair_records,
+            "candidate_pair_latencies_ms": candidate_pairs,
+            "incumbent_pair_latencies_ms": incumbent_pairs,
+            "normalized_candidate_repeats_ms": normalized_repeats,
+            "candidate_latency_ms": normalized_latency,
+            "candidate_repeats_ms": normalized_repeats,
+            "update_local_best": update_local_best,
+            "submit_official": submit_official,
+            "challenger_claimed": challenger_claimed,
+            "challenger_reason": challenger_reason,
+        }
+    )
+    return result
 
 
 def _official_token() -> str:
@@ -1797,6 +2300,7 @@ def _http_json(
     token: str,
     body: bytes | None = None,
     headers: dict[str, str] | None = None,
+    request_timeout: float | None = None,
 ) -> dict[str, Any]:
     url = f"{OFFICIAL_BASE_URL}{path}"
     req = urllib.request.Request(url, data=body, method=method)
@@ -1804,8 +2308,13 @@ def _http_json(
     req.add_header("Authorization", f"Bearer {token}")
     for key, value in (headers or {}).items():
         req.add_header(key, value)
+    timeout = (
+        OFFICIAL_REQUEST_TIMEOUT
+        if request_timeout is None
+        else max(0.1, min(OFFICIAL_REQUEST_TIMEOUT, request_timeout))
+    )
     try:
-        with urllib.request.urlopen(req, timeout=OFFICIAL_REQUEST_TIMEOUT) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             text = resp.read().decode("utf-8", "replace")
             return json.loads(text) if text.strip() else {}
     except urllib.error.HTTPError as exc:
@@ -1877,10 +2386,30 @@ def _normalize_submission_data(payload: dict[str, Any]) -> dict[str, Any]:
     return dict(data or {})
 
 
-def _get_official_submission(submission_id: Any, token: str) -> dict[str, Any]:
-    primary = _normalize_submission_data(
-        _http_json("GET", f"/api/submissions/{submission_id}", token)
+def _get_official_submission(
+    submission_id: Any,
+    token: str,
+    *,
+    request_timeout: float | None = None,
+) -> dict[str, Any]:
+    deadline = (
+        None
+        if request_timeout is None
+        else time.monotonic() + max(0.1, request_timeout)
     )
+
+    def remaining_timeout() -> float | None:
+        if deadline is None:
+            return None
+        return max(0.1, deadline - time.monotonic())
+
+    def get(path: str) -> dict[str, Any]:
+        timeout = remaining_timeout()
+        if timeout is None:
+            return _http_json("GET", path, token)
+        return _http_json("GET", path, token, request_timeout=timeout)
+
+    primary = _normalize_submission_data(get(f"/api/submissions/{submission_id}"))
 
     # A future availability timestamp is an explicit server-side delay. The list
     # endpoint cannot make that result available sooner, so avoid another slow
@@ -1912,7 +2441,7 @@ def _get_official_submission(submission_id: Any, token: str) -> dict[str, Any]:
             f"kernel_id={OFFICIAL_KERNEL_ID}&gpu_type={OFFICIAL_GPU_TYPE}"
             f"&offset=0&limit=50"
         )
-        listed = _http_json("GET", f"/api/submissions?{params}", token)
+        listed = get(f"/api/submissions?{params}")
         rows = (listed.get("data") or {}).get("submissions") or []
         for row in rows:
             if str(row.get("id")) == str(submission_id):
@@ -2510,6 +3039,8 @@ def _refresh_due_official_results() -> dict[str, Any]:
         "checked": 0,
         "completed": 0,
         "pending": 0,
+        "time_budget_s": OFFICIAL_REFRESH_TIME_BUDGET,
+        "budget_exhausted": False,
         "errors": [],
     }
     token = _official_token()
@@ -2526,6 +3057,7 @@ def _refresh_due_official_results() -> dict[str, Any]:
         key=lambda path: path.stat().st_mtime,
     )
     now = time.time()
+    refresh_started = time.monotonic()
     for cache_path in paths:
         if report["checked"] >= OFFICIAL_REFRESH_BATCH_SIZE:
             break
@@ -2547,9 +3079,18 @@ def _refresh_due_official_results() -> dict[str, Any]:
             if not metadata:
                 continue
 
+            elapsed = time.monotonic() - refresh_started
+            remaining_budget = OFFICIAL_REFRESH_TIME_BUDGET - elapsed
+            if remaining_budget <= 0:
+                report["budget_exhausted"] = True
+                break
             report["checked"] += 1
             try:
-                remote = _get_official_submission(cached["id"], token)
+                remote = _get_official_submission(
+                    cached["id"],
+                    token,
+                    request_timeout=remaining_budget,
+                )
                 refreshed = dict(cached)
                 refreshed.update(
                     {key: value for key, value in remote.items() if value is not None}
@@ -2606,6 +3147,7 @@ def _refresh_due_official_results() -> dict[str, Any]:
                 cached["refresh_error"] = _tail(str(exc), 500)
                 _atomic_write_json(cache_path, cached)
                 report["errors"].append(_tail(str(exc), 300))
+    report["elapsed_s"] = time.monotonic() - refresh_started
     return report
 
 
@@ -2879,35 +3421,53 @@ def evaluate(program_path: str) -> dict[str, Any]:
             ),
         }
 
-        local_score = TARGET_LATENCY_MS / latency_ms
-        metrics["local_score"] = local_score
         best_latency_before = (
             float(local_best_before.get("latency_ms_median") or 0.0)
             if local_best_before and local_best_profile_matches
             else 0.0
         )
-        beats_local_best = (
-            not LOCAL_BEST_GATE
-            or best_latency_before <= 0
-            or (not same_as_local_best and latency_ms < best_latency_before)
+        gate_result = _evaluate_local_best_gate(
+            workspace=workspace,
+            kernel_source=kernel_source,
+            source_language=source_language,
+            source_sha256=kernel_sha256,
+            candidate_latencies_ms=local_latencies_ms,
+            local_best=(local_best_before if local_best_profile_matches else None),
+            measurement_profile=measurement_profile,
+            program_path=program_path,
+            start=start,
         )
+        gate_latency_ms = float(gate_result.get("candidate_latency_ms") or latency_ms)
+        gate_repeats_ms = [
+            float(value)
+            for value in (gate_result.get("candidate_repeats_ms") or local_latencies_ms)
+        ]
+        beats_local_best = bool(gate_result.get("update_local_best"))
+        passes_official_gate = bool(gate_result.get("submit_official"))
+        raw_local_score = TARGET_LATENCY_MS / latency_ms
+        local_score = TARGET_LATENCY_MS / gate_latency_ms
+        metrics["raw_local_score"] = raw_local_score
+        metrics["local_score"] = local_score
         metrics["local_best"] = {
             "gate_enabled": LOCAL_BEST_GATE,
             "candidate_kernel_sha256": kernel_sha256,
             "candidate_latency_ms_median": latency_ms,
+            "gate_latency_ms_median": gate_latency_ms,
             "previous_latency_ms_median": best_latency_before or None,
             "same_kernel": same_as_local_best,
             "strictly_improved": beats_local_best,
+            "official_gate_passed": passes_official_gate,
             "measurement_profile_matches": local_best_profile_matches,
             "profile_recalibration": profile_recalibration,
             "improvement_ms": (
-                best_latency_before - latency_ms if best_latency_before > 0 else None
+                best_latency_before - gate_latency_ms
+                if best_latency_before > 0
+                else None
             ),
+            "uncertainty_gate": gate_result,
         }
         reuse_cached_official = bool(
-            same_as_local_best
-            and OFFICIAL_CACHE
-            and _cache_path(kernel_source).is_file()
+            OFFICIAL_CACHE and _cache_path(kernel_source).is_file()
         )
         metrics["local_best"]["reuse_cached_official"] = reuse_cached_official
         new_local_best_record: dict[str, Any] | None = None
@@ -2915,10 +3475,13 @@ def evaluate(program_path: str) -> dict[str, Any]:
             new_local_best_record = {
                 "kernel_sha256": kernel_sha256,
                 "source_language": source_language,
-                "latency_ms_median": latency_ms,
+                "latency_ms_median": gate_latency_ms,
                 "local_score": local_score,
-                "repeat_count": LOCAL_REPEAT_COUNT,
-                "repeat_latencies_ms": local_latencies_ms,
+                "repeat_count": len(gate_repeats_ms),
+                "repeat_latencies_ms": gate_repeats_ms,
+                "raw_latency_ms_median": latency_ms,
+                "raw_repeat_latencies_ms": local_latencies_ms,
+                "uncertainty_gate": gate_result,
                 "per_workload": parsed.get("per_workload", []),
                 "workspace": str(workspace),
                 "source": "pes_evaluation",
@@ -2950,7 +3513,7 @@ def evaluate(program_path: str) -> dict[str, Any]:
                         "official_anchor_score": float(
                             local_best_before["official_score"]
                         ),
-                        "official_anchor_latency_ms": latency_ms,
+                        "official_anchor_latency_ms": gate_latency_ms,
                         "official_anchor_submission_id": local_best_before.get(
                             "official_submission_id"
                         ),
@@ -2983,6 +3546,7 @@ def evaluate(program_path: str) -> dict[str, Any]:
                 best_latency_before = concurrent_latency
                 local_best_before = concurrent_best
                 beats_local_best = False
+                passes_official_gate = False
                 new_local_best_record = None
         ncu_analysis = _ncu_summary_evidence(
             workspace=workspace,
@@ -2998,11 +3562,14 @@ def evaluate(program_path: str) -> dict[str, Any]:
         if isinstance(ncu_analysis.get("artifacts"), dict):
             common_artifacts["ncu_profile"] = ncu_analysis["artifacts"]
         status_line = "target met" if local_score >= 1.0 else "target not met"
+        gate_note = ""
+        if not math.isclose(gate_latency_ms, latency_ms, rel_tol=0.0, abs_tol=1e-15):
+            gate_note = f" drift-normalized gate latency={gate_latency_ms:.6f} ms;"
         local_summary = (
             f"Local {source_language} prefilter passed all {passed}/{expected} workloads in "
             f"{LOCAL_REPEAT_COUNT}/{LOCAL_REPEAT_COUNT} repeats; median geomean latency "
             f"{latency_ms:.6f} ms from {[round(value, 6) for value in local_latencies_ms]} "
-            f"vs target {TARGET_LATENCY_MS:.6f} ms; "
+            f"vs target {TARGET_LATENCY_MS:.6f} ms;{gate_note} "
             f"local_score={local_score:.6f} ({status_line}); measurement_profile="
             f"{measurement_profile['name']}:{measurement_profile['id']}."
         )
@@ -3022,7 +3589,7 @@ def evaluate(program_path: str) -> dict[str, Any]:
                     official_latency_ms=float(
                         local_best_before.get("official_latency_ms") or 0.0
                     ),
-                    local_latency_ms=latency_ms,
+                    local_latency_ms=gate_latency_ms,
                     submission_id=recorded_anchor.get("submission_id"),
                 )
                 metrics["official"] = {
@@ -3069,11 +3636,15 @@ def evaluate(program_path: str) -> dict[str, Any]:
                     artifacts=common_artifacts,
                 )
 
-            if LOCAL_BEST_GATE and not beats_local_best and not reuse_cached_official:
+            if (
+                LOCAL_BEST_GATE
+                and not passes_official_gate
+                and not reuse_cached_official
+            ):
                 scoring_latency_ms = (
                     best_latency_before
                     if same_as_local_best and best_latency_before > 0
-                    else latency_ms
+                    else gate_latency_ms
                 )
                 scoring_local_score = TARGET_LATENCY_MS / scoring_latency_ms
                 provisional_score, provisional_details = _anchored_provisional_score(
@@ -3110,9 +3681,11 @@ def evaluate(program_path: str) -> dict[str, Any]:
                 if same_as_local_best:
                     gate_detail = "candidate is the persisted local-best kernel"
                 else:
+                    gate_status = str(gate_result.get("status") or "rejected")
                     gate_detail = (
-                        f"median latency {latency_ms:.6f} ms did not strictly beat "
-                        f"local best {best_latency_before:.6f} ms"
+                        f"uncertainty gate classified the candidate as {gate_status}; "
+                        f"gate latency {gate_latency_ms:.6f} ms vs local best "
+                        f"{best_latency_before:.6f} ms"
                     )
                 summary = (
                     f"{local_summary} Official v1.1 submission skipped because {gate_detail}. "
@@ -3133,7 +3706,7 @@ def evaluate(program_path: str) -> dict[str, Any]:
                 kernel_source,
                 source_language=source_language,
                 local_score=local_score,
-                local_latency_ms=latency_ms,
+                local_latency_ms=gate_latency_ms,
                 measurement_profile=measurement_profile,
                 allow_upload=not same_as_local_best,
             )
@@ -3176,7 +3749,7 @@ def evaluate(program_path: str) -> dict[str, Any]:
             }
             if official_latency_ms > 0:
                 official_metrics["local_to_official_latency_ratio"] = (
-                    latency_ms / official_latency_ms
+                    gate_latency_ms / official_latency_ms
                 )
             metrics["official"] = official_metrics
             common_artifacts["official_submission_id"] = official.get("id")
@@ -3206,13 +3779,13 @@ def evaluate(program_path: str) -> dict[str, Any]:
                     source_language=source_language,
                     official_score=official_score,
                     official_latency_ms=official_latency_ms,
-                    local_latency_ms=latency_ms,
+                    local_latency_ms=gate_latency_ms,
                     submission_id=official.get("id"),
                 )
                 _record_official_calibration(
                     local_score=local_score,
                     official_score=official_score,
-                    local_latency_ms=latency_ms,
+                    local_latency_ms=gate_latency_ms,
                     official_latency_ms=official_latency_ms,
                     submission_id=official.get("id"),
                 )
@@ -3228,7 +3801,7 @@ def evaluate(program_path: str) -> dict[str, Any]:
                             "official_score": official_score,
                             "official_latency_ms": official_latency_ms,
                             "official_anchor_score": official_score,
-                            "official_anchor_latency_ms": latency_ms,
+                            "official_anchor_latency_ms": gate_latency_ms,
                             "official_anchor_submission_id": official.get("id"),
                         }
                     )
@@ -3264,7 +3837,7 @@ def evaluate(program_path: str) -> dict[str, Any]:
                 scoring_latency_ms = (
                     best_latency_before
                     if same_as_local_best and best_latency_before > 0
-                    else latency_ms
+                    else gate_latency_ms
                 )
                 scoring_local_score = TARGET_LATENCY_MS / scoring_latency_ms
                 provisional_score, provisional_details = _anchored_provisional_score(
