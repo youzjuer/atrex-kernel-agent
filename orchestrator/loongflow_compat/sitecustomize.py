@@ -188,7 +188,7 @@ def _positive_int_env(name: str, default: int) -> int:
     return value
 
 
-def _stagnation_state(memory: object) -> dict[str, float | int]:
+def _stagnation_state(memory: object) -> dict[str, float | int | str]:
     """Measure plateau age from the first iteration that reached the best score."""
     populations = getattr(memory, "populations", {})
     candidates = list(populations.values()) if isinstance(populations, dict) else []
@@ -199,6 +199,7 @@ def _stagnation_state(memory: object) -> dict[str, float | int]:
             "best_iteration": current_iteration,
             "plateau_rounds": 0,
             "best_score": 0.0,
+            "incumbent_family": "baseline",
         }
 
     def score(item: object) -> float:
@@ -213,6 +214,17 @@ def _stagnation_state(memory: object) -> dict[str, float | int]:
         for candidate in candidates
         if abs(score(candidate) - best_score) <= 1e-12
     ]
+    incumbent = min(
+        (
+            candidate
+            for candidate in candidates
+            if abs(score(candidate) - best_score) <= 1e-12
+        ),
+        key=lambda candidate: int(getattr(candidate, "iteration", 0) or 0),
+    )
+    incumbent_family = architecture_label(
+        extract_architecture_features(getattr(incumbent, "solution", ""))
+    )
     best_iteration = min(best_iterations, default=current_iteration)
     current_iteration = max(
         current_iteration,
@@ -226,6 +238,7 @@ def _stagnation_state(memory: object) -> dict[str, float | int]:
         "best_iteration": best_iteration,
         "plateau_rounds": max(0, current_iteration - best_iteration),
         "best_score": best_score,
+        "incumbent_family": incumbent_family,
     }
 
 
@@ -255,15 +268,21 @@ def _stagnation_seed_parent(
     if getattr(memory, "_atrex_stagnation_best_marker", None) != best_marker:
         memory._atrex_stagnation_best_marker = best_marker
         memory._atrex_stagnation_seed_bucket = None
+        memory._atrex_stagnation_retry_bucket = None
+        memory._atrex_stagnation_seed_retries = 0
     plateau_rounds = int(state["plateau_rounds"])
     if plateau_rounds < threshold:
         return None
     bucket = (plateau_rounds - threshold) // interval
+    if getattr(memory, "_atrex_stagnation_retry_bucket", None) != bucket:
+        memory._atrex_stagnation_retry_bucket = bucket
+        memory._atrex_stagnation_seed_retries = 0
     if getattr(memory, "_atrex_stagnation_seed_bucket", None) == bucket:
         return None
 
     seeds = load_seed_bank(language="cuda_cpp")
-    seed = seeds[bucket % len(seeds)]
+    retries = max(0, int(getattr(memory, "_atrex_stagnation_seed_retries", 0) or 0))
+    seed = seeds[(bucket + retries) % len(seeds)]
     features = extract_architecture_features(seed.source)
     detected_family = architecture_label(features)
     if detected_family != seed.family:
@@ -279,12 +298,22 @@ def _stagnation_seed_parent(
     directive = (
         "MANDATORY STAGNATION ESCAPE: treat this unscored seed as a different "
         f"algorithm-family starting point ({seed.family}). Produce a complete, "
-        "self-contained CUDA architecture experiment. Do not fall back to a "
-        "constant-only or launch-bound-only edit of the incumbent. Preserve "
+        "self-contained CUDA architecture experiment. The child must stay in the "
+        f"seed family or another family different from the incumbent family "
+        f"({state['incumbent_family']}). Reconstructing the incumbent family does "
+        "not satisfy this escape unless the evaluator proves a new local best. "
+        "Do not fall back to a constant-only or launch-bound-only edit. Preserve "
         "stable ordering and all 16-workload correctness."
     )
     memory._atrex_stagnation_seed_bucket = bucket
     memory._atrex_last_stagnation_seed_id = seed.seed_id
+    memory._atrex_pending_stagnation_escape = {
+        "expected_iteration": int(state["current_iteration"]) + 1,
+        "bucket": bucket,
+        "seed_id": seed.seed_id,
+        "seed_family": seed.family,
+        "incumbent_family": str(state["incumbent_family"]),
+    }
     logger.warning(
         "Forced stagnation escape at iteration %d (best iteration %d, plateau %d): "
         "seed=%s family=%s island=%d bank=%s",
@@ -319,6 +348,7 @@ def _stagnation_seed_parent(
                 "best_iteration": int(state["best_iteration"]),
                 "plateau_rounds": plateau_rounds,
                 "incumbent_score": float(state["best_score"]),
+                "incumbent_family": str(state["incumbent_family"]),
                 "directive": directive,
             },
             "source_sha256": seed.source_sha256,
@@ -330,6 +360,109 @@ def _stagnation_seed_parent(
             "architecture_island_profile": island_profile(seed_island),
         },
     }
+
+
+def _local_best_improved(solution: object) -> bool:
+    evaluation = getattr(solution, "evaluation", "")
+    if isinstance(evaluation, str):
+        try:
+            evaluation = json.loads(evaluation)
+        except (TypeError, ValueError):
+            return False
+    if not isinstance(evaluation, dict):
+        return False
+    metrics = evaluation.get("metrics")
+    local_best = metrics.get("local_best") if isinstance(metrics, dict) else None
+    return bool(
+        isinstance(local_best, dict) and local_best.get("strictly_improved", False)
+    )
+
+
+def _apply_stagnation_architecture_gate(
+    memory: object,
+    solution: object,
+    child_family: str,
+) -> bool:
+    """Reject a forced escape that silently reconstructs the stagnant family."""
+    pending = getattr(memory, "_atrex_pending_stagnation_escape", None)
+    if not isinstance(pending, dict):
+        return True
+    expected_iteration = int(pending.get("expected_iteration", -1))
+    child_iteration = int(getattr(solution, "iteration", -2) or -2)
+    if child_iteration != expected_iteration:
+        if child_iteration > expected_iteration:
+            logger.warning(
+                "Discarding stale stagnation escape gate for iteration %d while "
+                "adding iteration %d",
+                expected_iteration,
+                child_iteration,
+            )
+            memory._atrex_pending_stagnation_escape = None
+        return True
+
+    memory._atrex_pending_stagnation_escape = None
+    incumbent_family = str(pending.get("incumbent_family") or "")
+    metadata = getattr(solution, "metadata", None)
+    if not isinstance(metadata, dict):
+        metadata = {}
+        solution.metadata = metadata
+    local_best_improved = _local_best_improved(solution)
+    if child_family != incumbent_family or local_best_improved:
+        metadata["stagnation_escape_satisfied"] = {
+            **pending,
+            "child_family": child_family,
+            "local_best_improved": local_best_improved,
+        }
+        memory._atrex_stagnation_seed_retries = 0
+        return True
+
+    original_score = float(getattr(solution, "score", 0.0) or 0.0)
+    max_attempts = _positive_int_env("ATREX_PES_STAGNATION_MAX_ATTEMPTS", 2)
+    retry_bucket = int(pending.get("bucket", -1))
+    if getattr(memory, "_atrex_stagnation_retry_bucket", None) != retry_bucket:
+        memory._atrex_stagnation_retry_bucket = retry_bucket
+        memory._atrex_stagnation_seed_retries = 0
+    retries = max(0, int(getattr(memory, "_atrex_stagnation_seed_retries", 0) or 0)) + 1
+    memory._atrex_stagnation_seed_retries = retries
+    if retries < max_attempts:
+        memory._atrex_stagnation_seed_bucket = None
+
+    violation = {
+        **pending,
+        "child_family": child_family,
+        "reason": "child reconstructed the stagnant incumbent family without a new local best",
+        "score_before_gate": original_score,
+        "retry": retries,
+        "max_attempts": max_attempts,
+    }
+    metadata["stagnation_escape_violation"] = violation
+    solution.score = 0.0
+    evaluation = getattr(solution, "evaluation", "")
+    payload = evaluation if isinstance(evaluation, dict) else None
+    if isinstance(evaluation, str):
+        try:
+            payload = json.loads(evaluation)
+        except (TypeError, ValueError):
+            payload = None
+    if isinstance(payload, dict):
+        payload["score"] = 0.0
+        metrics = payload.setdefault("metrics", {})
+        if isinstance(metrics, dict):
+            metrics["architecture_escape_gate"] = violation
+        if isinstance(evaluation, str):
+            solution.evaluation = json.dumps(payload, ensure_ascii=False, indent=2)
+    logger.error(
+        "Rejected stagnation escape child at iteration %d: seed=%s incumbent=%s "
+        "child=%s score=%.6f retry=%d/%d",
+        child_iteration,
+        pending.get("seed_id"),
+        incumbent_family,
+        child_family,
+        original_score,
+        retries,
+        max_attempts,
+    )
+    return False
 
 
 def _canonical_solution(solutions: list[object]) -> object:
@@ -732,17 +865,24 @@ def _patch_evolution_database_selection() -> None:
         if memory is None:
             return await original_add_solution(self, solution)
 
+        child_family = "baseline"
         if architecture_enabled:
             num_islands, migration_interval = architecture_settings(self)
             initialize_architecture_memory(memory, num_islands, migration_interval)
             if isinstance(source, str) and source.strip():
                 analysis = classify_and_route_solution(memory, solution, num_islands)
+                child_family = str(analysis["label"])
                 logger.info(
                     "Summary architecture route: label=%s pca_cluster=%d island=%d",
                     analysis["label"],
                     analysis["cluster"],
                     analysis["island_id"],
                 )
+        elif isinstance(source, str) and source.strip():
+            child_family = architecture_label(extract_architecture_features(source))
+
+        if isinstance(source, str) and source.strip():
+            _apply_stagnation_architecture_gate(memory, solution, child_family)
 
         if not isinstance(source, str) or not source.strip():
             solution_id = await original_add_solution(self, solution)

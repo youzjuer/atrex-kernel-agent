@@ -46,9 +46,11 @@ the 16-workload correctness gate or measured local/official fitness.
      hierarchy, tiling, or shared bitmasks.
 
 When the incumbent has not improved for the configured stagnation window,
-Planner must choose a different family or a holistic rewrite. A plan that only
-changes launch bounds, unrolling, comments, dead code, or one constant does not
-satisfy a forced stagnation escape.
+Planner must keep the injected seed family or choose another family distinct
+from the incumbent family. Reconstructing the incumbent family does not satisfy
+a forced escape unless it establishes a new local best. A plan that only changes
+launch bounds, unrolling, comments, dead code, or one constant also fails the
+escape gate.
 
 ## Blackwell evidence worth transferring carefully
 

@@ -124,7 +124,9 @@ Search guidance:
   local-refinement rule is suspended: Planner must name a different algorithm family, account for
   its full-array passes/launches/scratch traffic, and Executor must emit a complete architecture
   experiment based on the supplied seed. Constant-only, launch-bound-only, comment-only, and
-  dead-code-only edits do not satisfy that requirement.
+  dead-code-only edits do not satisfy that requirement. The child must remain in the seed family
+  or another family distinct from `metadata.stagnation_escape.incumbent_family`; rebuilding that
+  incumbent family is rejected by the database unless it establishes a new local best.
 - CUDA shuffle groups must be hardware-warp aligned. Every lane that executes a `*_sync` intrinsic
   must be included in its mask; never emulate 72- or 96-thread logical groups by crossing warp
   boundaries with a single shuffle scan.

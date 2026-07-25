@@ -92,6 +92,25 @@ class TestAdaptiveExploration(unittest.TestCase):
 
 
 class TestStagnationArchitectureEscape(unittest.TestCase):
+    @staticmethod
+    def _set_pending_escape(
+        memory,
+        *,
+        incumbent_family: str = "hierarchical_histogram",
+        expected_iteration: int = 12,
+        bucket: int = 0,
+    ) -> None:
+        memory._atrex_stagnation_seed_bucket = bucket
+        memory._atrex_stagnation_retry_bucket = bucket
+        memory._atrex_stagnation_seed_retries = 0
+        memory._atrex_pending_stagnation_escape = {
+            "expected_iteration": expected_iteration,
+            "bucket": bucket,
+            "seed_id": "cub_device_radix_sort",
+            "seed_family": "cub_radix_sort",
+            "incumbent_family": incumbent_family,
+        }
+
     def test_plateau_age_uses_first_best_iteration(self) -> None:
         first_best = _solution("best", "a", iteration=4, score=0.9, weight=1)
         equal_later = _solution("tie", "b", iteration=11, score=0.9, weight=1)
@@ -131,9 +150,109 @@ class TestStagnationArchitectureEscape(unittest.TestCase):
         )
         self.assertEqual(first["island_id"], 7)
         self.assertTrue(first["metadata"]["stagnation_escape"]["required"])
+        self.assertEqual(
+            first["metadata"]["stagnation_escape"]["incumbent_family"],
+            "baseline",
+        )
+        self.assertIn("incumbent family (baseline)", first["generate_plan"])
         self.assertIsNone(repeated)
         self.assertEqual(second["metadata"]["architecture_label"], "cub_radix_sort")
         self.assertEqual(second["island_id"], 6)
+
+    def test_unimproved_incumbent_child_is_zeroed_and_retried(self) -> None:
+        memory = _memory(last_iteration=11)
+        self._set_pending_escape(memory)
+        child = _solution(
+            "child", "hierarchical histogram", iteration=12, score=0.88, weight=1
+        )
+        child.evaluation = json.dumps(
+            {
+                "score": 0.88,
+                "metrics": {"local_best": {"strictly_improved": False}},
+            }
+        )
+
+        with mock.patch.dict(os.environ, {"ATREX_PES_STAGNATION_MAX_ATTEMPTS": "2"}):
+            accepted = sitecustomize._apply_stagnation_architecture_gate(
+                memory, child, "hierarchical_histogram"
+            )
+
+        evaluation = json.loads(child.evaluation)
+        self.assertFalse(accepted)
+        self.assertEqual(child.score, 0.0)
+        self.assertEqual(evaluation["score"], 0.0)
+        self.assertIn("architecture_escape_gate", evaluation["metrics"])
+        self.assertIsNone(memory._atrex_stagnation_seed_bucket)
+        self.assertEqual(memory._atrex_stagnation_seed_retries, 1)
+        self.assertEqual(
+            child.metadata["stagnation_escape_violation"]["seed_family"],
+            "cub_radix_sort",
+        )
+
+    def test_different_family_child_satisfies_escape(self) -> None:
+        memory = _memory(last_iteration=11)
+        self._set_pending_escape(memory)
+        child = _solution("child", "radix", iteration=12, score=0.7, weight=1)
+        child.evaluation = {"metrics": {"local_best": {"strictly_improved": False}}}
+
+        accepted = sitecustomize._apply_stagnation_architecture_gate(
+            memory, child, "cub_radix_sort"
+        )
+
+        self.assertTrue(accepted)
+        self.assertEqual(child.score, 0.7)
+        self.assertEqual(memory._atrex_stagnation_seed_retries, 0)
+        self.assertEqual(
+            child.metadata["stagnation_escape_satisfied"]["child_family"],
+            "cub_radix_sort",
+        )
+
+    def test_improved_incumbent_child_satisfies_escape(self) -> None:
+        memory = _memory(last_iteration=11)
+        self._set_pending_escape(memory)
+        child = _solution(
+            "child", "hierarchical histogram", iteration=12, score=0.91, weight=1
+        )
+        child.evaluation = json.dumps(
+            {
+                "score": 0.91,
+                "metrics": {"local_best": {"strictly_improved": True}},
+            }
+        )
+
+        accepted = sitecustomize._apply_stagnation_architecture_gate(
+            memory, child, "hierarchical_histogram"
+        )
+
+        self.assertTrue(accepted)
+        self.assertEqual(child.score, 0.91)
+        self.assertTrue(
+            child.metadata["stagnation_escape_satisfied"]["local_best_improved"]
+        )
+
+    def test_retry_budget_resets_for_each_stagnation_bucket(self) -> None:
+        best = _solution("best", "kernel", iteration=1, score=0.9, weight=1)
+        memory = _memory(best, last_iteration=13)
+        memory._atrex_stagnation_best_marker = (1, 0.9)
+        memory._atrex_stagnation_retry_bucket = 0
+        memory._atrex_stagnation_seed_bucket = 0
+        memory._atrex_stagnation_seed_retries = 2
+        environment = {
+            "ATREX_PES_STAGNATION_SEEDS": "1",
+            "ATREX_PES_STAGNATION_ARCHITECTURE_ROUNDS": "12",
+            "ATREX_PES_STAGNATION_SEED_INTERVAL": "4",
+            "SOL58_CODE_LANGUAGE": "cuda_cpp",
+        }
+
+        memory.last_iteration = 17
+        with mock.patch.dict(os.environ, environment):
+            seed = sitecustomize._stagnation_seed_parent(
+                memory, requested_island=0, num_islands=8
+            )
+
+        self.assertIsNotNone(seed)
+        self.assertEqual(memory._atrex_stagnation_retry_bucket, 1)
+        self.assertEqual(memory._atrex_stagnation_seed_retries, 0)
 
     def test_seed_bank_is_complete_and_fingerprinted(self) -> None:
         seeds = load_seed_bank()
