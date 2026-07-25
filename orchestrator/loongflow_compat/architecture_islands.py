@@ -249,11 +249,24 @@ def extract_architecture_features(source: str) -> dict[str, int]:
     )
     if bitwise_radix_sort and radix_passes == 0 and radix_bits > 0:
         radix_passes = max(1, math.ceil(8 / radix_bits))
-    expert_parallel_scan = _present(
+    explicit_expert_parallel = _present(
         code,
-        r"expert[_ ]?parallel|expert[_ ]?(?:owned|scan)|"
-        r"(?:const\s+)?int\s+expert\s*=\s*blockIdx\.x",
+        r"expert[_ ]?parallel|expert[_ ]?(?:owned|scan)",
     )
+    expert_owned_scan = all(
+        (
+            _present(
+                code,
+                r"(?:const\s+)?int\s+expert\s*=\s*blockIdx\.x",
+            ),
+            _present(
+                code,
+                r"topk\s*\[[^]]+\]\s*==\s*expert|" r"expert\s*==\s*topk\s*\[[^]]+\]",
+            ),
+            _present(code, r"sorted_token_indices\s*\["),
+        )
+    )
+    expert_parallel_scan = int(bool(explicit_expert_parallel or expert_owned_scan))
     stable_rank = _present(
         code,
         r"stable[_ ]?(?:rank|scan|scatter)|rank[_ ]?in[_ ]?(?:warp|block)|"

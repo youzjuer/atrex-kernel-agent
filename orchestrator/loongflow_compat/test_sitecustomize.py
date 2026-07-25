@@ -383,6 +383,20 @@ class TestArchitectureFeatureAnalysis(unittest.TestCase):
             "hierarchical_histogram",
         )
 
+    def test_expert_indexed_prefix_is_not_misclassified_as_expert_scan(self) -> None:
+        prefix = architecture_islands.extract_architecture_features(
+            "__global__ void prefix_counts(const int* counts, int* block_offsets) {"
+            " const int expert = blockIdx.x;"
+            " block_offsets[threadIdx.x * 256 + expert] = counts[expert];"
+            " }"
+        )
+
+        self.assertEqual(prefix["expert_parallel_scan"], 0)
+        self.assertNotEqual(
+            architecture_islands.architecture_label(prefix),
+            "expert_parallel_scan",
+        )
+
     def test_pca_and_cluster_output_is_finite_and_deterministic(self) -> None:
         sources = [
             "__global__ void plain() {}",
