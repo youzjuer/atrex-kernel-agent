@@ -19,6 +19,7 @@ from orchestrator.loongflow_compat.architecture_islands import (
     island_profile,
     maybe_exchange_islands,
     restore_architecture_checkpoint,
+    restore_stagnation_checkpoint,
     validate_architecture_island_count,
     write_architecture_checkpoint,
 )
@@ -465,6 +466,37 @@ def _apply_stagnation_architecture_gate(
     return False
 
 
+def _finalize_rejected_stagnation_child(memory: object, solution: object) -> str:
+    """Advance iteration bookkeeping without admitting the rejected child anywhere."""
+    lock = getattr(memory, "_lock", None)
+    if lock is None:
+        raise RuntimeError("stagnation rejection requires an evolution-memory lock")
+    with lock:
+        prepare = getattr(memory, "_prepare_solution", None)
+        if callable(prepare):
+            prepare(solution)
+        else:
+            child_iteration = int(getattr(solution, "iteration", 0) or 0)
+            memory.last_iteration = max(
+                int(getattr(memory, "last_iteration", 0) or 0), child_iteration
+            )
+        solution_id = str(getattr(solution, "solution_id", "") or "")
+        if not solution_id:
+            raise RuntimeError("rejected stagnation child has no solution id")
+        metadata = getattr(solution, "metadata", None)
+        if not isinstance(metadata, dict):
+            metadata = {}
+            solution.metadata = metadata
+        metadata["database_admission"] = "rejected_stagnation_escape"
+    logger.warning(
+        "Hard-rejected stagnation escape child %s at iteration %d; no history or "
+        "population record was created",
+        solution_id,
+        int(getattr(solution, "iteration", 0) or 0),
+    )
+    return solution_id
+
+
 def _canonical_solution(solutions: list[object]) -> object:
     return min(
         solutions,
@@ -680,6 +712,80 @@ def _deduplicate_memory_indexes(memory: object) -> int:
     return len(duplicate_to_canonical)
 
 
+def _restore_checkpoint_population_indexes(memory: object, checkpoint_path: str) -> int:
+    """Undo upstream checkpoint loading of lineage-only records into populations."""
+    metadata_path = Path(checkpoint_path) / "metadata.json"
+    try:
+        payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, TypeError, ValueError):
+        return 0
+    saved_islands = payload.get("islands")
+    if not isinstance(saved_islands, list) or not all(
+        isinstance(island, list) for island in saved_islands
+    ):
+        return 0
+    selectable_ids = {
+        str(solution_id)
+        for island in saved_islands
+        for solution_id in island
+        if solution_id
+    }
+    populations = getattr(memory, "populations", None)
+    solutions = getattr(memory, "solutions", None)
+    islands = getattr(memory, "islands", None)
+    lock = getattr(memory, "_lock", None)
+    if (
+        not isinstance(populations, dict)
+        or not isinstance(solutions, dict)
+        or not isinstance(islands, list)
+        or lock is None
+    ):
+        return 0
+
+    with lock:
+        loaded_ids = set(populations)
+        valid_ids = selectable_ids & set(solutions)
+        populations.clear()
+        populations.update(
+            {solution_id: solutions[solution_id] for solution_id in valid_ids}
+        )
+        for island in islands:
+            if isinstance(island, set):
+                island.intersection_update(valid_ids)
+
+        elites = getattr(memory, "elites", None)
+        if isinstance(elites, set):
+            elites.intersection_update(valid_ids)
+        feature_maps = getattr(memory, "island_feature_maps", None)
+        if isinstance(feature_maps, list):
+            for feature_map in feature_maps:
+                if not isinstance(feature_map, dict):
+                    continue
+                for key, solution_id in list(feature_map.items()):
+                    if solution_id not in valid_ids:
+                        feature_map.pop(key, None)
+
+        if getattr(memory, "best_solution_id", None) not in valid_ids:
+            memory.best_solution_id = (
+                _canonical_solution(list(populations.values())).solution_id
+                if populations
+                else None
+            )
+        memory.island_best_solution = [
+            (
+                _canonical_solution(
+                    [populations[solution_id] for solution_id in island]
+                ).solution_id
+                if island
+                else None
+            )
+            for island in islands
+        ]
+        if hasattr(memory, "island_capacity"):
+            memory.island_capacity = [len(island) for island in islands]
+    return len(loaded_ids - valid_ids)
+
+
 def _require_signature(callable_obj: object, expected: tuple[str, ...]) -> None:
     actual = tuple(inspect.signature(callable_obj).parameters)
     if actual != expected:
@@ -882,7 +988,14 @@ def _patch_evolution_database_selection() -> None:
             child_family = architecture_label(extract_architecture_features(source))
 
         if isinstance(source, str) and source.strip():
-            _apply_stagnation_architecture_gate(memory, solution, child_family)
+            admitted = _apply_stagnation_architecture_gate(
+                memory, solution, child_family
+            )
+            if not admitted:
+                solution_id = _finalize_rejected_stagnation_child(memory, solution)
+                if architecture_enabled:
+                    await memory._check_migration()
+                return solution_id
 
         if not isinstance(source, str) or not source.strip():
             solution_id = await original_add_solution(self, solution)
@@ -947,6 +1060,14 @@ def _patch_evolution_database_selection() -> None:
         memory = getattr(self._evolution_memory, "_memory", None)
         if memory is None:
             return result
+        removed_history = _restore_checkpoint_population_indexes(
+            memory, checkpoint_path
+        )
+        if removed_history:
+            logger.info(
+                "Excluded %d lineage-only checkpoint records from selectable population",
+                removed_history,
+            )
         _reconcile_authoritative_scores(memory)
         if source_dedup_enabled:
             removed = _deduplicate_memory_indexes(memory)
@@ -968,6 +1089,20 @@ def _patch_evolution_database_selection() -> None:
                 restored["islands"],
                 restored["last_migration_iteration"],
             )
+        elif stagnation_seeds_enabled:
+            restore_stagnation_checkpoint(memory, checkpoint_path)
+        if architecture_enabled or stagnation_seeds_enabled:
+            stagnation = getattr(memory, "_atrex_stagnation_checkpoint_status", {})
+            if isinstance(stagnation, dict):
+                logger.info(
+                    "Restored stagnation checkpoint: persisted=%s legacy=%s "
+                    "bucket=%s retries=%d pending=%s",
+                    stagnation.get("restored", False),
+                    stagnation.get("legacy_reconstructed", False),
+                    stagnation.get("seed_bucket"),
+                    int(stagnation.get("seed_retries", 0) or 0),
+                    stagnation.get("pending_escape", False),
+                )
         if source_dedup_enabled:
             _deduplicate_memory_indexes(memory)
         return result
@@ -975,10 +1110,10 @@ def _patch_evolution_database_selection() -> None:
     async def patched_save_checkpoint(self, checkpoint_path, tag):
         result = await original_save_checkpoint(self, checkpoint_path, tag)
         memory = getattr(self._evolution_memory, "_memory", None)
-        if architecture_enabled and memory is not None:
+        if (architecture_enabled or stagnation_seeds_enabled) and memory is not None:
             if not write_architecture_checkpoint(memory, checkpoint_path, tag):
                 logger.warning(
-                    "Architecture checkpoint metadata was not written for tag %s",
+                    "Atrex checkpoint metadata was not written for tag %s",
                     tag,
                 )
         return result

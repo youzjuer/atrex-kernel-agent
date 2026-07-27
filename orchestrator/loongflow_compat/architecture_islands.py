@@ -18,6 +18,7 @@ import numpy as np
 logger = logging.getLogger("atrex.pes_architecture")
 
 ANALYSIS_VERSION = 2
+STAGNATION_CHECKPOINT_VERSION = 1
 PCA_COMPONENTS = 3
 
 FEATURE_NAMES = (
@@ -997,6 +998,162 @@ def initialize_architecture_memory(
             rebuild_architecture_islands(memory, target)
 
 
+def _current_stagnation_best_marker(memory: object) -> tuple[int, float] | None:
+    populations = getattr(memory, "populations", {})
+    if not isinstance(populations, dict) or not populations:
+        return None
+    candidates = list(populations.values())
+    best_score = max(_score(solution) for solution in candidates)
+    best_iteration = min(
+        int(getattr(solution, "iteration", 0) or 0)
+        for solution in candidates
+        if abs(_score(solution) - best_score) <= 1e-12
+    )
+    return best_iteration, round(best_score, 12)
+
+
+def _stagnation_checkpoint_payload(memory: object) -> dict[str, Any]:
+    marker = getattr(memory, "_atrex_stagnation_best_marker", None)
+    if not (
+        isinstance(marker, (tuple, list))
+        and len(marker) == 2
+        and isinstance(marker[0], (int, float))
+        and isinstance(marker[1], (int, float))
+    ):
+        marker = None
+    pending = getattr(memory, "_atrex_pending_stagnation_escape", None)
+    return {
+        "version": STAGNATION_CHECKPOINT_VERSION,
+        "best_marker": list(marker) if marker is not None else None,
+        "seed_bucket": getattr(memory, "_atrex_stagnation_seed_bucket", None),
+        "retry_bucket": getattr(memory, "_atrex_stagnation_retry_bucket", None),
+        "seed_retries": max(
+            0, int(getattr(memory, "_atrex_stagnation_seed_retries", 0) or 0)
+        ),
+        "last_seed_id": str(
+            getattr(memory, "_atrex_last_stagnation_seed_id", "") or ""
+        ),
+        "pending_escape": copy.deepcopy(pending) if isinstance(pending, dict) else None,
+    }
+
+
+def _latest_completed_stagnation_escape(memory: object) -> dict[str, Any] | None:
+    solutions = getattr(memory, "solutions", {})
+    if not isinstance(solutions, dict):
+        return None
+    records: list[dict[str, Any]] = []
+    for solution in solutions.values():
+        metadata = _metadata(solution)
+        for key in ("stagnation_escape_satisfied", "stagnation_escape_violation"):
+            record = metadata.get(key)
+            if isinstance(record, dict) and "bucket" in record:
+                candidate = copy.deepcopy(record)
+                candidate["checkpoint_outcome"] = (
+                    "satisfied" if key.endswith("satisfied") else "violation"
+                )
+                records.append(candidate)
+    if not records:
+        return None
+    return max(
+        records,
+        key=lambda record: (
+            int(record.get("expected_iteration", -1) or -1),
+            int(record.get("bucket", -1) or -1),
+        ),
+    )
+
+
+def restore_stagnation_checkpoint_state(
+    memory: object, state: object
+) -> dict[str, Any]:
+    """Restore escape scheduling state, with a best-effort legacy reconstruction."""
+    payload = state if isinstance(state, dict) else {}
+    is_current = payload.get("version") == STAGNATION_CHECKPOINT_VERSION
+    latest = None if is_current else _latest_completed_stagnation_escape(memory)
+
+    marker = payload.get("best_marker") if is_current else None
+    if isinstance(marker, list) and len(marker) == 2:
+        try:
+            best_marker: tuple[int, float] | None = (
+                int(marker[0]),
+                round(float(marker[1]), 12),
+            )
+        except (TypeError, ValueError):
+            best_marker = None
+    else:
+        best_marker = None
+    if not is_current:
+        best_marker = _current_stagnation_best_marker(memory)
+        if latest is not None and best_marker is not None:
+            latest_iteration = int(latest.get("expected_iteration", -1) or -1)
+            if latest_iteration <= best_marker[0]:
+                latest = None
+
+    def optional_int(value: object) -> int | None:
+        if value is None:
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    if is_current:
+        seed_bucket = optional_int(payload.get("seed_bucket"))
+        retry_bucket = optional_int(payload.get("retry_bucket"))
+        retries = max(0, int(payload.get("seed_retries", 0) or 0))
+        last_seed_id = str(payload.get("last_seed_id") or "")
+        pending = payload.get("pending_escape")
+        pending = copy.deepcopy(pending) if isinstance(pending, dict) else None
+    else:
+        retry_bucket = optional_int(latest.get("bucket")) if latest else None
+        retries = max(0, int(latest.get("retry", 0) or 0)) if latest else 0
+        last_seed_id = str(latest.get("seed_id") or "") if latest else ""
+        max_attempts = (
+            max(1, int(latest.get("max_attempts", 2) or 2)) if latest else 2
+        )
+        seed_bucket = retry_bucket
+        if (
+            latest
+            and latest.get("checkpoint_outcome") == "violation"
+            and retries < max_attempts
+        ):
+            seed_bucket = None
+        pending = None
+
+    memory._atrex_stagnation_best_marker = best_marker
+    memory._atrex_stagnation_seed_bucket = seed_bucket
+    memory._atrex_stagnation_retry_bucket = retry_bucket
+    memory._atrex_stagnation_seed_retries = retries
+    memory._atrex_last_stagnation_seed_id = last_seed_id
+    memory._atrex_pending_stagnation_escape = pending
+    return {
+        "restored": is_current,
+        "legacy_reconstructed": not is_current and latest is not None,
+        "seed_bucket": seed_bucket,
+        "retry_bucket": retry_bucket,
+        "seed_retries": retries,
+        "pending_escape": pending is not None,
+    }
+
+
+def restore_stagnation_checkpoint(
+    memory: object, checkpoint_path: str
+) -> dict[str, Any]:
+    """Restore stagnation state without requiring architecture-island routing."""
+    state: object = None
+    metadata_path = Path(checkpoint_path) / "metadata.json"
+    try:
+        payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+        architecture = payload.get("atrex_architecture")
+        if isinstance(architecture, dict):
+            state = architecture.get("stagnation_escape")
+    except (OSError, TypeError, ValueError):
+        state = None
+    status = restore_stagnation_checkpoint_state(memory, state)
+    memory._atrex_stagnation_checkpoint_status = status
+    return status
+
+
 def architecture_checkpoint_payload(memory: object) -> dict[str, Any]:
     model = copy.deepcopy(getattr(memory, "_atrex_architecture_pca_model", {}) or {})
     model.pop("coordinates", None)
@@ -1015,6 +1172,7 @@ def architecture_checkpoint_payload(memory: object) -> dict[str, Any]:
             getattr(memory, "_atrex_pca_refit_iteration", 0) or 0
         ),
         "pca_model": model,
+        "stagnation_escape": _stagnation_checkpoint_payload(memory),
     }
 
 
@@ -1107,5 +1265,9 @@ def restore_architecture_checkpoint(
             result = {"solutions": len(populations), "islands": target}
         else:
             result = rebuild_architecture_islands(memory, target, current)
+        stagnation = restore_stagnation_checkpoint_state(
+            memory, state.get("stagnation_escape") if state_is_current else None
+        )
+        memory._atrex_stagnation_checkpoint_status = stagnation
         result["last_migration_iteration"] = last
         return result

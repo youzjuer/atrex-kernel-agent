@@ -162,6 +162,11 @@ class TestStagnationArchitectureEscape(unittest.TestCase):
     def test_unimproved_incumbent_child_is_zeroed_and_retried(self) -> None:
         memory = _memory(last_iteration=11)
         self._set_pending_escape(memory)
+        memory._prepare_solution = lambda solution: setattr(
+            memory,
+            "last_iteration",
+            max(memory.last_iteration, int(solution.iteration)),
+        )
         child = _solution(
             "child", "hierarchical histogram", iteration=12, score=0.88, weight=1
         )
@@ -187,6 +192,14 @@ class TestStagnationArchitectureEscape(unittest.TestCase):
         self.assertEqual(
             child.metadata["stagnation_escape_violation"]["seed_family"],
             "cub_radix_sort",
+        )
+        solution_id = sitecustomize._finalize_rejected_stagnation_child(memory, child)
+        self.assertEqual(solution_id, "child")
+        self.assertEqual(memory.last_iteration, 12)
+        self.assertNotIn("child", memory.solutions)
+        self.assertNotIn("child", memory.populations)
+        self.assertEqual(
+            child.metadata["database_admission"], "rejected_stagnation_escape"
         )
 
     def test_different_family_child_satisfies_escape(self) -> None:
@@ -388,6 +401,45 @@ class TestSourceDeduplication(unittest.TestCase):
         self.assertAlmostEqual(distinct.sample_weight, 1.0 + 3.0 * 0.70)
         mapped_ids = list(memory.island_feature_maps[0].values())
         self.assertEqual(mapped_ids.count("a"), 1)
+
+    def test_checkpoint_restore_excludes_lineage_only_population_records(self) -> None:
+        valid = _solution("valid", "kernel", iteration=1, score=0.8, weight=1)
+        rejected = _solution("rejected", "bad", iteration=2, score=0.0, weight=1)
+        duplicate = _solution("duplicate", "kernel", iteration=3, score=0.8, weight=1)
+        memory = SimpleNamespace(
+            _lock=threading.RLock(),
+            populations={
+                item.solution_id: item for item in (valid, rejected, duplicate)
+            },
+            solutions={item.solution_id: item for item in (valid, rejected, duplicate)},
+            islands=[{"valid"}],
+            elites={"valid", "rejected", "duplicate"},
+            island_feature_maps=[
+                {"0-0-0": "valid", "1-1-1": "rejected", "2-2-2": "duplicate"}
+            ],
+            best_solution_id="duplicate",
+            island_best_solution=["duplicate"],
+            island_capacity=[3],
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            checkpoint = Path(tmp)
+            (checkpoint / "metadata.json").write_text(
+                json.dumps({"islands": [["valid"]]}), encoding="utf-8"
+            )
+            removed = sitecustomize._restore_checkpoint_population_indexes(
+                memory, str(checkpoint)
+            )
+
+        self.assertEqual(removed, 2)
+        self.assertEqual(set(memory.populations), {"valid"})
+        self.assertEqual(set(memory.solutions), {"valid", "rejected", "duplicate"})
+        self.assertEqual(memory.islands, [{"valid"}])
+        self.assertEqual(memory.elites, {"valid"})
+        self.assertEqual(memory.best_solution_id, "valid")
+        self.assertEqual(memory.island_best_solution, ["valid"])
+        self.assertEqual(memory.island_capacity, [1])
+        self.assertEqual(memory.island_feature_maps, [{"0-0-0": "valid"}])
 
 
 class TestAuthoritativeFitnessReconciliation(unittest.TestCase):
@@ -683,6 +735,18 @@ class TestArchitectureIslandRouting(unittest.TestCase):
         architecture_islands.rebuild_architecture_islands(memory, 8, 20)
         memory._atrex_last_migration_iteration = 20
         memory.migration_interval = 20
+        memory._atrex_stagnation_best_marker = (20, 0.8)
+        memory._atrex_stagnation_seed_bucket = None
+        memory._atrex_stagnation_retry_bucket = 4
+        memory._atrex_stagnation_seed_retries = 1
+        memory._atrex_last_stagnation_seed_id = "cub_device_radix"
+        memory._atrex_pending_stagnation_escape = {
+            "expected_iteration": 21,
+            "bucket": 4,
+            "seed_id": "cub_device_radix",
+            "seed_family": "cub_radix_sort",
+            "incumbent_family": "hierarchical_histogram",
+        }
 
         with tempfile.TemporaryDirectory() as tmp:
             checkpoint = Path(tmp) / "checkpoints" / "checkpoint-test"
@@ -696,6 +760,12 @@ class TestArchitectureIslandRouting(unittest.TestCase):
                 payload["atrex_architecture"]["last_migration_iteration"], 20
             )
             self.assertNotIn("coordinates", payload["atrex_architecture"]["pca_model"])
+            stagnation = payload["atrex_architecture"]["stagnation_escape"]
+            self.assertEqual(stagnation["best_marker"], [20, 0.8])
+            self.assertIsNone(stagnation["seed_bucket"])
+            self.assertEqual(stagnation["retry_bucket"], 4)
+            self.assertEqual(stagnation["seed_retries"], 1)
+            self.assertEqual(stagnation["pending_escape"]["expected_iteration"], 21)
 
             restored = _memory(warp, last_iteration=20)
             with mock.patch.object(
@@ -710,6 +780,93 @@ class TestArchitectureIslandRouting(unittest.TestCase):
             self.assertEqual(result["islands"], 8)
             self.assertEqual(result["last_migration_iteration"], 20)
             self.assertEqual(restored._atrex_last_migration_iteration, 20)
+            self.assertEqual(restored._atrex_stagnation_best_marker, (20, 0.8))
+            self.assertIsNone(restored._atrex_stagnation_seed_bucket)
+            self.assertEqual(restored._atrex_stagnation_retry_bucket, 4)
+            self.assertEqual(restored._atrex_stagnation_seed_retries, 1)
+            self.assertEqual(
+                restored._atrex_pending_stagnation_escape["expected_iteration"], 21
+            )
+
+    def test_legacy_checkpoint_recovers_latest_escape_bucket(self) -> None:
+        older = _solution("older", self.WARP_SOURCE, iteration=20, score=0.8, weight=1)
+        newer = _solution(
+            "newer", self.CLUSTER_SOURCE, iteration=40, score=0.7, weight=1
+        )
+        older.metadata["stagnation_escape_satisfied"] = {
+            "expected_iteration": 20,
+            "bucket": 2,
+            "seed_id": "cub_device_radix",
+        }
+        newer.metadata["stagnation_escape_satisfied"] = {
+            "expected_iteration": 40,
+            "bucket": 3,
+            "seed_id": "expert_parallel_scan",
+        }
+        memory = _memory(older, newer, last_iteration=40)
+
+        status = architecture_islands.restore_stagnation_checkpoint_state(memory, {})
+
+        self.assertTrue(status["legacy_reconstructed"])
+        self.assertEqual(memory._atrex_stagnation_best_marker, (20, 0.8))
+        self.assertEqual(memory._atrex_stagnation_seed_bucket, 3)
+        self.assertEqual(memory._atrex_stagnation_retry_bucket, 3)
+        self.assertEqual(memory._atrex_stagnation_seed_retries, 0)
+        self.assertEqual(memory._atrex_last_stagnation_seed_id, "expert_parallel_scan")
+        self.assertIsNone(memory._atrex_pending_stagnation_escape)
+
+    def test_legacy_checkpoint_preserves_remaining_violation_retry(self) -> None:
+        incumbent = _solution(
+            "incumbent", self.CLUSTER_SOURCE, iteration=4, score=0.9, weight=1
+        )
+        violation = _solution(
+            "violation", self.WARP_SOURCE, iteration=40, score=0.0, weight=1
+        )
+        violation.metadata["stagnation_escape_violation"] = {
+            "expected_iteration": 40,
+            "bucket": 3,
+            "seed_id": "cub_device_radix",
+            "retry": 1,
+            "max_attempts": 2,
+        }
+        memory = _memory(incumbent, last_iteration=40)
+        memory.solutions[violation.solution_id] = violation
+
+        status = architecture_islands.restore_stagnation_checkpoint_state(memory, {})
+
+        self.assertTrue(status["legacy_reconstructed"])
+        self.assertIsNone(memory._atrex_stagnation_seed_bucket)
+        self.assertEqual(memory._atrex_stagnation_retry_bucket, 3)
+        self.assertEqual(memory._atrex_stagnation_seed_retries, 1)
+
+    def test_stagnation_state_restores_without_architecture_routing(self) -> None:
+        memory = _memory(last_iteration=20)
+        state = {
+            "version": architecture_islands.STAGNATION_CHECKPOINT_VERSION,
+            "best_marker": [4, 0.9],
+            "seed_bucket": None,
+            "retry_bucket": 2,
+            "seed_retries": 1,
+            "last_seed_id": "cub_device_radix",
+            "pending_escape": {"expected_iteration": 21, "bucket": 2},
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            checkpoint = Path(tmp)
+            (checkpoint / "metadata.json").write_text(
+                json.dumps({"atrex_architecture": {"stagnation_escape": state}}),
+                encoding="utf-8",
+            )
+            status = architecture_islands.restore_stagnation_checkpoint(
+                memory, str(checkpoint)
+            )
+
+        self.assertTrue(status["restored"])
+        self.assertEqual(memory._atrex_stagnation_best_marker, (4, 0.9))
+        self.assertEqual(memory._atrex_stagnation_retry_bucket, 2)
+        self.assertEqual(memory._atrex_stagnation_seed_retries, 1)
+        self.assertEqual(
+            memory._atrex_pending_stagnation_escape["expected_iteration"], 21
+        )
 
 
 if __name__ == "__main__":
