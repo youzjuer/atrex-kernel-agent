@@ -10,46 +10,36 @@ import os
 from pathlib import Path
 
 from orchestrator.loongflow_compat.architecture_islands import (
-    architecture_island_id,
     architecture_label,
-    architecture_tags,
     classify_and_route_solution,
     extract_architecture_features,
     initialize_architecture_memory,
-    island_profile,
     maybe_exchange_islands,
     restore_architecture_checkpoint,
     restore_stagnation_checkpoint,
     validate_architecture_island_count,
     write_architecture_checkpoint,
 )
-from orchestrator.loongflow_compat.sol58_seed_bank import (
-    load_seed_bank,
-    seed_bank_fingerprint,
+from orchestrator.loongflow_compat.checkpoint_compat import (
+    restore_checkpoint_population_indexes as _restore_checkpoint_population_indexes_impl,
+)
+from orchestrator.loongflow_compat.env_flags import enabled as _enabled
+from orchestrator.loongflow_compat.sol58_task_hooks import (
+    _NCU_SUMMARY_MARKER,
+    _append_ncu_summary_instructions,
+    _apply_stagnation_architecture_gate,
+    _finalize_rejected_stagnation_child,
+    _local_best_improved,
+    _patch_summary_ncu_interpretation,
+    _positive_int_env,
+    _stagnation_seed_parent,
+    _stagnation_state,
+    _verify_ncu_patch,
+    _verify_stagnation_seed_bank,
 )
 
 logger = logging.getLogger("atrex.pes_compat")
 PATCH_MANIFEST: dict[str, dict[str, object]] = {}
-
-_NCU_SUMMARY_MARKER = "Atrex NCU evidence protocol"
-_NCU_SUMMARY_INSTRUCTIONS = f"""
-
-### {_NCU_SUMMARY_MARKER}
-The parent and child evaluation JSON may contain `metrics.ncu_analysis`. Interpret it in the
-reflection when present:
-1. Trust counters only when `status` is `completed`; `failed`, `timeout`, `unavailable`, and
-   `skipped` are profiler availability states and must never change the fitness assessment.
-2. NCU covers the named kernel and one representative workload, not end-to-end latency. State
-   that scope and do not generalize one launch to every workload or pipeline stage.
-3. Compare parent and child counters only when workload UUID/axes and profiled kernel role are
-   comparable. Connect code changes -> counter evidence -> measured latency, and identify conflicts
-   between counters and timing instead of forcing a causal story.
-4. Use `findings`, their confidence/evidence, and `optimization_implications` to propose at most
-   three concrete next experiments. Do not invent unavailable metrics or treat heuristic findings
-   as proof.
-5. Include a concise `NCU interpretation` section in the reflection. The evaluator score and
-   correctness result remain the sole promotion criteria.
-"""
 
 
 if os.environ.get("ATREX_LITELLM_DROP_PARAMS", "0") == "1":
@@ -57,8 +47,8 @@ if os.environ.get("ATREX_LITELLM_DROP_PARAMS", "0") == "1":
         import litellm
 
         litellm.drop_params = True
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("Could not enable LiteLLM drop_params compatibility: %s", exc)
 
 
 def _truncate_text(value: object, limit: int) -> object:
@@ -96,7 +86,7 @@ def _compact_solution_record(record: object) -> object:
     if isinstance(evaluation, str):
         try:
             parsed = json.loads(evaluation)
-        except Exception:
+        except (TypeError, ValueError):
             compact["evaluation"] = _truncate_text(
                 evaluation,
                 int(os.environ.get("ATREX_PES_DB_EVALUATION_CHARS", "16384")),
@@ -135,31 +125,6 @@ def _compact_result(value: object) -> object:
     return value
 
 
-def _append_ncu_summary_instructions(prompt: str) -> str:
-    if _NCU_SUMMARY_MARKER in prompt:
-        return prompt
-    return prompt.rstrip() + _NCU_SUMMARY_INSTRUCTIONS
-
-
-def _patch_summary_ncu_interpretation() -> None:
-    if os.environ.get("SOL58_NCU_SUMMARY", "0").strip().lower() not in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }:
-        return
-    try:
-        from agents.math_agent.summary import summary_agent
-    except Exception:
-        return
-
-    prompt = getattr(summary_agent, "EVOLVE_SUMMARY_USER_PROMPT", "")
-    if not isinstance(prompt, str):
-        return
-    summary_agent.EVOLVE_SUMMARY_USER_PROMPT = _append_ncu_summary_instructions(prompt)
-
-
 def _solution_source_hash(solution: object) -> str:
     source = getattr(solution, "solution", solution)
     text = source if isinstance(source, str) else str(source or "")
@@ -177,324 +142,6 @@ def _adaptive_exploration_rate(base_rate: float, recent_scores: list[float]) -> 
         elif all(delta < 0.01 for delta in deltas):
             rate *= 2
     return min(rate, 0.9)
-
-
-def _positive_int_env(name: str, default: int) -> int:
-    try:
-        value = int(os.environ.get(name, str(default)))
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"{name} must be a positive integer") from exc
-    if value <= 0:
-        raise ValueError(f"{name} must be a positive integer")
-    return value
-
-
-def _stagnation_state(memory: object) -> dict[str, float | int | str]:
-    """Measure plateau age from the first iteration that reached the best score."""
-    populations = getattr(memory, "populations", {})
-    candidates = list(populations.values()) if isinstance(populations, dict) else []
-    current_iteration = max(0, int(getattr(memory, "last_iteration", 0) or 0))
-    if not candidates:
-        return {
-            "current_iteration": current_iteration,
-            "best_iteration": current_iteration,
-            "plateau_rounds": 0,
-            "best_score": 0.0,
-            "incumbent_family": "baseline",
-        }
-
-    def score(item: object) -> float:
-        try:
-            return float(getattr(item, "score", 0.0) or 0.0)
-        except (TypeError, ValueError):
-            return 0.0
-
-    best_score = max(score(candidate) for candidate in candidates)
-    best_iterations = [
-        max(0, int(getattr(candidate, "iteration", 0) or 0))
-        for candidate in candidates
-        if abs(score(candidate) - best_score) <= 1e-12
-    ]
-    incumbent = min(
-        (
-            candidate
-            for candidate in candidates
-            if abs(score(candidate) - best_score) <= 1e-12
-        ),
-        key=lambda candidate: int(getattr(candidate, "iteration", 0) or 0),
-    )
-    incumbent_family = architecture_label(
-        extract_architecture_features(getattr(incumbent, "solution", ""))
-    )
-    best_iteration = min(best_iterations, default=current_iteration)
-    current_iteration = max(
-        current_iteration,
-        max(
-            (int(getattr(candidate, "iteration", 0) or 0) for candidate in candidates),
-            default=0,
-        ),
-    )
-    return {
-        "current_iteration": current_iteration,
-        "best_iteration": best_iteration,
-        "plateau_rounds": max(0, current_iteration - best_iteration),
-        "best_score": best_score,
-        "incumbent_family": incumbent_family,
-    }
-
-
-def _stagnation_seed_parent(
-    memory: object,
-    *,
-    requested_island: int | None,
-    num_islands: int,
-) -> dict[str, object] | None:
-    """Return an unscored architecture seed at most once per plateau bucket."""
-    if not _enabled("ATREX_PES_STAGNATION_SEEDS", "0"):
-        return None
-    if os.environ.get("SOL58_CODE_LANGUAGE", "cuda_cpp").strip().lower() not in {
-        "cuda",
-        "cuda_cpp",
-        "auto",
-    }:
-        return None
-
-    threshold = _positive_int_env("ATREX_PES_STAGNATION_ARCHITECTURE_ROUNDS", 12)
-    interval = _positive_int_env("ATREX_PES_STAGNATION_SEED_INTERVAL", 20)
-    state = _stagnation_state(memory)
-    best_marker = (
-        int(state["best_iteration"]),
-        round(float(state["best_score"]), 12),
-    )
-    if getattr(memory, "_atrex_stagnation_best_marker", None) != best_marker:
-        memory._atrex_stagnation_best_marker = best_marker
-        memory._atrex_stagnation_seed_bucket = None
-        memory._atrex_stagnation_retry_bucket = None
-        memory._atrex_stagnation_seed_retries = 0
-    plateau_rounds = int(state["plateau_rounds"])
-    if plateau_rounds < threshold:
-        return None
-    bucket = (plateau_rounds - threshold) // interval
-    if getattr(memory, "_atrex_stagnation_retry_bucket", None) != bucket:
-        memory._atrex_stagnation_retry_bucket = bucket
-        memory._atrex_stagnation_seed_retries = 0
-    if getattr(memory, "_atrex_stagnation_seed_bucket", None) == bucket:
-        return None
-
-    seeds = load_seed_bank(language="cuda_cpp")
-    retries = max(0, int(getattr(memory, "_atrex_stagnation_seed_retries", 0) or 0))
-    seed = seeds[(bucket + retries) % len(seeds)]
-    features = extract_architecture_features(seed.source)
-    detected_family = architecture_label(features)
-    if detected_family != seed.family:
-        raise RuntimeError(
-            f"SOL58 seed {seed.seed_id!r} declares {seed.family!r} but feature "
-            f"analysis classified it as {detected_family!r}"
-        )
-    if num_islands >= 8:
-        seed_island = architecture_island_id(detected_family, 0, num_islands)
-    else:
-        seed_island = int(requested_island or 0) % max(1, int(num_islands))
-
-    directive = (
-        "MANDATORY STAGNATION ESCAPE: treat this unscored seed as a different "
-        f"algorithm-family starting point ({seed.family}). Produce a complete, "
-        "self-contained CUDA architecture experiment. The child must stay in the "
-        f"seed family or another family different from the incumbent family "
-        f"({state['incumbent_family']}). Reconstructing the incumbent family does "
-        "not satisfy this escape unless the evaluator proves a new local best. "
-        "Do not fall back to a constant-only or launch-bound-only edit. Preserve "
-        "stable ordering and all 16-workload correctness."
-    )
-    memory._atrex_stagnation_seed_bucket = bucket
-    memory._atrex_last_stagnation_seed_id = seed.seed_id
-    memory._atrex_pending_stagnation_escape = {
-        "expected_iteration": int(state["current_iteration"]) + 1,
-        "bucket": bucket,
-        "seed_id": seed.seed_id,
-        "seed_family": seed.family,
-        "incumbent_family": str(state["incumbent_family"]),
-    }
-    logger.warning(
-        "Forced stagnation escape at iteration %d (best iteration %d, plateau %d): "
-        "seed=%s family=%s island=%d bank=%s",
-        int(state["current_iteration"]),
-        int(state["best_iteration"]),
-        plateau_rounds,
-        seed.seed_id,
-        seed.family,
-        seed_island,
-        seed_bank_fingerprint(seeds)[:12],
-    )
-    return {
-        "solution": seed.source,
-        "solution_id": "",
-        "generate_plan": directive,
-        "parent_id": "",
-        "island_id": seed_island,
-        "iteration": int(state["current_iteration"]),
-        "generation": 0,
-        "sample_cnt": 0,
-        "sample_weight": 0.05,
-        "score": 0.0,
-        "evaluation": "Unscored architecture seed; evaluator evidence is required.",
-        "summary": f"{directive} Seed purpose: {seed.purpose}",
-        "metadata": {
-            "trace": [],
-            "stagnation_escape": {
-                "required": True,
-                "seed_id": seed.seed_id,
-                "seed_family": seed.family,
-                "current_iteration": int(state["current_iteration"]),
-                "best_iteration": int(state["best_iteration"]),
-                "plateau_rounds": plateau_rounds,
-                "incumbent_score": float(state["best_score"]),
-                "incumbent_family": str(state["incumbent_family"]),
-                "directive": directive,
-            },
-            "source_sha256": seed.source_sha256,
-            "architecture_features": features,
-            "architecture_tags": architecture_tags(features),
-            "architecture_label": detected_family,
-            "architecture_island_id": seed_island,
-            "architecture_home_island_id": seed_island,
-            "architecture_island_profile": island_profile(seed_island),
-        },
-    }
-
-
-def _local_best_improved(solution: object) -> bool:
-    evaluation = getattr(solution, "evaluation", "")
-    if isinstance(evaluation, str):
-        try:
-            evaluation = json.loads(evaluation)
-        except (TypeError, ValueError):
-            return False
-    if not isinstance(evaluation, dict):
-        return False
-    metrics = evaluation.get("metrics")
-    local_best = metrics.get("local_best") if isinstance(metrics, dict) else None
-    return bool(
-        isinstance(local_best, dict) and local_best.get("strictly_improved", False)
-    )
-
-
-def _apply_stagnation_architecture_gate(
-    memory: object,
-    solution: object,
-    child_family: str,
-) -> bool:
-    """Reject a forced escape that silently reconstructs the stagnant family."""
-    pending = getattr(memory, "_atrex_pending_stagnation_escape", None)
-    if not isinstance(pending, dict):
-        return True
-    expected_iteration = int(pending.get("expected_iteration", -1))
-    child_iteration = int(getattr(solution, "iteration", -2) or -2)
-    if child_iteration != expected_iteration:
-        if child_iteration > expected_iteration:
-            logger.warning(
-                "Discarding stale stagnation escape gate for iteration %d while "
-                "adding iteration %d",
-                expected_iteration,
-                child_iteration,
-            )
-            memory._atrex_pending_stagnation_escape = None
-        return True
-
-    memory._atrex_pending_stagnation_escape = None
-    incumbent_family = str(pending.get("incumbent_family") or "")
-    metadata = getattr(solution, "metadata", None)
-    if not isinstance(metadata, dict):
-        metadata = {}
-        solution.metadata = metadata
-    local_best_improved = _local_best_improved(solution)
-    if child_family != incumbent_family or local_best_improved:
-        metadata["stagnation_escape_satisfied"] = {
-            **pending,
-            "child_family": child_family,
-            "local_best_improved": local_best_improved,
-        }
-        memory._atrex_stagnation_seed_retries = 0
-        return True
-
-    original_score = float(getattr(solution, "score", 0.0) or 0.0)
-    max_attempts = _positive_int_env("ATREX_PES_STAGNATION_MAX_ATTEMPTS", 2)
-    retry_bucket = int(pending.get("bucket", -1))
-    if getattr(memory, "_atrex_stagnation_retry_bucket", None) != retry_bucket:
-        memory._atrex_stagnation_retry_bucket = retry_bucket
-        memory._atrex_stagnation_seed_retries = 0
-    retries = max(0, int(getattr(memory, "_atrex_stagnation_seed_retries", 0) or 0)) + 1
-    memory._atrex_stagnation_seed_retries = retries
-    if retries < max_attempts:
-        memory._atrex_stagnation_seed_bucket = None
-
-    violation = {
-        **pending,
-        "child_family": child_family,
-        "reason": "child reconstructed the stagnant incumbent family without a new local best",
-        "score_before_gate": original_score,
-        "retry": retries,
-        "max_attempts": max_attempts,
-    }
-    metadata["stagnation_escape_violation"] = violation
-    solution.score = 0.0
-    evaluation = getattr(solution, "evaluation", "")
-    payload = evaluation if isinstance(evaluation, dict) else None
-    if isinstance(evaluation, str):
-        try:
-            payload = json.loads(evaluation)
-        except (TypeError, ValueError):
-            payload = None
-    if isinstance(payload, dict):
-        payload["score"] = 0.0
-        metrics = payload.setdefault("metrics", {})
-        if isinstance(metrics, dict):
-            metrics["architecture_escape_gate"] = violation
-        if isinstance(evaluation, str):
-            solution.evaluation = json.dumps(payload, ensure_ascii=False, indent=2)
-    logger.error(
-        "Rejected stagnation escape child at iteration %d: seed=%s incumbent=%s "
-        "child=%s score=%.6f retry=%d/%d",
-        child_iteration,
-        pending.get("seed_id"),
-        incumbent_family,
-        child_family,
-        original_score,
-        retries,
-        max_attempts,
-    )
-    return False
-
-
-def _finalize_rejected_stagnation_child(memory: object, solution: object) -> str:
-    """Advance iteration bookkeeping without admitting the rejected child anywhere."""
-    lock = getattr(memory, "_lock", None)
-    if lock is None:
-        raise RuntimeError("stagnation rejection requires an evolution-memory lock")
-    with lock:
-        prepare = getattr(memory, "_prepare_solution", None)
-        if callable(prepare):
-            prepare(solution)
-        else:
-            child_iteration = int(getattr(solution, "iteration", 0) or 0)
-            memory.last_iteration = max(
-                int(getattr(memory, "last_iteration", 0) or 0), child_iteration
-            )
-        solution_id = str(getattr(solution, "solution_id", "") or "")
-        if not solution_id:
-            raise RuntimeError("rejected stagnation child has no solution id")
-        metadata = getattr(solution, "metadata", None)
-        if not isinstance(metadata, dict):
-            metadata = {}
-            solution.metadata = metadata
-        metadata["database_admission"] = "rejected_stagnation_escape"
-    logger.warning(
-        "Hard-rejected stagnation escape child %s at iteration %d; no history or "
-        "population record was created",
-        solution_id,
-        int(getattr(solution, "iteration", 0) or 0),
-    )
-    return solution_id
 
 
 def _canonical_solution(solutions: list[object]) -> object:
@@ -523,7 +170,13 @@ def _load_authoritative_fitness_registry() -> dict[str, dict[str, object]]:
         return {}
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
+    except (OSError, TypeError, ValueError) as exc:
+        logger.warning(
+            "Ignoring unreadable authoritative fitness registry %s: %s: %s",
+            path,
+            type(exc).__name__,
+            exc,
+        )
         return {}
     sources = payload.get("sources") if isinstance(payload, dict) else None
     return sources if isinstance(sources, dict) else {}
@@ -535,8 +188,13 @@ def _reconcile_authoritative_scores(memory: object) -> int:
     solutions = getattr(memory, "solutions", None)
     populations = getattr(memory, "populations", None)
     lock = getattr(memory, "_lock", None)
-    if not registry or not isinstance(solutions, dict) or lock is None:
+    if not registry:
         return 0
+    if not isinstance(solutions, dict) or not isinstance(populations, dict) or lock is None:
+        raise RuntimeError(
+            "authoritative fitness reconciliation requires LoongFlow "
+            "solutions/populations dictionaries and _lock"
+        )
 
     changed_ids: set[str] = set()
     with lock:
@@ -615,12 +273,14 @@ def _deduplicate_memory_indexes(memory: object) -> int:
     populations = getattr(memory, "populations", None)
     islands = getattr(memory, "islands", None)
     if not isinstance(populations, dict) or not isinstance(islands, list):
-        return 0
+        raise RuntimeError(
+            "source deduplication requires LoongFlow populations:dict and islands:list"
+        )
 
     duplicate_to_canonical: dict[str, str] = {}
     lock = getattr(memory, "_lock", None)
     if lock is None:
-        return 0
+        raise RuntimeError("source deduplication requires LoongFlow memory._lock")
 
     with lock:
         assigned_ids = set().union(*islands) if islands else set()
@@ -712,78 +372,11 @@ def _deduplicate_memory_indexes(memory: object) -> int:
     return len(duplicate_to_canonical)
 
 
-def _restore_checkpoint_population_indexes(memory: object, checkpoint_path: str) -> int:
-    """Undo upstream checkpoint loading of lineage-only records into populations."""
-    metadata_path = Path(checkpoint_path) / "metadata.json"
-    try:
-        payload = json.loads(metadata_path.read_text(encoding="utf-8"))
-    except (OSError, TypeError, ValueError):
-        return 0
-    saved_islands = payload.get("islands")
-    if not isinstance(saved_islands, list) or not all(
-        isinstance(island, list) for island in saved_islands
-    ):
-        return 0
-    selectable_ids = {
-        str(solution_id)
-        for island in saved_islands
-        for solution_id in island
-        if solution_id
-    }
-    populations = getattr(memory, "populations", None)
-    solutions = getattr(memory, "solutions", None)
-    islands = getattr(memory, "islands", None)
-    lock = getattr(memory, "_lock", None)
-    if (
-        not isinstance(populations, dict)
-        or not isinstance(solutions, dict)
-        or not isinstance(islands, list)
-        or lock is None
-    ):
-        return 0
-
-    with lock:
-        loaded_ids = set(populations)
-        valid_ids = selectable_ids & set(solutions)
-        populations.clear()
-        populations.update(
-            {solution_id: solutions[solution_id] for solution_id in valid_ids}
-        )
-        for island in islands:
-            if isinstance(island, set):
-                island.intersection_update(valid_ids)
-
-        elites = getattr(memory, "elites", None)
-        if isinstance(elites, set):
-            elites.intersection_update(valid_ids)
-        feature_maps = getattr(memory, "island_feature_maps", None)
-        if isinstance(feature_maps, list):
-            for feature_map in feature_maps:
-                if not isinstance(feature_map, dict):
-                    continue
-                for key, solution_id in list(feature_map.items()):
-                    if solution_id not in valid_ids:
-                        feature_map.pop(key, None)
-
-        if getattr(memory, "best_solution_id", None) not in valid_ids:
-            memory.best_solution_id = (
-                _canonical_solution(list(populations.values())).solution_id
-                if populations
-                else None
-            )
-        memory.island_best_solution = [
-            (
-                _canonical_solution(
-                    [populations[solution_id] for solution_id in island]
-                ).solution_id
-                if island
-                else None
-            )
-            for island in islands
-        ]
-        if hasattr(memory, "island_capacity"):
-            memory.island_capacity = [len(island) for island in islands]
-    return len(loaded_ids - valid_ids)
+def _restore_checkpoint_population_indexes(memory: object, checkpoint_path: str):
+    """Validate and repair selectable checkpoint indexes, or fail with context."""
+    return _restore_checkpoint_population_indexes_impl(
+        memory, checkpoint_path, _canonical_solution
+    )
 
 
 def _require_signature(callable_obj: object, expected: tuple[str, ...]) -> None:
@@ -818,8 +411,8 @@ def _patch_evolution_database_selection() -> None:
             select_parents_with_dynamic_temperature,
         )
         from loongflow.framework.pes.database.database import EvolveDatabase
-    except Exception:
-        return
+    except Exception as exc:
+        raise RuntimeError("cannot import LoongFlow evolution database targets") from exc
 
     if getattr(EvolveDatabase, "_atrex_evolution_patched", False):
         return
@@ -913,7 +506,10 @@ def _patch_evolution_database_selection() -> None:
     def patched_sample_solution(self, island_id=None):
         memory = getattr(self._evolution_memory, "_memory", None)
         if memory is None:
-            return {}
+            raise RuntimeError(
+                "LoongFlow compatibility contract mismatch: "
+                "EvolveDatabase._evolution_memory._memory is unavailable"
+            )
 
         if architecture_enabled:
             num_islands, migration_interval = architecture_settings(self)
@@ -969,7 +565,10 @@ def _patch_evolution_database_selection() -> None:
         memory = getattr(self._evolution_memory, "_memory", None)
         source = getattr(solution, "solution", "")
         if memory is None:
-            return await original_add_solution(self, solution)
+            raise RuntimeError(
+                "LoongFlow compatibility contract mismatch while adding a solution: "
+                "EvolveDatabase._evolution_memory._memory is unavailable"
+            )
 
         child_family = "baseline"
         if architecture_enabled:
@@ -1059,15 +658,21 @@ def _patch_evolution_database_selection() -> None:
         result = original_load_checkpoint(self, checkpoint_path)
         memory = getattr(self._evolution_memory, "_memory", None)
         if memory is None:
-            return result
-        removed_history = _restore_checkpoint_population_indexes(
+            raise RuntimeError(
+                "LoongFlow compatibility contract mismatch after checkpoint load: "
+                "EvolveDatabase._evolution_memory._memory is unavailable"
+            )
+        population_restore = _restore_checkpoint_population_indexes(
             memory, checkpoint_path
         )
-        if removed_history:
-            logger.info(
-                "Excluded %d lineage-only checkpoint records from selectable population",
-                removed_history,
-            )
+        logger.info(
+            "Restored checkpoint population indexes: selectable=%d loaded=%d "
+            "lineage_excluded=%d metadata=%s",
+            population_restore.selectable_population_count,
+            population_restore.loaded_population_count,
+            population_restore.removed_lineage_count,
+            population_restore.metadata_path,
+        )
         _reconcile_authoritative_scores(memory)
         if source_dedup_enabled:
             removed = _deduplicate_memory_indexes(memory)
@@ -1110,6 +715,11 @@ def _patch_evolution_database_selection() -> None:
     async def patched_save_checkpoint(self, checkpoint_path, tag):
         result = await original_save_checkpoint(self, checkpoint_path, tag)
         memory = getattr(self._evolution_memory, "_memory", None)
+        if (architecture_enabled or stagnation_seeds_enabled) and memory is None:
+            raise RuntimeError(
+                "LoongFlow compatibility contract mismatch after checkpoint save: "
+                "EvolveDatabase._evolution_memory._memory is unavailable"
+            )
         if (architecture_enabled or stagnation_seeds_enabled) and memory is not None:
             if not write_architecture_checkpoint(memory, checkpoint_path, tag):
                 logger.warning(
@@ -1143,8 +753,8 @@ def _patch_database_tools() -> None:
         return
     try:
         from loongflow.framework.pes.database import database_tool
-    except Exception:
-        return
+    except Exception as exc:
+        raise RuntimeError("cannot import LoongFlow database tool targets") from exc
 
     for class_name in (
         "GetSolutionsTool",
@@ -1174,8 +784,8 @@ def _patch_planner_write_tool() -> None:
         from agents.math_agent.planner import build_tool
         from loongflow.agentsdk.tools import FunctionTool
         from loongflow.framework.pes.context import Workspace
-    except Exception:
-        return
+    except Exception as exc:
+        raise RuntimeError("cannot import LoongFlow planner Write targets") from exc
 
     if getattr(build_tool, "_atrex_write_patched", False):
         return
@@ -1227,8 +837,8 @@ def _patch_planner_empty_plan_fallback() -> None:
     try:
         from agents.math_agent.planner.plan_agent import EvolvePlanAgent
         from loongflow.agentsdk.message import ContentElement
-    except Exception:
-        return
+    except Exception as exc:
+        raise RuntimeError("cannot import LoongFlow planner fallback targets") from exc
 
     if getattr(EvolvePlanAgent, "_atrex_empty_plan_patched", False):
         return
@@ -1276,8 +886,8 @@ def _patch_planner_empty_plan_fallback() -> None:
                     "5. Return a complete candidate source and rely on the evaluator as the only promotion gate.\n"
                 )
             best_plan_path.write_text(fallback, encoding="utf-8")
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("Could not materialize planner fallback plan: %s", exc)
         return result
 
     EvolvePlanAgent.run = patched_run
@@ -1290,15 +900,17 @@ def _patch_fuse_executor_parallel_cap() -> None:
         return
     try:
         cap = max(1, int(cap_raw))
-    except ValueError:
-        return
+    except ValueError as exc:
+        raise ValueError(
+            "ATREX_PES_MAX_PARALLEL_CANDIDATES must be an integer"
+        ) from exc
 
     try:
         from agents.math_agent.executor.execute_fuse.execute_agent_fuse import (
             EvolveExecuteAgentFuse,
         )
-    except Exception:
-        return
+    except Exception as exc:
+        raise RuntimeError("cannot import LoongFlow fuse executor target") from exc
 
     if getattr(EvolveExecuteAgentFuse, "_atrex_parallel_cap_patched", False):
         return
@@ -1337,15 +949,6 @@ def _patch_fuse_executor_parallel_cap() -> None:
     EvolveExecuteAgentFuse._atrex_parallel_cap_patched = True
 
 
-def _enabled(name: str, default: str = "1") -> bool:
-    return os.environ.get(name, default).strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
-
-
 def _verify_evolution_patch() -> tuple[bool, str]:
     if not (
         _enabled("ATREX_PES_SOURCE_DEDUP")
@@ -1371,18 +974,6 @@ def _verify_evolution_patch() -> tuple[bool, str]:
     ):
         return False, "stagnation seed sampler sentinel missing"
     return True, "EvolveDatabase/InMemory"
-
-
-def _verify_stagnation_seed_bank() -> tuple[bool, str]:
-    if not _enabled("ATREX_PES_STAGNATION_SEEDS", "0"):
-        return True, "disabled"
-    seeds = load_seed_bank(language="cuda_cpp")
-    families = {seed.family for seed in seeds}
-    required = {"cub_radix_sort", "expert_parallel_scan"}
-    missing = sorted(required - families)
-    if missing:
-        return False, f"missing architecture seed families {missing}"
-    return True, f"{len(seeds)} CUDA seeds sha256={seed_bank_fingerprint(seeds)[:12]}"
 
 
 def _verify_database_tools_patch() -> tuple[bool, str]:
@@ -1433,16 +1024,6 @@ def _verify_fuse_patch() -> tuple[bool, str]:
         getattr(EvolveExecuteAgentFuse, "_atrex_parallel_cap_patched", False)
     )
     return applied, "fuse parallel cap" if applied else "fuse cap sentinel missing"
-
-
-def _verify_ncu_patch() -> tuple[bool, str]:
-    if not _enabled("SOL58_NCU_SUMMARY", "0"):
-        return True, "disabled"
-    from agents.math_agent.summary import summary_agent
-
-    prompt = getattr(summary_agent, "EVOLVE_SUMMARY_USER_PROMPT", "")
-    applied = isinstance(prompt, str) and _NCU_SUMMARY_MARKER in prompt
-    return applied, "summary NCU prompt" if applied else "summary NCU marker missing"
 
 
 def _apply_manifest_patch(

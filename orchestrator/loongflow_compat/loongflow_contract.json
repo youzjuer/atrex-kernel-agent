@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "expected_commit": "379d093d13edde085f7b984a9648437af3958543",
+  "required_paths": [
+    "agents/math_agent/math_evolve_agent.py",
+    "src/loongflow/framework/pes/database/database.py",
+    "src/loongflow/agentsdk/memory/evolution/in_memory.py",
+    "agents/math_agent/planner/plan_agent.py",
+    "agents/math_agent/executor/execute_fuse/execute_agent_fuse.py",
+    "agents/math_agent/summary/summary_agent.py"
+  ]
+}

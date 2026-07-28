@@ -137,22 +137,27 @@ JIT-compiles for the local `sm_103` device, so remote v1.1 remains the authorita
 architecture-sensitive changes.
 
 For `sol58`, `SOL58_OFFICIAL_FITNESS=1` is the default. The evaluator first runs the local
-SOL-ExecBench correctness and local-best gates, then submits only a strict local improvement as a
-private official B200 v1.1 submission. Completed official submissions return the authoritative
-`sol_score`. By default, `SOL58_OFFICIAL_ASYNC_SUBMIT=1` returns
+SOL-ExecBench correctness and statistical local-best gates. A confirmed local improvement is sent
+as a private official B200 v1.1 submission; a candidate inside the measurement uncertainty band may
+also use one rate-limited challenger slot without replacing the persisted local best. Completed
+official submissions return the authoritative `sol_score`. By default,
+`SOL58_OFFICIAL_ASYNC_SUBMIT=1` returns
 as soon as the upload is accepted, schedules a one-shot status refresh, and then waits until the
 server's `result_available_at` before refreshing again on a later cache hit. If the official service remains pending,
-the evaluator returns a target-capped score anchored to the completed official incumbent so PES keeps
-exploring without comparing raw local ratios to official scores. A locally slower child cannot outrank
-that incumbent, and provisional scores are never accepted as a leaderboard/rank result. Set
+the evaluator returns an incumbent-anchored provisional selection score and exposes the uncapped
+`search_score` separately so PES preserves candidate ordering. Only a completed official result sets
+`certified_score` and `target_certified`; provisional scores are never accepted as a leaderboard/rank
+result. Set
 `SOL58_OFFICIAL_FITNESS=0` only for local dry-runs where official fitness is not needed.
 
 Remote submissions are also protected by a local-best gate. Every locally correct candidate is
 measured three complete times (`SOL58_LOCAL_REPEAT_COUNT=3`), and the median geomean latency is
-compared with the persisted local best. Only a strict improvement is uploaded to official v1.1;
-non-improving candidates remain available to PES through incumbent-anchored provisional fitness
-without using a remote submission slot. Exact source-hash duplicates of the validated local-best
-reuse its existing three-repeat result and official score instead of rerunning CUDA.
+compared with the persisted local best. Non-slower candidates are remeasured in alternating
+candidate/incumbent pairs and classified as confirmed faster, confirmed slower, or uncertain from a
+configurable noise band. Confirmed faster candidates replace the local best and are uploaded;
+uncertain candidates within the tolerance may be uploaded at most once per cooldown, while confirmed
+slower candidates remain local. Exact source-hash duplicates reuse cached local and official results
+instead of rerunning CUDA.
 
 The SOL58 runner enables Summary-stage Nsight Compute evidence by default. Profiling starts only after
 the normal correctness and timing passes, targets the slowest measured workload and first matching
@@ -183,6 +188,26 @@ home members are reclassified, and each island exchanges its top fraction with a
 `SOL58_NUM_ISLANDS` and `SOL58_ARCHITECTURE_MIGRATION_INTERVAL` override these defaults. Architecture
 metadata and migration state are persisted in every checkpoint; legacy one-island checkpoints are
 expanded and reindexed on load.
+
+Every SOL58 launch writes a redacted run record under
+`<run-dir>/run_manifests/<UTC-time>-<pid>/` and updates `<run-dir>/run_manifest.json`. The record
+contains the resolved `SOL58_*`, `ATREX_*`, and `LLM_*` settings with their
+source precedence, CLI arguments, copied resolved YAML/task prompt, source hashes, repository commits,
+and a search-configuration fingerprint. API keys, bearer tokens, passwords, and credentials are
+redacted before anything is persisted.
+
+The process-wide LoongFlow adapter is guarded by a pinned upstream contract in
+`orchestrator/loongflow_compat/loongflow_contract.json`. The runner fails before GPU or LLM work when
+the checkout commit, required files, private-memory contract, or required patch sentinels do not
+match. `ATREX_LOONGFLOW_EXPECTED_COMMIT` deliberately selects another reviewed commit;
+`ATREX_LOONGFLOW_ALLOW_UNPINNED=1` and `ATREX_LOONGFLOW_ALLOW_DIRTY=1` are explicit development-only
+overrides. Generic upstream integration remains in `sitecustomize.py`; kernel-58 NCU and stagnation
+policy lives in `sol58_task_hooks.py`.
+
+`tools/evolution_db.py` supports the standalone linear optimizer and its workspace memory. It is not
+the authoritative database used by full-agent PES; LoongFlow owns that population, lineage, island,
+and checkpoint state. Core bridge, evaluator, NCU, manifest, compatibility-contract, and standalone
+database tests run in `.github/workflows/tests.yml` without requiring a GPU.
 
 ## Main Files
 

@@ -1,0 +1,32 @@
+name: Tests
+
+on:
+  pull_request:
+  push:
+
+permissions:
+  contents: read
+
+jobs:
+  core:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install test dependencies
+        run: python -m pip install 'pytest>=8,<9' 'numpy>=1.26,<3'
+      - name: Validate shell entrypoints
+        run: bash -n orchestrator/run_sol58_pes.sh orchestrator/pes.sh
+      - name: Run core unit tests
+        env:
+          PYTHONPATH: ${{ github.workspace }}:${{ github.workspace }}/tools
+        run: |
+          python -m pytest -q \
+            tools/test_evolution_db.py \
+            orchestrator/sol58_pes/test_eval_program_sol58.py \
+            orchestrator/sol58_pes/test_ncu_summary.py \
+            orchestrator/loongflow_compat/test_sitecustomize.py \
+            orchestrator/loongflow_compat/test_upstream_contract.py \
+            orchestrator/test_run_manifest.py

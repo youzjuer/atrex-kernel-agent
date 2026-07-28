@@ -12,6 +12,9 @@ from unittest import mock
 
 from orchestrator.loongflow_compat import architecture_islands
 from orchestrator.loongflow_compat import sitecustomize
+from orchestrator.loongflow_compat.checkpoint_compat import (
+    CheckpointCompatibilityError,
+)
 from orchestrator.loongflow_compat.sol58_seed_bank import (
     load_seed_bank,
     seed_bank_fingerprint,
@@ -427,11 +430,13 @@ class TestSourceDeduplication(unittest.TestCase):
             (checkpoint / "metadata.json").write_text(
                 json.dumps({"islands": [["valid"]]}), encoding="utf-8"
             )
-            removed = sitecustomize._restore_checkpoint_population_indexes(
+            report = sitecustomize._restore_checkpoint_population_indexes(
                 memory, str(checkpoint)
             )
 
-        self.assertEqual(removed, 2)
+        self.assertEqual(report.removed_lineage_count, 2)
+        self.assertEqual(report.selectable_population_count, 1)
+        self.assertEqual(report.loaded_population_count, 3)
         self.assertEqual(set(memory.populations), {"valid"})
         self.assertEqual(set(memory.solutions), {"valid", "rejected", "duplicate"})
         self.assertEqual(memory.islands, [{"valid"}])
@@ -440,6 +445,34 @@ class TestSourceDeduplication(unittest.TestCase):
         self.assertEqual(memory.island_best_solution, ["valid"])
         self.assertEqual(memory.island_capacity, [1])
         self.assertEqual(memory.island_feature_maps, [{"0-0-0": "valid"}])
+
+    def test_checkpoint_restore_rejects_malformed_metadata(self) -> None:
+        memory = _memory(_solution("valid", "kernel", iteration=1, score=0.8, weight=1))
+        with tempfile.TemporaryDirectory() as tmp:
+            checkpoint = Path(tmp)
+            (checkpoint / "metadata.json").write_text("{not-json", encoding="utf-8")
+            with self.assertRaisesRegex(
+                CheckpointCompatibilityError, "not valid JSON"
+            ):
+                sitecustomize._restore_checkpoint_population_indexes(
+                    memory, str(checkpoint)
+                )
+
+    def test_checkpoint_restore_rejects_memory_contract_drift(self) -> None:
+        valid = _solution("valid", "kernel", iteration=1, score=0.8, weight=1)
+        memory = _memory(valid)
+        memory._lock = None
+        with tempfile.TemporaryDirectory() as tmp:
+            checkpoint = Path(tmp)
+            (checkpoint / "metadata.json").write_text(
+                json.dumps({"islands": [["valid"]]}), encoding="utf-8"
+            )
+            with self.assertRaisesRegex(
+                CheckpointCompatibilityError, "_lock:context-manager"
+            ):
+                sitecustomize._restore_checkpoint_population_indexes(
+                    memory, str(checkpoint)
+                )
 
 
 class TestAuthoritativeFitnessReconciliation(unittest.TestCase):

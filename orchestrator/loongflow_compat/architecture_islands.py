@@ -1229,7 +1229,12 @@ def restore_architecture_checkpoint(
         candidate = payload.get("atrex_architecture", {})
         if isinstance(candidate, dict):
             state = candidate
-    except Exception:
+    except (OSError, TypeError, ValueError) as exc:
+        logger.warning(
+            "Ignoring unavailable architecture checkpoint state %s: %s",
+            metadata_path,
+            exc,
+        )
         state = {}
 
     with _lock_context(memory):

@@ -6,6 +6,33 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 TASK_DIR="${REPO_ROOT}/orchestrator/sol58_pes"
+ORIGINAL_ARGS=("$@")
+CLI_OVERRIDE_KEYS=()
+INPUT_ENV_SNAPSHOT="$(mktemp --suffix=.json -t sol58_initial_env.XXXXXX)"
+CLOCKS_LOCKED_BY_RUNNER=0
+RENDERED_CONFIG=""
+RENDERED_TASK=""
+
+is_truthy() {
+  case "${1,,}" in
+    1|true|yes|on) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+cleanup() {
+  rm -f "${INPUT_ENV_SNAPSHOT:-}" "${RENDERED_CONFIG:-}" "${RENDERED_TASK:-}"
+  if ((CLOCKS_LOCKED_BY_RUNNER)) && is_truthy "${SOL58_UNLOCK_CLOCKS_ON_EXIT:-1}"; then
+    sudo -n nvidia-smi -i "${SOL58_CLOCK_GPU_INDEX}" -rgc >/dev/null 2>&1 || true
+    sudo -n nvidia-smi -i "${SOL58_CLOCK_GPU_INDEX}" -rmc >/dev/null 2>&1 || true
+  fi
+}
+
+trap cleanup EXIT
+trap 'exit 130' INT TERM
+
+python "${REPO_ROOT}/orchestrator/run_manifest.py" capture-env \
+  --output "${INPUT_ENV_SNAPSHOT}"
 
 RUNNER_ARGS=()
 while (($#)); do
@@ -16,10 +43,12 @@ while (($#)); do
         exit 2
       fi
       SOL58_CODE_LANGUAGE="$2"
+      CLI_OVERRIDE_KEYS+=("SOL58_CODE_LANGUAGE")
       shift 2
       ;;
     --code-language=*)
       SOL58_CODE_LANGUAGE="${1#*=}"
+      CLI_OVERRIDE_KEYS+=("SOL58_CODE_LANGUAGE")
       shift
       ;;
     --cutedsl-rate|--cute-dsl-rate)
@@ -28,10 +57,12 @@ while (($#)); do
         exit 2
       fi
       SOL58_CUTEDSL_GENERATION_RATE="$2"
+      CLI_OVERRIDE_KEYS+=("SOL58_CUTEDSL_GENERATION_RATE")
       shift 2
       ;;
     --cutedsl-rate=*|--cute-dsl-rate=*)
       SOL58_CUTEDSL_GENERATION_RATE="${1#*=}"
+      CLI_OVERRIDE_KEYS+=("SOL58_CUTEDSL_GENERATION_RATE")
       shift
       ;;
     --cutedsl-period|--cute-dsl-period)
@@ -40,10 +71,12 @@ while (($#)); do
         exit 2
       fi
       SOL58_CUTEDSL_SCHEDULE_PERIOD="$2"
+      CLI_OVERRIDE_KEYS+=("SOL58_CUTEDSL_SCHEDULE_PERIOD")
       shift 2
       ;;
     --cutedsl-period=*|--cute-dsl-period=*)
       SOL58_CUTEDSL_SCHEDULE_PERIOD="${1#*=}"
+      CLI_OVERRIDE_KEYS+=("SOL58_CUTEDSL_SCHEDULE_PERIOD")
       shift
       ;;
     --measurement-profile)
@@ -52,10 +85,12 @@ while (($#)); do
         exit 2
       fi
       SOL58_MEASUREMENT_PROFILE="$2"
+      CLI_OVERRIDE_KEYS+=("SOL58_MEASUREMENT_PROFILE")
       shift 2
       ;;
     --measurement-profile=*)
       SOL58_MEASUREMENT_PROFILE="${1#*=}"
+      CLI_OVERRIDE_KEYS+=("SOL58_MEASUREMENT_PROFILE")
       shift
       ;;
     --clock-gpu-index)
@@ -64,18 +99,22 @@ while (($#)); do
         exit 2
       fi
       SOL58_CLOCK_GPU_INDEX="$2"
+      CLI_OVERRIDE_KEYS+=("SOL58_CLOCK_GPU_INDEX")
       shift 2
       ;;
     --clock-gpu-index=*)
       SOL58_CLOCK_GPU_INDEX="${1#*=}"
+      CLI_OVERRIDE_KEYS+=("SOL58_CLOCK_GPU_INDEX")
       shift
       ;;
     --ncu-summary)
       SOL58_NCU_SUMMARY=1
+      CLI_OVERRIDE_KEYS+=("SOL58_NCU_SUMMARY")
       shift
       ;;
     --no-ncu-summary)
       SOL58_NCU_SUMMARY=0
+      CLI_OVERRIDE_KEYS+=("SOL58_NCU_SUMMARY")
       shift
       ;;
     --ncu-policy)
@@ -84,10 +123,12 @@ while (($#)); do
         exit 2
       fi
       SOL58_NCU_PROFILE_POLICY="$2"
+      CLI_OVERRIDE_KEYS+=("SOL58_NCU_PROFILE_POLICY")
       shift 2
       ;;
     --ncu-policy=*)
       SOL58_NCU_PROFILE_POLICY="${1#*=}"
+      CLI_OVERRIDE_KEYS+=("SOL58_NCU_PROFILE_POLICY")
       shift
       ;;
     --ncu-timeout)
@@ -96,10 +137,12 @@ while (($#)); do
         exit 2
       fi
       SOL58_NCU_TIMEOUT="$2"
+      CLI_OVERRIDE_KEYS+=("SOL58_NCU_TIMEOUT")
       shift 2
       ;;
     --ncu-timeout=*)
       SOL58_NCU_TIMEOUT="${1#*=}"
+      CLI_OVERRIDE_KEYS+=("SOL58_NCU_TIMEOUT")
       shift
       ;;
     --ncu-workload)
@@ -108,10 +151,12 @@ while (($#)); do
         exit 2
       fi
       SOL58_NCU_WORKLOAD="$2"
+      CLI_OVERRIDE_KEYS+=("SOL58_NCU_WORKLOAD")
       shift 2
       ;;
     --ncu-workload=*)
       SOL58_NCU_WORKLOAD="${1#*=}"
+      CLI_OVERRIDE_KEYS+=("SOL58_NCU_WORKLOAD")
       shift
       ;;
     *)
@@ -156,7 +201,7 @@ PY
 
 CONTEST_ROOT="${MLSYS26_FLASHINFER_CONTEST_ROOT:-/home/youchunbo/code/mlsys26-flashinfer-contest}"
 PROJECT_ROOT="${CONTEST_ROOT}/full-agent/moe/agent/loongflow"
-RUN_DIR="${SOL58_PES_RUN_DIR:-/tmp/sol58_pes_run}"
+RUN_DIR="$(realpath -m "${SOL58_PES_RUN_DIR:-/tmp/sol58_pes_run}")"
 
 export PYTHONPATH="${REPO_ROOT}:${SCRIPT_DIR}/loongflow_compat:${PROJECT_ROOT}:${PROJECT_ROOT}/src:${PYTHONPATH:-}"
 export ATREX_LITELLM_DROP_PARAMS="${ATREX_LITELLM_DROP_PARAMS:-1}"
@@ -191,7 +236,7 @@ export SOL58_OFFICIAL_PENDING_SCORE_POLICY="${SOL58_OFFICIAL_PENDING_SCORE_POLIC
 DEFAULT_PROVISIONAL_SCORE_CAP="$(awk -v target="${SOL58_TARGET_SCORE}" 'BEGIN { printf "%.6f", target - 0.005 }')"
 export SOL58_OFFICIAL_PROVISIONAL_SCORE_CAP="${SOL58_OFFICIAL_PROVISIONAL_SCORE_CAP:-${DEFAULT_PROVISIONAL_SCORE_CAP}}"
 
-export SOL58_PES_WORKSPACE="${SOL58_PES_WORKSPACE:-${RUN_DIR}/output}"
+export SOL58_PES_WORKSPACE="$(realpath -m "${SOL58_PES_WORKSPACE:-${RUN_DIR}/output}")"
 export SOL58_MAX_ITERATIONS="${SOL58_MAX_ITERATIONS:-40}"
 export SOL58_PES_CONCURRENCY="${SOL58_PES_CONCURRENCY:-1}"
 export SOL58_NUM_ISLANDS="${SOL58_NUM_ISLANDS:-8}"
@@ -285,13 +330,6 @@ export ATREX_PES_DB_SOLUTION_CHARS="${ATREX_PES_DB_SOLUTION_CHARS:-65536}"
 export ATREX_PES_DB_SUMMARY_CHARS="${ATREX_PES_DB_SUMMARY_CHARS:-16384}"
 export ATREX_PES_DB_EVALUATION_CHARS="${ATREX_PES_DB_EVALUATION_CHARS:-16384}"
 
-is_truthy() {
-  case "${1,,}" in
-    1|true|yes|on) return 0 ;;
-    *) return 1 ;;
-  esac
-}
-
 if [[ ! "${SOL58_NUM_ISLANDS}" =~ ^[1-9][0-9]*$ ]]; then
   echo "error: SOL58_NUM_ISLANDS must be a positive integer" >&2
   exit 2
@@ -314,21 +352,6 @@ if is_truthy "${SOL58_PES_KNOWLEDGE_GROUNDING}" && [[ ! -f "${SOL58_PES_KNOWLEDG
   echo "error: SOL58 knowledge pack not found: ${SOL58_PES_KNOWLEDGE_PACK}" >&2
   exit 1
 fi
-
-CLOCKS_LOCKED_BY_RUNNER=0
-RENDERED_CONFIG=""
-RENDERED_TASK=""
-
-cleanup() {
-  rm -f "${RENDERED_CONFIG:-}" "${RENDERED_TASK:-}"
-  if ((CLOCKS_LOCKED_BY_RUNNER)) && is_truthy "${SOL58_UNLOCK_CLOCKS_ON_EXIT:-1}"; then
-    sudo -n nvidia-smi -i "${SOL58_CLOCK_GPU_INDEX}" -rgc >/dev/null 2>&1 || true
-    sudo -n nvidia-smi -i "${SOL58_CLOCK_GPU_INDEX}" -rmc >/dev/null 2>&1 || true
-  fi
-}
-
-trap cleanup EXIT
-trap 'exit 130' INT TERM
 
 prepare_measurement_environment() {
   if ! is_truthy "${SOL58_LOCK_CLOCKS}"; then
@@ -424,6 +447,9 @@ if [[ ! -f "${PROJECT_ROOT}/agents/math_agent/math_evolve_agent.py" ]]; then
 fi
 
 bash "${SCRIPT_DIR}/ensure_loongflow_compat.sh" "${PROJECT_ROOT}"
+python "${SCRIPT_DIR}/loongflow_compat/upstream_contract.py" \
+  --project-root "${PROJECT_ROOT}" \
+  --contract "${SCRIPT_DIR}/loongflow_compat/loongflow_contract.json"
 
 for required in task_config.yaml task_prompt.txt initial_kernel.cu eval_program_sol58.py seed_bank.json; do
   if [[ ! -f "${TASK_DIR}/${required}" ]]; then
@@ -498,8 +524,8 @@ if result["status"] != "success":
 PY
 fi
 
-RENDERED_CONFIG="$(mktemp -t sol58_task_config.XXXXXX).yaml"
-RENDERED_TASK="$(mktemp -t sol58_task_prompt.XXXXXX).txt"
+RENDERED_CONFIG="$(mktemp --suffix=.yaml -t sol58_task_config.XXXXXX)"
+RENDERED_TASK="$(mktemp --suffix=.txt -t sol58_task_prompt.XXXXXX)"
 envsubst < "${TASK_DIR}/task_config.yaml" > "${RENDERED_CONFIG}"
 envsubst '${SOL58_CODE_LANGUAGE} ${SOL58_CUTEDSL_GENERATION_RATE} ${SOL58_CUTEDSL_SCHEDULE_PERIOD} ${SOL58_NUM_ISLANDS} ${SOL58_ARCHITECTURE_MIGRATION_INTERVAL}' \
   < "${TASK_DIR}/task_prompt.txt" > "${RENDERED_TASK}"
@@ -522,6 +548,49 @@ task_path.write_text(
 PY
   KNOWLEDGE_FINGERPRINT="$(sha256sum "${SOL58_PES_KNOWLEDGE_PACK}" | awk '{print substr($1, 1, 12)}')"
 fi
+
+RUN_INSTANCE_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
+RUN_RECORD_DIR="${RUN_DIR}/run_manifests/${RUN_INSTANCE_ID}"
+RUN_MANIFEST_ARGS=(
+  write
+  --output "${RUN_RECORD_DIR}/manifest.json"
+  --latest "${RUN_DIR}/run_manifest.json"
+  --task sol58
+  --run-dir "${RUN_DIR}"
+  --workspace "${SOL58_PES_WORKSPACE}"
+  --rendered-config "${RENDERED_CONFIG}"
+  --rendered-task "${RENDERED_TASK}"
+  --config-copy "${RUN_RECORD_DIR}/resolved_task_config.yaml"
+  --task-copy "${RUN_RECORD_DIR}/resolved_task_prompt.txt"
+  --initial-environment "${INPUT_ENV_SNAPSHOT}"
+  --repository "atrex=${REPO_ROOT}"
+  --repository "loongflow=${PROJECT_ROOT}"
+  --repository "sol_execbench=${OFFICIAL_LOCAL_SOL_EXECBENCH}"
+  --repository "problem=${SOL58_PROBLEM_DIR}"
+  --source "runner=${SCRIPT_DIR}/run_sol58_pes.sh"
+  --source "task_config=${TASK_DIR}/task_config.yaml"
+  --source "task_prompt=${TASK_DIR}/task_prompt.txt"
+  --source "knowledge_pack=${SOL58_PES_KNOWLEDGE_PACK}"
+  --source "seed_manifest=${ATREX_PES_SEED_MANIFEST}"
+  --source "initial_file=${INITIAL_FILE}"
+  --source "evaluator=${TASK_DIR}/eval_program_sol58.py"
+  --source "ncu_summary=${TASK_DIR}/ncu_summary.py"
+  --source "run_manifest=${REPO_ROOT}/orchestrator/run_manifest.py"
+  --source "sitecustomize=${SCRIPT_DIR}/loongflow_compat/sitecustomize.py"
+  --source "sol58_task_hooks=${SCRIPT_DIR}/loongflow_compat/sol58_task_hooks.py"
+  --source "architecture_islands=${SCRIPT_DIR}/loongflow_compat/architecture_islands.py"
+  --source "checkpoint_compat=${SCRIPT_DIR}/loongflow_compat/checkpoint_compat.py"
+  --source "env_flags=${SCRIPT_DIR}/loongflow_compat/env_flags.py"
+  --source "upstream_contract=${SCRIPT_DIR}/loongflow_compat/upstream_contract.py"
+  --source "loongflow_contract=${SCRIPT_DIR}/loongflow_compat/loongflow_contract.json"
+)
+for key in "${CLI_OVERRIDE_KEYS[@]}"; do
+  RUN_MANIFEST_ARGS+=(--cli-key "${key}")
+done
+for argument in "${ORIGINAL_ARGS[@]}"; do
+  RUN_MANIFEST_ARGS+=(--runner-arg="${argument}")
+done
+python "${REPO_ROOT}/orchestrator/run_manifest.py" "${RUN_MANIFEST_ARGS[@]}"
 
 echo "[Atrex] Starting real LoongFlow PES for SOL-ExecBench kernel 58"
 echo "        target_latency_ms=${SOL58_TARGET_LATENCY_MS}"
