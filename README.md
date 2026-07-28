@@ -131,8 +131,8 @@ Set `--measurement-profile native` for an unlocked host-speed dry run.
 Local-best records include a measurement-profile fingerprint. Results from different GPU UUIDs,
 clocks, code-generation targets, or evaluator stacks are never compared. On a profile change, the runner
 remeasures the exact incumbent three times and carries its completed official score/submission into
-the new record before PES resumes. The official `uv.lock` environment at
-`/home/youchunbo/code/sol-execbench/.venv` is used automatically when installed. CuTe DSL still
+the new record before PES resumes. A sibling `sol-execbench/.venv` checkout is discovered
+automatically when installed. CuTe DSL still
 JIT-compiles for the local `sm_103` device, so remote v1.1 remains the authoritative fitness for
 architecture-sensitive changes.
 
@@ -155,9 +155,12 @@ measured three complete times (`SOL58_LOCAL_REPEAT_COUNT=3`), and the median geo
 compared with the persisted local best. Non-slower candidates are remeasured in alternating
 candidate/incumbent pairs and classified as confirmed faster, confirmed slower, or uncertain from a
 configurable noise band. Confirmed faster candidates replace the local best and are uploaded;
-uncertain candidates within the tolerance may be uploaded at most once per cooldown, while confirmed
-slower candidates remain local. Exact source-hash duplicates reuse cached local and official results
-instead of rerunning CUDA.
+uncertain candidates within the tolerance may be uploaded at most once per cooldown. Confirmed
+slower candidates normally remain local, but changed architecture-sensitive implementations can use
+a persisted periodic probe slot (default every 20 eligible unique sources, at most 6/day, 1-hour
+cooldown, and no more than 10% local regression). This samples local/official ordering drift for TMA,
+cluster, warp-specialized, persistent, and radix families without opening an unbounded upload path.
+Exact source-hash duplicates reuse cached local and official results instead of rerunning CUDA.
 
 The SOL58 runner enables Summary-stage Nsight Compute evidence by default. Profiling starts only after
 the normal correctness and timing passes, targets the slowest measured workload and first matching
@@ -189,25 +192,34 @@ home members are reclassified, and each island exchanges its top fraction with a
 metadata and migration state are persisted in every checkpoint; legacy one-island checkpoints are
 expanded and reindexed on load.
 
+`orchestrator/sol58_pes/runtime_config.json` is the checked-in, schema-validated default for search,
+paths, local measurement, official submission/probes, NCU, LLM, and compatibility settings. Existing
+environment variables remain compatibility overrides and CLI flags have highest precedence. Use
+`--runtime-config <file.json>` for a reviewed alternate configuration; unknown, missing, mistyped, or
+out-of-range fields fail before LoongFlow starts.
+
 Every SOL58 launch writes a redacted run record under
 `<run-dir>/run_manifests/<UTC-time>-<pid>/` and updates `<run-dir>/run_manifest.json`. The record
 contains the resolved `SOL58_*`, `ATREX_*`, and `LLM_*` settings with their
-source precedence, CLI arguments, copied resolved YAML/task prompt, source hashes, repository commits,
-and a search-configuration fingerprint. API keys, bearer tokens, passwords, and credentials are
-redacted before anything is persisted.
+source precedence, CLI arguments, `resolved_runtime_config.json`, copied resolved YAML/task prompt,
+source hashes, repository commits, and a search-configuration fingerprint. API keys, bearer tokens,
+passwords, and credentials are redacted before anything is persisted.
 
 The process-wide LoongFlow adapter is guarded by a pinned upstream contract in
 `orchestrator/loongflow_compat/loongflow_contract.json`. The runner fails before GPU or LLM work when
-the checkout commit, required files, private-memory contract, or required patch sentinels do not
-match. `ATREX_LOONGFLOW_EXPECTED_COMMIT` deliberately selects another reviewed commit;
-`ATREX_LOONGFLOW_ALLOW_UNPINNED=1` and `ATREX_LOONGFLOW_ALLOW_DIRTY=1` are explicit development-only
-overrides. Generic upstream integration remains in `sitecustomize.py`; kernel-58 NCU and stagnation
-policy lives in `sol58_task_hooks.py`.
+the checkout commit, target-file SHA-256, patched callable signatures, or required runtime sentinels
+do not match. `ATREX_LOONGFLOW_EXPECTED_COMMIT` deliberately selects another reviewed commit;
+`ATREX_LOONGFLOW_ALLOW_UNPINNED=1` and `ATREX_LOONGFLOW_ALLOW_DIRTY=1` require a non-empty
+`ATREX_LOONGFLOW_OVERRIDE_REASON`, are recorded in the run manifest, and are forbidden in CI.
+Generic upstream integration remains in `sitecustomize.py`; kernel-58 NCU and stagnation policy
+lives in `sol58_task_hooks.py`.
 
 `tools/evolution_db.py` supports the standalone linear optimizer and its workspace memory. It is not
 the authoritative database used by full-agent PES; LoongFlow owns that population, lineage, island,
-and checkpoint state. Core bridge, evaluator, NCU, manifest, compatibility-contract, and standalone
-database tests run in `.github/workflows/tests.yml` without requiring a GPU.
+and checkpoint state. The SOL58 evaluator delegates source contracts, durable state, local-best
+storage, statistical gates, official protocol, calibration, and probes to focused modules under
+`orchestrator/sol58_pes/`. CI runs unit tests, Ruff, scoped Pyright checks over explicit LoongFlow
+memory/solution protocols, and ShellCheck without requiring a GPU.
 
 ## Main Files
 

@@ -24,6 +24,7 @@ from orchestrator.loongflow_compat.checkpoint_compat import (
     restore_checkpoint_population_indexes as _restore_checkpoint_population_indexes_impl,
 )
 from orchestrator.loongflow_compat.env_flags import enabled as _enabled
+from orchestrator.loongflow_compat.protocols import EvolutionMemory, EvolutionSolution
 from orchestrator.loongflow_compat.sol58_task_hooks import (
     _NCU_SUMMARY_MARKER,
     _append_ncu_summary_instructions,
@@ -37,6 +38,14 @@ from orchestrator.loongflow_compat.sol58_task_hooks import (
     _verify_ncu_patch,
     _verify_stagnation_seed_bank,
 )
+
+__all__ = [
+    "_NCU_SUMMARY_MARKER",
+    "_append_ncu_summary_instructions",
+    "_local_best_improved",
+    "_positive_int_env",
+    "_stagnation_state",
+]
 
 logger = logging.getLogger("atrex.pes_compat")
 PATCH_MANIFEST: dict[str, dict[str, object]] = {}
@@ -125,7 +134,7 @@ def _compact_result(value: object) -> object:
     return value
 
 
-def _solution_source_hash(solution: object) -> str:
+def _solution_source_hash(solution: EvolutionSolution) -> str:
     source = getattr(solution, "solution", solution)
     text = source if isinstance(source, str) else str(source or "")
     return hashlib.sha256(text.strip().encode("utf-8")).hexdigest()
@@ -144,7 +153,9 @@ def _adaptive_exploration_rate(base_rate: float, recent_scores: list[float]) -> 
     return min(rate, 0.9)
 
 
-def _canonical_solution(solutions: list[object]) -> object:
+def _canonical_solution(
+    solutions: list[EvolutionSolution],
+) -> EvolutionSolution:
     return min(
         solutions,
         key=lambda solution: (
@@ -182,7 +193,7 @@ def _load_authoritative_fitness_registry() -> dict[str, dict[str, object]]:
     return sources if isinstance(sources, dict) else {}
 
 
-def _reconcile_authoritative_scores(memory: object) -> int:
+def _reconcile_authoritative_scores(memory: EvolutionMemory) -> int:
     """Replace stale provisional scores with completed official source fitness."""
     registry = _load_authoritative_fitness_registry()
     solutions = getattr(memory, "solutions", None)
@@ -268,7 +279,7 @@ def _reconcile_authoritative_scores(memory: object) -> int:
     return len(changed_ids)
 
 
-def _deduplicate_memory_indexes(memory: object) -> int:
+def _deduplicate_memory_indexes(memory: EvolutionMemory) -> int:
     """Keep one selectable representative per source and island; retain lineage records."""
     populations = getattr(memory, "populations", None)
     islands = getattr(memory, "islands", None)
@@ -289,7 +300,7 @@ def _deduplicate_memory_indexes(memory: object) -> int:
                 populations.pop(solution_id, None)
 
         for island in islands:
-            groups: dict[str, list[object]] = {}
+            groups: dict[str, list[EvolutionSolution]] = {}
             for solution_id in list(island):
                 solution = populations.get(solution_id)
                 if solution is None:
@@ -326,7 +337,7 @@ def _deduplicate_memory_indexes(memory: object) -> int:
 
         elites = getattr(memory, "elites", None)
         if isinstance(elites, set):
-            elite_groups: dict[str, list[object]] = {}
+            elite_groups: dict[str, list[EvolutionSolution]] = {}
             for solution_id in list(elites):
                 solution_id = duplicate_to_canonical.get(solution_id, solution_id)
                 solution = populations.get(solution_id)
@@ -372,7 +383,9 @@ def _deduplicate_memory_indexes(memory: object) -> int:
     return len(duplicate_to_canonical)
 
 
-def _restore_checkpoint_population_indexes(memory: object, checkpoint_path: str):
+def _restore_checkpoint_population_indexes(
+    memory: EvolutionMemory, checkpoint_path: str
+):
     """Validate and repair selectable checkpoint indexes, or fail with context."""
     return _restore_checkpoint_population_indexes_impl(
         memory, checkpoint_path, _canonical_solution

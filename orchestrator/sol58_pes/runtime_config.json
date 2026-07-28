@@ -1,0 +1,145 @@
+{
+  "schema_version": 1,
+  "paths": {
+    "contest_root": "auto",
+    "problem_dir": "auto",
+    "sol_execbench": "auto",
+    "run_dir": "/tmp/sol58_pes_run",
+    "workspace": "auto",
+    "eval_root": "/tmp/sol58_pes_eval",
+    "knowledge_pack": "auto",
+    "seed_manifest": "auto",
+    "ncu_cache_dir": "auto"
+  },
+  "search": {
+    "code_language": "cuda_cpp",
+    "cutedsl_generation_rate": 0.0,
+    "cutedsl_schedule_period": 10,
+    "max_iterations": 40,
+    "concurrency": 1,
+    "num_islands": 8,
+    "migration_interval": 20,
+    "knowledge_grounding": true,
+    "react_score_threshold": 0.84,
+    "seed_local_best": true
+  },
+  "local_evaluation": {
+    "target_latency_ms": 0.006797,
+    "repeat_count": 3,
+    "best_gate": true,
+    "cache": true,
+    "contract_version": "sol58-v4",
+    "compile_timeout_seconds": 180,
+    "run_timeout_seconds": 120,
+    "evaluator_timeout_seconds": 1200,
+    "gate": {
+      "sigma_multiplier": 2.0,
+      "relative_noise_floor": 0.01,
+      "recheck_pairs": 2,
+      "uncertain_relative_tolerance": 0.005,
+      "allow_uncertain_official": true,
+      "challenger_cooldown_seconds": 900
+    }
+  },
+  "official": {
+    "enabled": true,
+    "base_url": "https://research.nvidia.com/benchmarks/sol-execbench",
+    "kernel_id": 58,
+    "gpu_type": "B200",
+    "target_score": 0.904135,
+    "evaluation_stack_version": "v1.1",
+    "submission_mode": "private",
+    "cache": true,
+    "minimum_local_score": 0.0,
+    "poll_timeout_seconds": 180,
+    "poll_interval_seconds": 10,
+    "request_timeout_seconds": 10,
+    "async_submit": true,
+    "async_refresh_delay_seconds": 60,
+    "pending_result_grace_seconds": 60,
+    "cache_refresh_timeout_seconds": 0,
+    "refresh_batch_size": 2,
+    "refresh_time_budget_seconds": 10,
+    "calibration_half_life_hours": 336,
+    "pending_score_policy": "local_proxy",
+    "provisional_floor_delta": 0.005,
+    "probe": {
+      "enabled": true,
+      "interval": 20,
+      "cooldown_seconds": 3600,
+      "max_per_day": 6,
+      "max_relative_regression": 0.10,
+      "architecture_only": true
+    }
+  },
+  "measurement": {
+    "profile": "official_v1_1_b200",
+    "clock_gpu_index": 0,
+    "clock_tolerance_mhz": 10,
+    "clock_monitor_interval_seconds": 0.1,
+    "clock_stabilize_seconds": 2,
+    "profiles": {
+      "official_v1_1_b200": {
+        "lock_clocks": true,
+        "auto_relock_clocks": true,
+        "require_exclusive_gpu": true,
+        "unlock_clocks_on_exit": true,
+        "gpu_clock_mhz": 1500,
+        "dram_clock_mhz": 3996,
+        "cuda_gencode": "-gencode=arch=compute_100,code=sm_100",
+        "warmup_runs": 10,
+        "iterations": 50,
+        "seed": 200,
+        "local_eval_stack_id": "sol-execbench-v1.1-sm100-proxy",
+        "recalibrate_local_best": true
+      },
+      "native": {
+        "lock_clocks": false,
+        "auto_relock_clocks": false,
+        "require_exclusive_gpu": false,
+        "unlock_clocks_on_exit": false,
+        "gpu_clock_mhz": 0,
+        "dram_clock_mhz": 0,
+        "cuda_gencode": "runtime-native",
+        "warmup_runs": 10,
+        "iterations": 50,
+        "seed": 200,
+        "local_eval_stack_id": "native",
+        "recalibrate_local_best": false
+      }
+    }
+  },
+  "ncu": {
+    "summary": true,
+    "profile_policy": "all_correct",
+    "profile_interval": 5,
+    "timeout_seconds": 180,
+    "parse_timeout_seconds": 60,
+    "workload": "slowest",
+    "set": "full",
+    "launch_count": 1
+  },
+  "llm": {
+    "base_url": "https://api.chatanywhere.tech/v1",
+    "model": "openai/claude-opus-4-7",
+    "provider": "openai",
+    "temperature": 0.9,
+    "context_length": 1000000,
+    "max_tokens": 32768,
+    "timeout_seconds": 240,
+    "drop_unsupported_params": true
+  },
+  "compatibility": {
+    "max_parallel_candidates": 1,
+    "source_dedup": true,
+    "architecture_islands": true,
+    "stagnation_seeds": true,
+    "stagnation_rounds": 12,
+    "stagnation_seed_interval": 20,
+    "stagnation_max_attempts": 2,
+    "compact_database_tools": true,
+    "database_solution_chars": 65536,
+    "database_summary_chars": 16384,
+    "database_evaluation_chars": 16384
+  }
+}

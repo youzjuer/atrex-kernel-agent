@@ -17,7 +17,7 @@ must not replace it with a hand-written single-trajectory loop.
 The implementation style is the same as:
 
 ```text
-/home/youchunbo/code/mlsys26-flashinfer-contest/full-agent/moe/run_moe.sh
+$MLSYS26_FLASHINFER_CONTEST_ROOT/full-agent/moe/run_moe.sh
 ```
 
 That script does four things:

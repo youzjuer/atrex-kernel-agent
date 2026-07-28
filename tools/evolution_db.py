@@ -553,13 +553,13 @@ class EvolutionDB:
             weights = [
                 (sols[c]["sample_weight"] or 1.0) ** power for c in cand
             ]
-            probs = [p * w for p, w in zip(probs, weights)]
+            probs = [p * w for p, w in zip(probs, weights, strict=True)]
         total = sum(probs)
         if total <= 0 or any(math.isnan(p) for p in probs):
             return max(cand, key=self._score_of)
         r = random.random() * total
         acc = 0.0
-        for c, p in zip(cand, probs):
+        for c, p in zip(cand, probs, strict=True):
             acc += p
             if r <= acc:
                 return c

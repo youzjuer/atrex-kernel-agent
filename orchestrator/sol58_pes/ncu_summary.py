@@ -203,14 +203,16 @@ def _run_profile_command(
     )
     try:
         stdout, stderr = process.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as exc:
         os.killpg(process.pid, signal.SIGTERM)
         try:
             stdout, stderr = process.communicate(timeout=5)
         except subprocess.TimeoutExpired:
             os.killpg(process.pid, signal.SIGKILL)
             stdout, stderr = process.communicate()
-        raise subprocess.TimeoutExpired(command, timeout, output=stdout, stderr=stderr)
+        raise subprocess.TimeoutExpired(
+            command, timeout, output=stdout, stderr=stderr
+        ) from exc
     return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
 
 
@@ -358,7 +360,7 @@ def _parse_report_csv(
 
     exported = {
         name: _csv_value(value)
-        for name, value in zip(header, values)
+        for name, value in zip(header, values, strict=False)
         if name.strip()
     }
     metrics = {

@@ -12,6 +12,8 @@ INPUT_ENV_SNAPSHOT="$(mktemp --suffix=.json -t sol58_initial_env.XXXXXX)"
 CLOCKS_LOCKED_BY_RUNNER=0
 RENDERED_CONFIG=""
 RENDERED_TASK=""
+RUNTIME_ENV=""
+RESOLVED_RUNTIME_CONFIG=""
 
 is_truthy() {
   case "${1,,}" in
@@ -21,7 +23,8 @@ is_truthy() {
 }
 
 cleanup() {
-  rm -f "${INPUT_ENV_SNAPSHOT:-}" "${RENDERED_CONFIG:-}" "${RENDERED_TASK:-}"
+  rm -f "${INPUT_ENV_SNAPSHOT:-}" "${RENDERED_CONFIG:-}" "${RENDERED_TASK:-}" \
+    "${RUNTIME_ENV:-}" "${RESOLVED_RUNTIME_CONFIG:-}"
   if ((CLOCKS_LOCKED_BY_RUNNER)) && is_truthy "${SOL58_UNLOCK_CLOCKS_ON_EXIT:-1}"; then
     sudo -n nvidia-smi -i "${SOL58_CLOCK_GPU_INDEX}" -rgc >/dev/null 2>&1 || true
     sudo -n nvidia-smi -i "${SOL58_CLOCK_GPU_INDEX}" -rmc >/dev/null 2>&1 || true
@@ -37,6 +40,18 @@ python "${REPO_ROOT}/orchestrator/run_manifest.py" capture-env \
 RUNNER_ARGS=()
 while (($#)); do
   case "$1" in
+    --runtime-config)
+      if (($# < 2)); then
+        echo "error: --runtime-config requires a JSON file" >&2
+        exit 2
+      fi
+      SOL58_RUNTIME_CONFIG="$2"
+      shift 2
+      ;;
+    --runtime-config=*)
+      SOL58_RUNTIME_CONFIG="${1#*=}"
+      shift
+      ;;
     --code-language)
       if (($# < 2)); then
         echo "error: --code-language requires cuda_cpp, cute_dsl, or auto" >&2
@@ -166,15 +181,16 @@ while (($#)); do
   esac
 done
 
-case "${SOL58_CODE_LANGUAGE:-cuda_cpp}" in
+case "${SOL58_CODE_LANGUAGE:-}" in
+  "") ;;
   cuda|cuda_cpp)
-    export SOL58_CODE_LANGUAGE="cuda_cpp"
+    SOL58_CODE_LANGUAGE="cuda_cpp"
     ;;
   cute|cutedsl|cute_dsl)
-    export SOL58_CODE_LANGUAGE="cute_dsl"
+    SOL58_CODE_LANGUAGE="cute_dsl"
     ;;
   auto)
-    export SOL58_CODE_LANGUAGE="auto"
+    SOL58_CODE_LANGUAGE="auto"
     ;;
   *)
     echo "error: unsupported SOL58 code language '${SOL58_CODE_LANGUAGE}'" >&2
@@ -183,171 +199,28 @@ case "${SOL58_CODE_LANGUAGE:-cuda_cpp}" in
     ;;
 esac
 
-export SOL58_CUTEDSL_GENERATION_RATE="${SOL58_CUTEDSL_GENERATION_RATE:-0.5}"
-export SOL58_CUTEDSL_SCHEDULE_PERIOD="${SOL58_CUTEDSL_SCHEDULE_PERIOD:-10}"
-python - "${SOL58_CUTEDSL_GENERATION_RATE}" "${SOL58_CUTEDSL_SCHEDULE_PERIOD}" <<'PY'
-import sys
-
-try:
-    rate = float(sys.argv[1])
-    period = int(sys.argv[2])
-except ValueError as exc:
-    raise SystemExit(f"error: invalid CuTeDSL schedule: {exc}")
-if not 0.0 <= rate <= 1.0:
-    raise SystemExit("error: --cutedsl-rate must be between 0 and 1")
-if period <= 0:
-    raise SystemExit("error: --cutedsl-period must be a positive integer")
-PY
-
-CONTEST_ROOT="${MLSYS26_FLASHINFER_CONTEST_ROOT:-/home/youchunbo/code/mlsys26-flashinfer-contest}"
-PROJECT_ROOT="${CONTEST_ROOT}/full-agent/moe/agent/loongflow"
-RUN_DIR="$(realpath -m "${SOL58_PES_RUN_DIR:-/tmp/sol58_pes_run}")"
-
-export PYTHONPATH="${REPO_ROOT}:${SCRIPT_DIR}/loongflow_compat:${PROJECT_ROOT}:${PROJECT_ROOT}/src:${PYTHONPATH:-}"
-export ATREX_LITELLM_DROP_PARAMS="${ATREX_LITELLM_DROP_PARAMS:-1}"
-export SOL58_PROBLEM_DIR="${SOL58_PROBLEM_DIR:-/home/youchunbo/code/sol-problems/058_moe_expert_token_radix_sort_with_prefix_sum}"
-export SOL58_EVAL_ROOT="${SOL58_EVAL_ROOT:-/tmp/sol58_pes_eval}"
-export SOL58_TARGET_LATENCY_MS="${SOL58_TARGET_LATENCY_MS:-0.006797}"
-export SOL58_TARGET_SCORE="${SOL58_TARGET_SCORE:-0.904135}"
-export SOL58_LOCAL_REPEAT_COUNT="${SOL58_LOCAL_REPEAT_COUNT:-3}"
-export SOL58_LOCAL_BEST_GATE="${SOL58_LOCAL_BEST_GATE:-1}"
-export SOL58_LOCAL_EVAL_CACHE="${SOL58_LOCAL_EVAL_CACHE:-1}"
-export SOL58_LOCAL_EVAL_CONTRACT_VERSION="${SOL58_LOCAL_EVAL_CONTRACT_VERSION:-sol58-v3}"
-export SOL58_LOCAL_GATE_SIGMA_MULTIPLIER="${SOL58_LOCAL_GATE_SIGMA_MULTIPLIER:-2.0}"
-export SOL58_LOCAL_GATE_RELATIVE_NOISE_FLOOR="${SOL58_LOCAL_GATE_RELATIVE_NOISE_FLOOR:-0.01}"
-export SOL58_LOCAL_GATE_RECHECK_PAIRS="${SOL58_LOCAL_GATE_RECHECK_PAIRS:-2}"
-export SOL58_LOCAL_GATE_UNCERTAIN_RELATIVE_TOLERANCE="${SOL58_LOCAL_GATE_UNCERTAIN_RELATIVE_TOLERANCE:-0.005}"
-export SOL58_LOCAL_GATE_ALLOW_UNCERTAIN_OFFICIAL="${SOL58_LOCAL_GATE_ALLOW_UNCERTAIN_OFFICIAL:-1}"
-export SOL58_LOCAL_GATE_CHALLENGER_COOLDOWN_S="${SOL58_LOCAL_GATE_CHALLENGER_COOLDOWN_S:-900}"
-export SOL58_OFFICIAL_FITNESS="${SOL58_OFFICIAL_FITNESS:-1}"
-export SOL58_OFFICIAL_EVAL_STACK_VERSION="${SOL58_OFFICIAL_EVAL_STACK_VERSION:-v1.1}"
-export SOL58_OFFICIAL_SUBMISSION_MODE="${SOL58_OFFICIAL_SUBMISSION_MODE:-private}"
-export SOL58_OFFICIAL_POLL_TIMEOUT="${SOL58_OFFICIAL_POLL_TIMEOUT:-180}"
-export SOL58_OFFICIAL_POLL_INTERVAL="${SOL58_OFFICIAL_POLL_INTERVAL:-10}"
-export SOL58_OFFICIAL_REQUEST_TIMEOUT="${SOL58_OFFICIAL_REQUEST_TIMEOUT:-10}"
-export SOL58_OFFICIAL_ASYNC_SUBMIT="${SOL58_OFFICIAL_ASYNC_SUBMIT:-1}"
-export SOL58_OFFICIAL_ASYNC_REFRESH_DELAY="${SOL58_OFFICIAL_ASYNC_REFRESH_DELAY:-60}"
-export SOL58_OFFICIAL_PENDING_RESULT_GRACE="${SOL58_OFFICIAL_PENDING_RESULT_GRACE:-60}"
-export SOL58_OFFICIAL_CACHE_REFRESH_TIMEOUT="${SOL58_OFFICIAL_CACHE_REFRESH_TIMEOUT:-0}"
-export SOL58_OFFICIAL_REFRESH_BATCH_SIZE="${SOL58_OFFICIAL_REFRESH_BATCH_SIZE:-2}"
-export SOL58_OFFICIAL_REFRESH_TIME_BUDGET="${SOL58_OFFICIAL_REFRESH_TIME_BUDGET:-10}"
-export SOL58_CALIBRATION_HALF_LIFE_HOURS="${SOL58_CALIBRATION_HALF_LIFE_HOURS:-336}"
-export SOL58_OFFICIAL_PENDING_SCORE_POLICY="${SOL58_OFFICIAL_PENDING_SCORE_POLICY:-local_proxy}"
-DEFAULT_PROVISIONAL_SCORE_CAP="$(awk -v target="${SOL58_TARGET_SCORE}" 'BEGIN { printf "%.6f", target - 0.005 }')"
-export SOL58_OFFICIAL_PROVISIONAL_SCORE_CAP="${SOL58_OFFICIAL_PROVISIONAL_SCORE_CAP:-${DEFAULT_PROVISIONAL_SCORE_CAP}}"
-
-export SOL58_PES_WORKSPACE="$(realpath -m "${SOL58_PES_WORKSPACE:-${RUN_DIR}/output}")"
-export SOL58_MAX_ITERATIONS="${SOL58_MAX_ITERATIONS:-40}"
-export SOL58_PES_CONCURRENCY="${SOL58_PES_CONCURRENCY:-1}"
-export SOL58_NUM_ISLANDS="${SOL58_NUM_ISLANDS:-8}"
-export SOL58_ARCHITECTURE_MIGRATION_INTERVAL="${SOL58_ARCHITECTURE_MIGRATION_INTERVAL:-20}"
-export SOL58_PES_KNOWLEDGE_GROUNDING="${SOL58_PES_KNOWLEDGE_GROUNDING:-1}"
-export SOL58_PES_KNOWLEDGE_PACK="${SOL58_PES_KNOWLEDGE_PACK:-${TASK_DIR}/knowledge_pack.md}"
-export SOL58_REACT_SCORE_THRESHOLD="${SOL58_REACT_SCORE_THRESHOLD:-0.84}"
-export SOL58_SEED_LOCAL_BEST="${SOL58_SEED_LOCAL_BEST:-1}"
-export SOL58_EVAL_TIMEOUT="${SOL58_EVAL_TIMEOUT:-1200}"
-export SOL58_COMPILE_TIMEOUT="${SOL58_COMPILE_TIMEOUT:-180}"
-export SOL58_SOL_TIMEOUT="${SOL58_SOL_TIMEOUT:-120}"
-export SOL58_NCU_SUMMARY="${SOL58_NCU_SUMMARY:-1}"
-export SOL58_NCU_PROFILE_POLICY="${SOL58_NCU_PROFILE_POLICY:-all_correct}"
-export SOL58_NCU_PROFILE_INTERVAL="${SOL58_NCU_PROFILE_INTERVAL:-5}"
-export SOL58_NCU_TIMEOUT="${SOL58_NCU_TIMEOUT:-180}"
-export SOL58_NCU_PARSE_TIMEOUT="${SOL58_NCU_PARSE_TIMEOUT:-60}"
-export SOL58_NCU_WORKLOAD="${SOL58_NCU_WORKLOAD:-slowest}"
-export SOL58_NCU_SET="${SOL58_NCU_SET:-full}"
-export SOL58_NCU_LAUNCH_COUNT="${SOL58_NCU_LAUNCH_COUNT:-1}"
-export SOL58_NCU_CACHE_DIR="${SOL58_NCU_CACHE_DIR:-${SOL58_EVAL_ROOT}/ncu_cache}"
-
-case "${SOL58_NCU_PROFILE_POLICY}" in
-  all_correct|local_best|improving|periodic) ;;
-  *)
-    echo "error: SOL58_NCU_PROFILE_POLICY must be all_correct, local_best, or periodic" >&2
-    exit 2
-    ;;
-esac
-if [[ ! "${SOL58_NCU_PROFILE_INTERVAL}" =~ ^[1-9][0-9]*$ ]]; then
-  echo "error: SOL58_NCU_PROFILE_INTERVAL must be a positive integer" >&2
-  exit 2
-fi
-if ! awk -v value="${SOL58_NCU_TIMEOUT}" 'BEGIN { exit !(value ~ /^[0-9]+([.][0-9]+)?$/ && value + 0 > 0) }'; then
-  echo "error: SOL58_NCU_TIMEOUT must be a positive number" >&2
-  exit 2
-fi
-
-export SOL58_MEASUREMENT_PROFILE="${SOL58_MEASUREMENT_PROFILE:-official_v1_1_b200}"
-case "${SOL58_MEASUREMENT_PROFILE}" in
-  official|official_v1_1|official_v1_1_b200)
-    export SOL58_MEASUREMENT_PROFILE="official_v1_1_b200"
-    export SOL58_CLOCK_GPU_INDEX="${SOL58_CLOCK_GPU_INDEX:-0}"
-    export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-${SOL58_CLOCK_GPU_INDEX}}"
-    export SOL58_LOCK_CLOCKS="${SOL58_LOCK_CLOCKS:-1}"
-    export SOL58_AUTO_RELOCK_CLOCKS="${SOL58_AUTO_RELOCK_CLOCKS:-1}"
-    export SOL58_REQUIRE_EXCLUSIVE_GPU="${SOL58_REQUIRE_EXCLUSIVE_GPU:-1}"
-    export SOL58_UNLOCK_CLOCKS_ON_EXIT="${SOL58_UNLOCK_CLOCKS_ON_EXIT:-1}"
-    export SOL_EXECBENCH_GPU_CLK_MHZ="${SOL_EXECBENCH_GPU_CLK_MHZ:-1500}"
-    export SOL_EXECBENCH_DRAM_CLK_MHZ="${SOL_EXECBENCH_DRAM_CLK_MHZ:-3996}"
-    export SOL58_CUDA_GENCODE="${SOL58_CUDA_GENCODE:--gencode=arch=compute_100,code=sm_100}"
-    export SOL58_WARMUP_RUNS="${SOL58_WARMUP_RUNS:-10}"
-    export SOL58_ITERATIONS="${SOL58_ITERATIONS:-50}"
-    export SOL58_SEED="${SOL58_SEED:-200}"
-    export SOL58_LOCAL_EVAL_STACK_ID="${SOL58_LOCAL_EVAL_STACK_ID:-sol-execbench-v1.1-sm100-proxy}"
-    export SOL58_RECALIBRATE_LOCAL_BEST="${SOL58_RECALIBRATE_LOCAL_BEST:-1}"
-    ;;
-  native)
-    export SOL58_LOCK_CLOCKS="${SOL58_LOCK_CLOCKS:-0}"
-    export SOL58_AUTO_RELOCK_CLOCKS="${SOL58_AUTO_RELOCK_CLOCKS:-0}"
-    export SOL58_LOCAL_EVAL_STACK_ID="${SOL58_LOCAL_EVAL_STACK_ID:-native}"
-    export SOL58_RECALIBRATE_LOCAL_BEST="${SOL58_RECALIBRATE_LOCAL_BEST:-0}"
-    ;;
-  *)
-    echo "error: unsupported measurement profile '${SOL58_MEASUREMENT_PROFILE}'" >&2
-    echo "       expected official_v1_1_b200 or native" >&2
-    exit 2
-    ;;
-esac
-
-OFFICIAL_LOCAL_SOL_EXECBENCH="${SOL58_OFFICIAL_LOCAL_SOL_EXECBENCH:-/home/youchunbo/code/sol-execbench/.venv/bin/sol-execbench}"
-if [[ -z "${SOL_EXECBENCH:-}" && -x "${OFFICIAL_LOCAL_SOL_EXECBENCH}" ]]; then
-  export SOL_EXECBENCH="${OFFICIAL_LOCAL_SOL_EXECBENCH}"
-fi
-export LLM_BASE_URL="${LLM_BASE_URL:-https://api.chatanywhere.tech/v1}"
-export LLM_MODEL="${LLM_MODEL:-openai/claude-opus-4-7}"
-export LLM_PROVIDER="${LLM_PROVIDER:-openai}"
-export LLM_TEMPERATURE="${LLM_TEMPERATURE:-0.9}"
-export LLM_CONTEXT_LENGTH="${LLM_CONTEXT_LENGTH:-1000000}"
-export LLM_MAX_TOKENS="${LLM_MAX_TOKENS:-32768}"
-export LLM_TIMEOUT="${LLM_TIMEOUT:-240}"
-export ATREX_PES_MAX_PARALLEL_CANDIDATES="${ATREX_PES_MAX_PARALLEL_CANDIDATES:-1}"
-export ATREX_PES_SOURCE_DEDUP="${ATREX_PES_SOURCE_DEDUP:-1}"
-export ATREX_PES_ARCHITECTURE_ISLANDS="${ATREX_PES_ARCHITECTURE_ISLANDS:-1}"
-export ATREX_PES_STAGNATION_SEEDS="${ATREX_PES_STAGNATION_SEEDS:-1}"
-export ATREX_PES_STAGNATION_ARCHITECTURE_ROUNDS="${ATREX_PES_STAGNATION_ARCHITECTURE_ROUNDS:-12}"
-export ATREX_PES_STAGNATION_SEED_INTERVAL="${ATREX_PES_STAGNATION_SEED_INTERVAL:-20}"
-export ATREX_PES_STAGNATION_MAX_ATTEMPTS="${ATREX_PES_STAGNATION_MAX_ATTEMPTS:-2}"
-export ATREX_PES_SEED_MANIFEST="${ATREX_PES_SEED_MANIFEST:-${TASK_DIR}/seed_bank.json}"
-export ATREX_PES_COMPACT_DB_TOOLS="${ATREX_PES_COMPACT_DB_TOOLS:-1}"
-export ATREX_PES_DB_SOLUTION_CHARS="${ATREX_PES_DB_SOLUTION_CHARS:-65536}"
-export ATREX_PES_DB_SUMMARY_CHARS="${ATREX_PES_DB_SUMMARY_CHARS:-16384}"
-export ATREX_PES_DB_EVALUATION_CHARS="${ATREX_PES_DB_EVALUATION_CHARS:-16384}"
-
-if [[ ! "${SOL58_NUM_ISLANDS}" =~ ^[1-9][0-9]*$ ]]; then
-  echo "error: SOL58_NUM_ISLANDS must be a positive integer" >&2
-  exit 2
-fi
-if [[ ! "${SOL58_ARCHITECTURE_MIGRATION_INTERVAL}" =~ ^[1-9][0-9]*$ ]]; then
-  echo "error: SOL58_ARCHITECTURE_MIGRATION_INTERVAL must be a positive integer" >&2
-  exit 2
-fi
-if is_truthy "${ATREX_PES_ARCHITECTURE_ISLANDS}" && ((SOL58_NUM_ISLANDS < 8)); then
-  echo "error: architecture-aware PES requires at least 8 islands; got ${SOL58_NUM_ISLANDS}" >&2
-  exit 2
-fi
-for integer_setting in ATREX_PES_STAGNATION_ARCHITECTURE_ROUNDS ATREX_PES_STAGNATION_SEED_INTERVAL ATREX_PES_STAGNATION_MAX_ATTEMPTS; do
-  if [[ ! "${!integer_setting}" =~ ^[1-9][0-9]*$ ]]; then
-    echo "error: ${integer_setting} must be a positive integer" >&2
-    exit 2
-  fi
+for key in "${CLI_OVERRIDE_KEYS[@]}"; do
+  export "${key?}"
 done
+export SOL58_RUNTIME_CONFIG="${SOL58_RUNTIME_CONFIG:-${TASK_DIR}/runtime_config.json}"
+RUNTIME_ENV="$(mktemp --suffix=.env -t sol58_runtime.XXXXXX)"
+RESOLVED_RUNTIME_CONFIG="$(mktemp --suffix=.json -t sol58_runtime_resolved.XXXXXX)"
+python "${TASK_DIR}/runtime_config.py" \
+  --config "${SOL58_RUNTIME_CONFIG}" \
+  --repo-root "${REPO_ROOT}" \
+  --task-dir "${TASK_DIR}" \
+  --env-output "${RUNTIME_ENV}" \
+  --json-output "${RESOLVED_RUNTIME_CONFIG}"
+# The generated file contains only shell-quoted exports from the validated schema.
+# shellcheck disable=SC1090
+source "${RUNTIME_ENV}"
+
+CONTEST_ROOT="${MLSYS26_FLASHINFER_CONTEST_ROOT}"
+PROJECT_ROOT="${CONTEST_ROOT}/full-agent/moe/agent/loongflow"
+RUN_DIR="${SOL58_PES_RUN_DIR}"
+OFFICIAL_LOCAL_SOL_EXECBENCH="${SOL_EXECBENCH}"
+export PYTHONPATH="${REPO_ROOT}:${SCRIPT_DIR}/loongflow_compat:${PROJECT_ROOT}:${PROJECT_ROOT}/src:${PYTHONPATH:-}"
+
 if is_truthy "${SOL58_PES_KNOWLEDGE_GROUNDING}" && [[ ! -f "${SOL58_PES_KNOWLEDGE_PACK}" ]]; then
   echo "error: SOL58 knowledge pack not found: ${SOL58_PES_KNOWLEDGE_PACK}" >&2
   exit 1
@@ -551,6 +424,8 @@ fi
 
 RUN_INSTANCE_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 RUN_RECORD_DIR="${RUN_DIR}/run_manifests/${RUN_INSTANCE_ID}"
+mkdir -p "${RUN_RECORD_DIR}"
+cp "${RESOLVED_RUNTIME_CONFIG}" "${RUN_RECORD_DIR}/resolved_runtime_config.json"
 RUN_MANIFEST_ARGS=(
   write
   --output "${RUN_RECORD_DIR}/manifest.json"
@@ -568,6 +443,9 @@ RUN_MANIFEST_ARGS=(
   --repository "sol_execbench=${OFFICIAL_LOCAL_SOL_EXECBENCH}"
   --repository "problem=${SOL58_PROBLEM_DIR}"
   --source "runner=${SCRIPT_DIR}/run_sol58_pes.sh"
+  --source "runtime_config=${SOL58_RUNTIME_CONFIG}"
+  --source "runtime_config_loader=${TASK_DIR}/runtime_config.py"
+  --source "resolved_runtime_config=${RUN_RECORD_DIR}/resolved_runtime_config.json"
   --source "task_config=${TASK_DIR}/task_config.yaml"
   --source "task_prompt=${TASK_DIR}/task_prompt.txt"
   --source "knowledge_pack=${SOL58_PES_KNOWLEDGE_PACK}"

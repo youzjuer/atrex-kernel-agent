@@ -15,6 +15,8 @@ from typing import Any, Iterable
 
 import numpy as np
 
+from orchestrator.loongflow_compat.protocols import EvolutionMemory, EvolutionSolution
+
 logger = logging.getLogger("atrex.pes_architecture")
 
 ANALYSIS_VERSION = 2
@@ -518,12 +520,12 @@ def island_profile(island_id: int) -> str:
     return f"pca_general_{int(island_id)}"
 
 
-def _lock_context(memory: object):
+def _lock_context(memory: EvolutionMemory):
     lock = getattr(memory, "_lock", None)
     return lock if lock is not None else nullcontext()
 
 
-def _metadata(solution: object) -> dict[str, Any]:
+def _metadata(solution: EvolutionSolution) -> dict[str, Any]:
     metadata = getattr(solution, "metadata", None)
     if not isinstance(metadata, dict):
         metadata = {}
@@ -531,7 +533,7 @@ def _metadata(solution: object) -> dict[str, Any]:
     return metadata
 
 
-def _score(solution: object) -> float:
+def _score(solution: EvolutionSolution) -> float:
     try:
         return float(getattr(solution, "score", 0.0) or 0.0)
     except (TypeError, ValueError):
@@ -558,7 +560,7 @@ def _analysis_for(
 
 
 def _apply_analysis(
-    solution: object,
+    solution: EvolutionSolution,
     analysis: dict[str, Any],
     model: dict[str, Any],
     refit_iteration: int,
@@ -638,7 +640,7 @@ def fit_architecture_population(
     return model, analyses
 
 
-def ensure_architecture_islands(memory: object, num_islands: int) -> int:
+def ensure_architecture_islands(memory: EvolutionMemory, num_islands: int) -> int:
     """Resize old checkpoints and all island indexes to the configured topology."""
     target = validate_architecture_island_count(num_islands)
     with _lock_context(memory):
@@ -678,7 +680,9 @@ def ensure_architecture_islands(memory: object, num_islands: int) -> int:
     return target
 
 
-def _map_elite_key(memory: object, solution: object) -> str | None:
+def _map_elite_key(
+    memory: EvolutionMemory, solution: EvolutionSolution
+) -> str | None:
     raw = _metadata(solution).get("MAP_Elite_feature")
     if isinstance(raw, str):
         try:
@@ -696,7 +700,7 @@ def _map_elite_key(memory: object, solution: object) -> str | None:
     return "-".join(str(value) for value in raw.values())
 
 
-def _rebuild_rankings(memory: object) -> None:
+def _rebuild_rankings(memory: EvolutionMemory) -> None:
     populations = getattr(memory, "populations", {})
     memory.island_capacity = [len(island) for island in memory.islands]
     memory.island_best_solution = []
@@ -718,7 +722,7 @@ def _rebuild_rankings(memory: object) -> None:
 
 
 def rebuild_architecture_islands(
-    memory: object,
+    memory: EvolutionMemory,
     num_islands: int,
     refit_iteration: int | None = None,
 ) -> dict[str, int]:
@@ -785,7 +789,7 @@ def rebuild_architecture_islands(
 
 
 def classify_and_route_solution(
-    memory: object, solution: object, num_islands: int
+    memory: EvolutionMemory, solution: EvolutionSolution, num_islands: int
 ) -> dict[str, Any]:
     """Project one Summary child into the frozen PCA model and select its island."""
     with _lock_context(memory):
@@ -807,6 +811,8 @@ def classify_and_route_solution(
                 model["refit_iteration"] = int(getattr(solution, "iteration", 0) or 0)
                 memory._atrex_architecture_pca_model = model
 
+        if not isinstance(model, dict):
+            raise RuntimeError("architecture PCA model was not initialized")
         features = extract_architecture_features(getattr(solution, "solution", ""))
         coordinates = transform_architecture_pca(features, model)
         label = architecture_label(features)
@@ -830,13 +836,13 @@ def classify_and_route_solution(
         return analysis
 
 
-def _source_hash(solution: object) -> str:
+def _source_hash(solution: EvolutionSolution) -> str:
     source = getattr(solution, "solution", "")
     text = source if isinstance(source, str) else str(source or "")
     return hashlib.sha256(text.strip().encode("utf-8")).hexdigest()
 
 
-def expire_migration_copies(memory: object, boundary: int) -> int:
+def expire_migration_copies(memory: EvolutionMemory, boundary: int) -> int:
     """Remove the previous exchange wave from selectable indexes, retaining history."""
     populations = getattr(memory, "populations", None)
     if not isinstance(populations, dict):
@@ -866,7 +872,7 @@ def expire_migration_copies(memory: object, boundary: int) -> int:
     return len(expired)
 
 
-def perform_island_exchange(memory: object, boundary: int) -> int:
+def perform_island_exchange(memory: EvolutionMemory, boundary: int) -> int:
     """Copy each island's top fraction to both neighboring architecture islands."""
     populations = getattr(memory, "populations", None)
     solutions = getattr(memory, "solutions", None)
@@ -879,7 +885,7 @@ def perform_island_exchange(memory: object, boundary: int) -> int:
     ):
         return 0
 
-    snapshots: list[list[object]] = []
+    snapshots: list[list[EvolutionSolution]] = []
     for island in islands:
         candidates = [
             populations[solution_id]
@@ -951,7 +957,7 @@ def perform_island_exchange(memory: object, boundary: int) -> int:
 
 
 def maybe_exchange_islands(
-    memory: object,
+    memory: EvolutionMemory,
     num_islands: int,
     migration_interval: int,
 ) -> dict[str, int]:
@@ -984,7 +990,7 @@ def maybe_exchange_islands(
 
 
 def initialize_architecture_memory(
-    memory: object, num_islands: int, migration_interval: int
+    memory: EvolutionMemory, num_islands: int, migration_interval: int
 ) -> None:
     with _lock_context(memory):
         target = ensure_architecture_islands(memory, num_islands)
@@ -998,7 +1004,9 @@ def initialize_architecture_memory(
             rebuild_architecture_islands(memory, target)
 
 
-def _current_stagnation_best_marker(memory: object) -> tuple[int, float] | None:
+def _current_stagnation_best_marker(
+    memory: EvolutionMemory,
+) -> tuple[int, float] | None:
     populations = getattr(memory, "populations", {})
     if not isinstance(populations, dict) or not populations:
         return None
@@ -1012,7 +1020,7 @@ def _current_stagnation_best_marker(memory: object) -> tuple[int, float] | None:
     return best_iteration, round(best_score, 12)
 
 
-def _stagnation_checkpoint_payload(memory: object) -> dict[str, Any]:
+def _stagnation_checkpoint_payload(memory: EvolutionMemory) -> dict[str, Any]:
     marker = getattr(memory, "_atrex_stagnation_best_marker", None)
     if not (
         isinstance(marker, (tuple, list))
@@ -1037,7 +1045,9 @@ def _stagnation_checkpoint_payload(memory: object) -> dict[str, Any]:
     }
 
 
-def _latest_completed_stagnation_escape(memory: object) -> dict[str, Any] | None:
+def _latest_completed_stagnation_escape(
+    memory: EvolutionMemory,
+) -> dict[str, Any] | None:
     solutions = getattr(memory, "solutions", {})
     if not isinstance(solutions, dict):
         return None
@@ -1064,7 +1074,7 @@ def _latest_completed_stagnation_escape(memory: object) -> dict[str, Any] | None
 
 
 def restore_stagnation_checkpoint_state(
-    memory: object, state: object
+    memory: EvolutionMemory, state: object
 ) -> dict[str, Any]:
     """Restore escape scheduling state, with a best-effort legacy reconstruction."""
     payload = state if isinstance(state, dict) else {}
@@ -1089,7 +1099,7 @@ def restore_stagnation_checkpoint_state(
             if latest_iteration <= best_marker[0]:
                 latest = None
 
-    def optional_int(value: object) -> int | None:
+    def optional_int(value: Any) -> int | None:
         if value is None:
             return None
         try:
@@ -1137,7 +1147,7 @@ def restore_stagnation_checkpoint_state(
 
 
 def restore_stagnation_checkpoint(
-    memory: object, checkpoint_path: str
+    memory: EvolutionMemory, checkpoint_path: str
 ) -> dict[str, Any]:
     """Restore stagnation state without requiring architecture-island routing."""
     state: object = None
@@ -1154,7 +1164,7 @@ def restore_stagnation_checkpoint(
     return status
 
 
-def architecture_checkpoint_payload(memory: object) -> dict[str, Any]:
+def architecture_checkpoint_payload(memory: EvolutionMemory) -> dict[str, Any]:
     model = copy.deepcopy(getattr(memory, "_atrex_architecture_pca_model", {}) or {})
     model.pop("coordinates", None)
     return {
@@ -1177,7 +1187,7 @@ def architecture_checkpoint_payload(memory: object) -> dict[str, Any]:
 
 
 def write_architecture_checkpoint(
-    memory: object, checkpoint_root: str, tag: str
+    memory: EvolutionMemory, checkpoint_root: str, tag: str
 ) -> bool:
     metadata_path = (
         Path(checkpoint_root) / "checkpoints" / f"checkpoint-{tag}" / "metadata.json"
@@ -1199,7 +1209,7 @@ def write_architecture_checkpoint(
 
 
 def _assignments_are_valid(
-    memory: object, populations: dict[str, object], target: int
+    memory: EvolutionMemory, populations: dict[str, Any], target: int
 ) -> bool:
     assigned = set().union(*memory.islands) if memory.islands else set()
     if assigned != set(populations):
@@ -1217,7 +1227,7 @@ def _assignments_are_valid(
 
 
 def restore_architecture_checkpoint(
-    memory: object,
+    memory: EvolutionMemory,
     checkpoint_path: str,
     num_islands: int,
     migration_interval: int,
@@ -1262,6 +1272,8 @@ def restore_architecture_checkpoint(
             and int(state.get("num_islands", 0) or 0) == target
         )
         if state_is_current and saved_model_is_valid and assignments_are_valid:
+            if not isinstance(saved_model, dict):
+                raise RuntimeError("validated architecture PCA model is not a mapping")
             memory._atrex_architecture_pca_model = saved_model
             memory._atrex_pca_refit_iteration = int(
                 state.get("pca_refit_iteration", last) or last

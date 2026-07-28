@@ -1,12 +1,67 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "expected_commit": "379d093d13edde085f7b984a9648437af3958543",
-  "required_paths": [
-    "agents/math_agent/math_evolve_agent.py",
-    "src/loongflow/framework/pes/database/database.py",
-    "src/loongflow/agentsdk/memory/evolution/in_memory.py",
-    "agents/math_agent/planner/plan_agent.py",
-    "agents/math_agent/executor/execute_fuse/execute_agent_fuse.py",
-    "agents/math_agent/summary/summary_agent.py"
-  ]
+  "targets": {
+    "agents/math_agent/math_evolve_agent.py": {
+      "sha256": "0c1fb4ebbe3e5462798996188461d945ebfa37b45648794077f0a33483b35d1a",
+      "callables": {}
+    },
+    "src/loongflow/framework/pes/database/database.py": {
+      "sha256": "422320697badfbc8460cfcd393c991b49c5b1e6e341af7678a3f9d43e03e5383",
+      "callables": {
+        "EvolveDatabase.__init__": ["self", "config"],
+        "EvolveDatabase.sample_solution": ["self", "island_id"],
+        "EvolveDatabase.add_solution": ["self", "solution"],
+        "EvolveDatabase.save_checkpoint": ["self", "checkpoint_path", "tag"],
+        "EvolveDatabase.load_checkpoint": ["self", "checkpoint_path"]
+      }
+    },
+    "src/loongflow/agentsdk/memory/evolution/in_memory.py": {
+      "sha256": "83e5c127e46f7f92e1e55aafc43be08eed95e09b490136c916f6c997833f345d",
+      "callables": {
+        "InMemory._prepare_solution": ["self", "solution"],
+        "InMemory._check_migration": ["self"]
+      }
+    },
+    "src/loongflow/framework/pes/database/database_tool.py": {
+      "sha256": "c2a6d521aea288327378dfd0fa91295bcb5bd7027de4aac308d235cbab35ba64",
+      "callables": {
+        "GetSolutionsTool.__init__": ["self", "func"],
+        "GetBestSolutionsTool.__init__": ["self", "func"],
+        "GetParentsByChildIdTool.__init__": ["self", "func"],
+        "GetChildsByParentTool.__init__": ["self", "func"]
+      }
+    },
+    "agents/math_agent/planner/build_tool.py": {
+      "sha256": "3819acddd435b9fe50ee5d4a412ba351dbcfdb52a589946ace6462242952473c",
+      "callables": {
+        "build_planner_write_tool": ["context"]
+      }
+    },
+    "agents/math_agent/planner/plan_agent.py": {
+      "sha256": "76b4cb6800a3b5d16af3a75d1c49856a208a83a1bb3422068846e24d0cda79fa",
+      "callables": {
+        "EvolvePlanAgent.run": ["self", "context", "message"]
+      }
+    },
+    "agents/math_agent/executor/execute_fuse/execute_agent_fuse.py": {
+      "sha256": "aae30e4ab61ef5eaf18f8b3c950f68c2f6e9241a39d67081acf1e4b0df845e69",
+      "callables": {
+        "EvolveExecuteAgentFuse.gen_multi_candidate": [
+          "self",
+          "context",
+          "parent_ctx",
+          "round_idx",
+          "parallel_candidates",
+          "previous_attempts"
+        ]
+      }
+    },
+    "agents/math_agent/summary/summary_agent.py": {
+      "sha256": "3a9b4594ce612977793c3917b2afb6fd8d1a428eebf315ff78ba5892e2b49399",
+      "callables": {
+        "EvolveSummaryAgent.run": ["self", "context", "message"]
+      }
+    }
+  }
 }

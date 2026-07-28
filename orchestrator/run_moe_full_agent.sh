@@ -4,7 +4,8 @@ set -euo pipefail
 : "${LLM_API_KEY:?LLM_API_KEY not set. export LLM_API_KEY=sk-... before running.}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CONTEST_ROOT="${MLSYS26_FLASHINFER_CONTEST_ROOT:-/home/youchunbo/code/mlsys26-flashinfer-contest}"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+CONTEST_ROOT="${MLSYS26_FLASHINFER_CONTEST_ROOT:-${REPO_ROOT%/*}/mlsys26-flashinfer-contest}"
 FULL_AGENT_DIR="${CONTEST_ROOT}/full-agent/moe"
 RUNNER="${FULL_AGENT_DIR}/run_moe.sh"
 PROJECT_ROOT="${FULL_AGENT_DIR}/agent/loongflow"
