@@ -31,6 +31,10 @@ class TestRuntimeConfig(unittest.TestCase):
         task = repo / "orchestrator" / "sol58_pes"
         task.mkdir(parents=True)
         config_path = task / "runtime_config.json"
+        (task / "task_spec.json").write_text(
+            (Path(__file__).with_name("task_spec.json")).read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
         config_path.write_text(
             json.dumps(config if config is not None else self.template),
             encoding="utf-8",
@@ -94,6 +98,22 @@ class TestRuntimeConfig(unittest.TestCase):
             result["records"]["SOL58_LOCAL_REPEAT_COUNT"]["source"],
             "environment",
         )
+
+    def test_task_identity_comes_from_task_spec(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self._load(Path(tmp))
+
+        self.assertEqual(result["values"]["SOL58_OFFICIAL_KERNEL_ID"], "58")
+        self.assertEqual(result["records"]["SOL58_TARGET_SCORE"]["source"], "task_spec")
+        self.assertEqual(
+            result["task_spec"]["leaderboard_url"],
+            "https://research.nvidia.com/benchmarks/sol-execbench/leaderboard/kernel/58/B200",
+        )
+
+    def test_rejects_environment_task_identity_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(RuntimeConfigError, "conflicts with task spec"):
+                self._load(Path(tmp), environ={"SOL58_OFFICIAL_KERNEL_ID": "59"})
 
     def test_auto_paths_use_repository_siblings(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

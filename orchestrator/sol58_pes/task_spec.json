@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "task_name": "sol_execbench_kernel_58_b200",
+  "kernel": {
+    "id": 58,
+    "problem_slug": "058_moe_expert_token_radix_sort_with_prefix_sum"
+  },
+  "hardware": {
+    "gpu_type": "B200"
+  },
+  "official": {
+    "base_url": "https://research.nvidia.com/benchmarks/sol-execbench",
+    "leaderboard_url": "https://research.nvidia.com/benchmarks/sol-execbench/leaderboard/kernel/58/B200",
+    "evaluation_stack_version": "v1.1"
+  },
+  "leaderboard_snapshot": {
+    "captured_at": "2026-07-29T00:00:00Z",
+    "max_age_days": 14,
+    "target_score": 0.904135,
+    "local_target_latency_ms": 0.006797,
+    "reference": {
+      "name": "Recursive",
+      "rank": 3,
+      "score": 0.904134,
+      "latency_ms": 0.005998
+    }
+  }
+}

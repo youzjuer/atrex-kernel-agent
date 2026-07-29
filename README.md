@@ -96,7 +96,7 @@ export LLM_API_KEY=sk-...
 export SOLBENCH_TOKEN=...  # required for sol58 official-v1.1 fitness
 bash orchestrator/pes.sh moe
 bash orchestrator/pes.sh sol58
-bash orchestrator/pes.sh sol58 -- --code-language auto
+SOL58_CODE_LANGUAGE=auto bash orchestrator/pes.sh sol58
 ```
 
 `orchestrator/pes.sh` delegates to task-specific LoongFlow bridges. `moe` runs the local
@@ -105,28 +105,29 @@ bash orchestrator/pes.sh sol58 -- --code-language auto
 SOL-ExecBench evaluator. LoongFlow owns planner, executor, evaluator, summary, population memory,
 lineage, reflections, checkpoints, and target-score termination.
 
-SOL58 source generation supports three modes through `--code-language` or
-`SOL58_CODE_LANGUAGE`:
+SOL58 source generation supports three schema-validated modes through
+`search.code_language` in the runtime config (`SOL58_CODE_LANGUAGE` remains a compatibility
+override):
 
 - `cuda_cpp` (default): accept only a standalone CUDA C++ `kernel.cu`.
 - `cute_dsl`: accept only a standalone CuTe DSL `kernel.py`.
 - `auto`: let each child choose CUDA C++ or CuTe DSL while keeping one language per candidate.
 
 For example, resume a CUDA checkpoint while allowing architectural migration to CuTe DSL with
-`bash orchestrator/run_sol58_pes.sh --code-language auto --checkpoint-path <checkpoint>`. The
+`SOL58_CODE_LANGUAGE=auto bash orchestrator/run_sol58_pes.sh --checkpoint-path <checkpoint>`. The
 evaluator detects the emitted source, creates the matching SOL solution specification, and compares
 both languages under the same three-repeat local gate and official v1.1 fitness.
-Use `--cutedsl-rate 0.7` to reserve 70% of each 10-iteration schedule for mandatory CuTeDSL
-generation (`--cutedsl-period` changes the period). CUDA output in a mandatory slot is rejected
+Set `search.cutedsl_generation_rate` to `0.7` to reserve 70% of each schedule for mandatory
+CuTeDSL generation. CUDA output in a mandatory slot is rejected
 before compilation, so the ratio is enforced instead of being prompt-only guidance.
 
 SOL58 defaults to the `official_v1_1_b200` local measurement profile. It reserves physical GPU 0
-(override with `--clock-gpu-index`), locks SM/DRAM clocks to the leaderboard preset
+(select another physical GPU through `measurement.clock_gpu_index`), locks SM/DRAM clocks to the leaderboard preset
 `1500/3996 MHz`, uses the official 10-warmup/50-iteration/seed-200 timing contract, and compiles
 CUDA C++ to an `sm_100` compatibility cubin. The compatibility target is executable on this
 machine's `sm_103` GPU and tracks the official `sm_100a` ordering more closely than native
 `sm_103` code generation. Each repeat verifies actual clocks and re-locks after external drift.
-Set `--measurement-profile native` for an unlocked host-speed dry run.
+Select the `native` measurement profile in a reviewed runtime config for an unlocked host-speed dry run.
 
 Local-best records include a measurement-profile fingerprint. Results from different GPU UUIDs,
 clocks, code-generation targets, or evaluator stacks are never compared. On a profile change, the runner
@@ -167,9 +168,9 @@ the normal correctness and timing passes, targets the slowest measured workload 
 user-kernel launch, and is cached by source/profile/workload identity. Summary receives compact key
 metrics, confidence-labelled bottleneck findings, and optimization implications in
 `metrics.ncu_analysis`; `.ncu-rep` files and raw logs remain artifacts. NCU timeout, permission, parser,
-or capture failures never alter fitness. Use `--no-ncu-summary` to disable it, `--ncu-policy local_best`
-to profile only incumbent-quality candidates, `--ncu-policy periodic` with
-`SOL58_NCU_PROFILE_INTERVAL`, or `--ncu-workload <index|uuid|slowest>` to override selection.
+or capture failures never alter fitness. Set `ncu.summary` to false to disable it,
+`ncu.profile_policy` to `local_best` to profile only incumbent-quality candidates, or use the
+`periodic` policy with `ncu.profile_interval`; `ncu.workload` selects an index, UUID, or `slowest`.
 
 Generated CUDA and CuTe DSL candidates must be standalone single-file sources. The local evaluator
 rejects quoted, absolute, dynamic, and source-file CUDA includes, plus relative or non-runtime Python
@@ -192,11 +193,17 @@ home members are reclassified, and each island exchanges its top fraction with a
 metadata and migration state are persisted in every checkpoint; legacy one-island checkpoints are
 expanded and reindexed on load.
 
+`orchestrator/sol58_pes/task_spec.json` owns immutable task identity and the timestamped leaderboard
+target: kernel ID, problem slug, GPU, API/leaderboard URLs, official stack, target score, and the
+rank reference. Conflicting identity environment variables fail instead of silently changing the
+task; a snapshot older than its configured maximum age emits a startup warning.
+
 `orchestrator/sol58_pes/runtime_config.json` is the checked-in, schema-validated default for search,
-paths, local measurement, official submission/probes, NCU, LLM, and compatibility settings. Existing
-environment variables remain compatibility overrides and CLI flags have highest precedence. Use
-`--runtime-config <file.json>` for a reviewed alternate configuration; unknown, missing, mistyped, or
-out-of-range fields fail before LoongFlow starts.
+paths, local measurement, submission/probe policy, NCU, LLM, and compatibility settings. Use only
+`--runtime-config <file.json>` to select a reviewed alternate configuration. Existing environment
+variables remain a second-layer compatibility mechanism; the old per-setting CLI shortcut layer was
+removed. All other CLI arguments are LoongFlow arguments such as `--checkpoint-path`. Unknown,
+missing, mistyped, or out-of-range config fields fail before LoongFlow starts.
 
 Every SOL58 launch writes a redacted run record under
 `<run-dir>/run_manifests/<UTC-time>-<pid>/` and updates `<run-dir>/run_manifest.json`. The record

@@ -1,5 +1,6 @@
 {
   "schema_version": 1,
+  "task_spec": "task_spec.json",
   "paths": {
     "contest_root": "auto",
     "problem_dir": "auto",
@@ -24,7 +25,6 @@
     "seed_local_best": true
   },
   "local_evaluation": {
-    "target_latency_ms": 0.006797,
     "repeat_count": 3,
     "best_gate": true,
     "cache": true,
@@ -43,11 +43,6 @@
   },
   "official": {
     "enabled": true,
-    "base_url": "https://research.nvidia.com/benchmarks/sol-execbench",
-    "kernel_id": 58,
-    "gpu_type": "B200",
-    "target_score": 0.904135,
-    "evaluation_stack_version": "v1.1",
     "submission_mode": "private",
     "cache": true,
     "minimum_local_score": 0.0,

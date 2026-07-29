@@ -58,4 +58,5 @@ jobs:
             orchestrator/loongflow_compat/test_compat_adapter.py \
             orchestrator/loongflow_compat/test_bootstrap.py \
             orchestrator/loongflow_compat/test_upstream_contract.py \
+            orchestrator/test_sol_execbench_task.py \
             orchestrator/test_run_manifest.py

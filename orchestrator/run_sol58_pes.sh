@@ -7,7 +7,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 TASK_DIR="${REPO_ROOT}/orchestrator/sol58_pes"
 ORIGINAL_ARGS=("$@")
-CLI_OVERRIDE_KEYS=()
 INPUT_ENV_SNAPSHOT="$(mktemp --suffix=.json -t sol58_initial_env.XXXXXX)"
 CLOCKS_LOCKED_BY_RUNNER=0
 RENDERED_CONFIG=""
@@ -52,128 +51,6 @@ while (($#)); do
       SOL58_RUNTIME_CONFIG="${1#*=}"
       shift
       ;;
-    --code-language)
-      if (($# < 2)); then
-        echo "error: --code-language requires cuda_cpp, cute_dsl, or auto" >&2
-        exit 2
-      fi
-      SOL58_CODE_LANGUAGE="$2"
-      CLI_OVERRIDE_KEYS+=("SOL58_CODE_LANGUAGE")
-      shift 2
-      ;;
-    --code-language=*)
-      SOL58_CODE_LANGUAGE="${1#*=}"
-      CLI_OVERRIDE_KEYS+=("SOL58_CODE_LANGUAGE")
-      shift
-      ;;
-    --cutedsl-rate|--cute-dsl-rate)
-      if (($# < 2)); then
-        echo "error: --cutedsl-rate requires a value from 0 through 1" >&2
-        exit 2
-      fi
-      SOL58_CUTEDSL_GENERATION_RATE="$2"
-      CLI_OVERRIDE_KEYS+=("SOL58_CUTEDSL_GENERATION_RATE")
-      shift 2
-      ;;
-    --cutedsl-rate=*|--cute-dsl-rate=*)
-      SOL58_CUTEDSL_GENERATION_RATE="${1#*=}"
-      CLI_OVERRIDE_KEYS+=("SOL58_CUTEDSL_GENERATION_RATE")
-      shift
-      ;;
-    --cutedsl-period|--cute-dsl-period)
-      if (($# < 2)); then
-        echo "error: --cutedsl-period requires a positive integer" >&2
-        exit 2
-      fi
-      SOL58_CUTEDSL_SCHEDULE_PERIOD="$2"
-      CLI_OVERRIDE_KEYS+=("SOL58_CUTEDSL_SCHEDULE_PERIOD")
-      shift 2
-      ;;
-    --cutedsl-period=*|--cute-dsl-period=*)
-      SOL58_CUTEDSL_SCHEDULE_PERIOD="${1#*=}"
-      CLI_OVERRIDE_KEYS+=("SOL58_CUTEDSL_SCHEDULE_PERIOD")
-      shift
-      ;;
-    --measurement-profile)
-      if (($# < 2)); then
-        echo "error: --measurement-profile requires official_v1_1_b200 or native" >&2
-        exit 2
-      fi
-      SOL58_MEASUREMENT_PROFILE="$2"
-      CLI_OVERRIDE_KEYS+=("SOL58_MEASUREMENT_PROFILE")
-      shift 2
-      ;;
-    --measurement-profile=*)
-      SOL58_MEASUREMENT_PROFILE="${1#*=}"
-      CLI_OVERRIDE_KEYS+=("SOL58_MEASUREMENT_PROFILE")
-      shift
-      ;;
-    --clock-gpu-index)
-      if (($# < 2)); then
-        echo "error: --clock-gpu-index requires a physical nvidia-smi GPU index" >&2
-        exit 2
-      fi
-      SOL58_CLOCK_GPU_INDEX="$2"
-      CLI_OVERRIDE_KEYS+=("SOL58_CLOCK_GPU_INDEX")
-      shift 2
-      ;;
-    --clock-gpu-index=*)
-      SOL58_CLOCK_GPU_INDEX="${1#*=}"
-      CLI_OVERRIDE_KEYS+=("SOL58_CLOCK_GPU_INDEX")
-      shift
-      ;;
-    --ncu-summary)
-      SOL58_NCU_SUMMARY=1
-      CLI_OVERRIDE_KEYS+=("SOL58_NCU_SUMMARY")
-      shift
-      ;;
-    --no-ncu-summary)
-      SOL58_NCU_SUMMARY=0
-      CLI_OVERRIDE_KEYS+=("SOL58_NCU_SUMMARY")
-      shift
-      ;;
-    --ncu-policy)
-      if (($# < 2)); then
-        echo "error: --ncu-policy requires all_correct, local_best, or periodic" >&2
-        exit 2
-      fi
-      SOL58_NCU_PROFILE_POLICY="$2"
-      CLI_OVERRIDE_KEYS+=("SOL58_NCU_PROFILE_POLICY")
-      shift 2
-      ;;
-    --ncu-policy=*)
-      SOL58_NCU_PROFILE_POLICY="${1#*=}"
-      CLI_OVERRIDE_KEYS+=("SOL58_NCU_PROFILE_POLICY")
-      shift
-      ;;
-    --ncu-timeout)
-      if (($# < 2)); then
-        echo "error: --ncu-timeout requires seconds" >&2
-        exit 2
-      fi
-      SOL58_NCU_TIMEOUT="$2"
-      CLI_OVERRIDE_KEYS+=("SOL58_NCU_TIMEOUT")
-      shift 2
-      ;;
-    --ncu-timeout=*)
-      SOL58_NCU_TIMEOUT="${1#*=}"
-      CLI_OVERRIDE_KEYS+=("SOL58_NCU_TIMEOUT")
-      shift
-      ;;
-    --ncu-workload)
-      if (($# < 2)); then
-        echo "error: --ncu-workload requires slowest, an index, or a workload UUID" >&2
-        exit 2
-      fi
-      SOL58_NCU_WORKLOAD="$2"
-      CLI_OVERRIDE_KEYS+=("SOL58_NCU_WORKLOAD")
-      shift 2
-      ;;
-    --ncu-workload=*)
-      SOL58_NCU_WORKLOAD="${1#*=}"
-      CLI_OVERRIDE_KEYS+=("SOL58_NCU_WORKLOAD")
-      shift
-      ;;
     *)
       RUNNER_ARGS+=("$1")
       shift
@@ -199,9 +76,6 @@ case "${SOL58_CODE_LANGUAGE:-}" in
     ;;
 esac
 
-for key in "${CLI_OVERRIDE_KEYS[@]}"; do
-  export "${key?}"
-done
 export SOL58_RUNTIME_CONFIG="${SOL58_RUNTIME_CONFIG:-${TASK_DIR}/runtime_config.json}"
 RUNTIME_ENV="$(mktemp --suffix=.env -t sol58_runtime.XXXXXX)"
 RESOLVED_RUNTIME_CONFIG="$(mktemp --suffix=.json -t sol58_runtime_resolved.XXXXXX)"
@@ -324,7 +198,7 @@ python "${SCRIPT_DIR}/loongflow_compat/upstream_contract.py" \
   --project-root "${PROJECT_ROOT}" \
   --contract "${SCRIPT_DIR}/loongflow_compat/loongflow_contract.json"
 
-for required in task_config.yaml task_prompt.txt initial_kernel.cu eval_program_sol58.py seed_bank.json; do
+for required in task_spec.json task_config.yaml task_prompt.txt initial_kernel.cu eval_program_sol58.py seed_bank.json; do
   if [[ ! -f "${TASK_DIR}/${required}" ]]; then
     echo "error: missing SOL58 PES task file: ${TASK_DIR}/${required}" >&2
     exit 1
@@ -438,6 +312,7 @@ RUN_MANIFEST_ARGS=(
   --repository "problem=${SOL58_PROBLEM_DIR}"
   --source "runner=${SCRIPT_DIR}/run_sol58_pes.sh"
   --source "runtime_config=${SOL58_RUNTIME_CONFIG}"
+  --source "task_spec=${ATREX_TASK_SPEC_PATH}"
   --source "runtime_config_loader=${TASK_DIR}/runtime_config.py"
   --source "resolved_runtime_config=${RUN_RECORD_DIR}/resolved_runtime_config.json"
   --source "task_config=${TASK_DIR}/task_config.yaml"
@@ -457,15 +332,13 @@ RUN_MANIFEST_ARGS=(
   --source "upstream_contract=${SCRIPT_DIR}/loongflow_compat/upstream_contract.py"
   --source "loongflow_contract=${SCRIPT_DIR}/loongflow_compat/loongflow_contract.json"
 )
-for key in "${CLI_OVERRIDE_KEYS[@]}"; do
-  RUN_MANIFEST_ARGS+=(--cli-key "${key}")
-done
 for argument in "${ORIGINAL_ARGS[@]}"; do
   RUN_MANIFEST_ARGS+=(--runner-arg="${argument}")
 done
 python "${REPO_ROOT}/orchestrator/run_manifest.py" "${RUN_MANIFEST_ARGS[@]}"
 
-echo "[Atrex] Starting real LoongFlow PES for SOL-ExecBench kernel 58"
+echo "[Atrex] Starting real LoongFlow PES for ${ATREX_TASK_NAME}"
+echo "        task_spec=${ATREX_TASK_SPEC_PATH} leaderboard=${SOL58_LEADERBOARD_URL}"
 echo "        target_latency_ms=${SOL58_TARGET_LATENCY_MS}"
 echo "        target_score=${SOL58_TARGET_SCORE}"
 echo "        code_language=${SOL58_CODE_LANGUAGE}"

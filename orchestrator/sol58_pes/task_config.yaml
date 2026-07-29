@@ -1,4 +1,4 @@
-# SOL-ExecBench kernel 58 LoongFlow PES configuration.
+# SOL-ExecBench LoongFlow PES configuration rendered from a validated task spec.
 workspace_path: "${SOL58_PES_WORKSPACE}"
 
 logger:
@@ -41,10 +41,10 @@ summarizers:
     react_max_steps: 5
 
 evolve:
-  task_name: "sol_execbench_kernel_58_b200"
+  task_name: "${ATREX_TASK_NAME}"
   task: |
-    Optimize SOL-ExecBench kernel 58:
-    058_moe_expert_token_radix_sort_with_prefix_sum.
+    Optimize SOL-ExecBench kernel ${SOL58_OFFICIAL_KERNEL_ID}:
+    ${SOL58_PROBLEM_SLUG} on ${SOL58_OFFICIAL_GPU_TYPE}.
 
   planner_name: "evolve_planner"
   executor_name: "evolve_executor_fuse"
