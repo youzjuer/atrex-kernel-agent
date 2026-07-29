@@ -51,6 +51,7 @@ jobs:
             orchestrator/sol58_pes/test_runtime_config.py \
             orchestrator/sol58_pes/test_official_probe.py \
             orchestrator/sol58_pes/test_local_gate.py \
+            orchestrator/sol58_pes/test_local_evaluation_pipeline.py \
             orchestrator/sol58_pes/test_local_best_store.py \
             orchestrator/sol58_pes/test_official_protocol.py \
             orchestrator/sol58_pes/test_official_fitness_pipeline.py \

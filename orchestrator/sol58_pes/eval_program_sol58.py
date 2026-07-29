@@ -10,7 +10,6 @@ standard LoongFlow {status, summary, score, metrics, artifacts} dictionary.
 from __future__ import annotations
 
 import ast
-import contextlib
 import hashlib
 import json
 import math
@@ -41,6 +40,12 @@ from orchestrator.sol58_pes.ncu_summary import collect_ncu_analysis, should_prof
 from orchestrator.sol58_pes import official_protocol
 from orchestrator.sol58_pes import local_gate
 from orchestrator.sol58_pes.local_best_store import LocalBestContext, LocalBestStore
+from orchestrator.sol58_pes.local_evaluation_pipeline import (
+    LocalEvaluationConfig,
+    LocalEvaluationHooks,
+    LocalEvaluationRequest,
+    collect_local_evaluation,
+)
 from orchestrator.sol58_pes.fitness_calibration import (
     CalibrationContext,
     FitnessCalibration,
@@ -1135,290 +1140,40 @@ def _collect_local_evaluation(
     repeat_count: int | None = None,
     cache_enabled: bool | None = None,
 ) -> dict[str, Any]:
-    """Return one complete local measurement, reusing an identical contract result."""
-    required_repeats = LOCAL_REPEAT_COUNT if repeat_count is None else repeat_count
-    use_cache = LOCAL_EVAL_CACHE if cache_enabled is None else cache_enabled
-    if required_repeats < 1:
-        raise ValueError("repeat_count must be positive")
-    _copy_problem_files(workspace)
-    _write_solution(workspace, kernel_source, source_language)
-    expected = _load_workload_count(workspace)
-    cache_path, contract, contract_sha256 = _local_evaluation_cache_path(
-        kernel_source,
-        source_language,
-        measurement_profile,
-        repeat_count=required_repeats,
+    """Run the local pipeline with facade hooks kept patchable by evaluator tests."""
+    config = LocalEvaluationConfig(
+        repeat_count=LOCAL_REPEAT_COUNT if repeat_count is None else repeat_count,
+        cache_enabled=LOCAL_EVAL_CACHE if cache_enabled is None else cache_enabled,
+        sol_execbench=SOL_EXECBENCH,
+        target_latency_ms=TARGET_LATENCY_MS,
+        cache_schema_version=LOCAL_EVAL_CACHE_SCHEMA_VERSION,
     )
-    lock_context = _file_lock(cache_path) if use_cache else contextlib.nullcontext()
-
-    with lock_context:
-        cached = _read_json(cache_path) if use_cache else None
-        if isinstance(cached, dict) and _cached_local_evaluation_is_valid(
-            cached,
-            source_sha256=source_sha256,
-            contract_sha256=contract_sha256,
-            repeat_count=required_repeats,
-        ):
-            processes = [
-                subprocess.CompletedProcess(
-                    args=[SOL_EXECBENCH],
-                    returncode=int(item.get("returncode") or 0),
-                    stdout=str(item.get("stdout_tail") or ""),
-                    stderr=str(item.get("stderr_tail") or ""),
-                )
-                for item in cached.get("processes", [])
-                if isinstance(item, dict)
-            ]
-            while len(processes) < required_repeats:
-                processes.append(
-                    subprocess.CompletedProcess(
-                        args=[SOL_EXECBENCH], returncode=0, stdout="", stderr=""
-                    )
-                )
-            return {
-                **cached,
-                "processes": processes,
-                "cache_hit": True,
-                "cache_path": str(cache_path),
-            }
-
-        parsed_runs: list[dict[str, Any]] = []
-        processes: list[subprocess.CompletedProcess[str]] = []
-        local_run_records: list[dict[str, Any]] = []
-        local_latencies_ms: list[float] = []
-        rejected_clock_attempts: list[dict[str, Any]] = []
-        max_local_attempts = int(contract["max_local_attempts"])
-        repeat_index = 0
-        attempt_index = 0
-
-        while repeat_index < required_repeats:
-            attempt_index += 1
-            traces_filename = (
-                "traces.jsonl"
-                if repeat_index == 0
-                else f"traces_repeat_{repeat_index + 1}.jsonl"
-            )
-            try:
-                clocks_before = _ensure_measurement_clocks()
-            except Exception as exc:
-                return {
-                    "error_result": _result(
-                        "execution_failed",
-                        f"Measurement environment rejected before local repeat "
-                        f"{repeat_index + 1}/{required_repeats}: {exc}",
-                        0.0,
-                        metrics={
-                            "eval_time_s": time.time() - start,
-                            "measurement_profile": measurement_profile,
-                            "local_repeat_count_completed": repeat_index,
-                        },
-                        artifacts={
-                            "workspace": str(workspace),
-                            "program_path": program_path,
-                            "local_repeats": local_run_records,
-                        },
-                    )
-                }
-
-            proc, clock_drift_events = _run_sol_execbench_monitored(
-                workspace, traces_filename
-            )
-            parsed = _parse_traces(workspace, traces_filename)
-            try:
-                clocks_after = _ensure_measurement_clocks(allow_relock=False)
-            except Exception as exc:
-                clocks_after = {"validation_error": str(exc)}
-                clock_drift_events.append(
-                    {
-                        "detected_at": time.time(),
-                        "post_repeat_validation_error": str(exc),
-                    }
-                )
-
-            if clock_drift_events:
-                rejected_path = workspace / (
-                    f"traces_clock_rejected_attempt_{attempt_index}.jsonl.rejected"
-                )
-                traces_path = workspace / traces_filename
-                if traces_path.is_file():
-                    traces_path.replace(rejected_path)
-                rejected_clock_attempts.append(
-                    {
-                        "attempt": attempt_index,
-                        "intended_repeat": repeat_index + 1,
-                        "rejected_traces_path": str(rejected_path),
-                        "clock_drift_events": clock_drift_events,
-                        "clocks_before": clocks_before,
-                        "clocks_after": clocks_after,
-                    }
-                )
-                if attempt_index >= max_local_attempts:
-                    return {
-                        "error_result": _result(
-                            "execution_failed",
-                            "Official-like local measurement could not collect "
-                            f"{required_repeats} clean repeats in {max_local_attempts} attempts "
-                            "because GPU clocks changed during evaluation.",
-                            0.0,
-                            metrics={
-                                "eval_time_s": time.time() - start,
-                                "measurement_profile": measurement_profile,
-                                "local_repeat_count_completed": repeat_index,
-                                "clock_rejected_attempt_count": len(
-                                    rejected_clock_attempts
-                                ),
-                            },
-                            artifacts={
-                                "workspace": str(workspace),
-                                "program_path": program_path,
-                                "local_repeats": local_run_records,
-                                "rejected_clock_attempts": rejected_clock_attempts,
-                            },
-                        )
-                    }
-                try:
-                    _set_measurement_clocks(measurement_profile, stabilize=True)
-                except Exception as exc:
-                    return {
-                        "error_result": _result(
-                            "execution_failed",
-                            f"Failed to restore clocks after rejected attempt: {exc}",
-                            0.0,
-                            metrics={
-                                "eval_time_s": time.time() - start,
-                                "measurement_profile": measurement_profile,
-                            },
-                            artifacts={
-                                "workspace": str(workspace),
-                                "rejected_clock_attempts": rejected_clock_attempts,
-                            },
-                        )
-                    }
-                continue
-
-            processes.append(proc)
-            parsed_runs.append(parsed)
-            total = int(parsed.get("total", 0))
-            passed = int(parsed.get("passed", 0))
-            failures = parsed.get("failures", [])
-            latency_ms = float(parsed.get("latency_ms_geomean", 0.0) or 0.0)
-            local_run_records.append(
-                {
-                    "repeat": repeat_index + 1,
-                    "attempt": attempt_index,
-                    "traces_path": str(workspace / traces_filename),
-                    "returncode": proc.returncode,
-                    "passed": passed,
-                    "total": total,
-                    "latency_ms_geomean": latency_ms,
-                    "latency_ms_arith_mean": parsed.get("latency_ms_arith_mean", 0.0),
-                    "failures": failures[:6],
-                    "clocks_before": clocks_before,
-                    "clocks_after": clocks_after,
-                }
-            )
-            failure_artifacts = {
-                "workspace": str(workspace),
-                "source_language": source_language,
-                "measurement_profile": measurement_profile,
-                "returncode": proc.returncode,
-                "stdout_tail": _tail(proc.stdout),
-                "stderr_tail": _tail(proc.stderr),
-                "per_workload": parsed.get("per_workload", []),
-                "local_repeats": local_run_records,
-                "rejected_clock_attempts": rejected_clock_attempts,
-            }
-            elapsed = time.time() - start
-
-            if parsed.get("error"):
-                return {
-                    "error_result": _result(
-                        "execution_failed",
-                        f"SOL-ExecBench repeat {repeat_index + 1}/{required_repeats} failed "
-                        f"before producing traces: {parsed['error']}. "
-                        f"stderr_tail={_tail(proc.stderr, 1200)}",
-                        0.0,
-                        metrics={
-                            "eval_time_s": elapsed,
-                            "target_latency_ms": TARGET_LATENCY_MS,
-                        },
-                        artifacts=failure_artifacts,
-                    )
-                }
-
-            if (
-                proc.returncode != 0
-                or total != expected
-                or passed != expected
-                or failures
-            ):
-                return {
-                    "error_result": _result(
-                        "validation_failed",
-                        f"Correctness/coverage gate failed on local repeat "
-                        f"{repeat_index + 1}/{required_repeats}: passed {passed}/{expected}, "
-                        f"returncode={proc.returncode}. failures={failures[:6]}",
-                        0.0,
-                        metrics={
-                            "eval_time_s": elapsed,
-                            "target_latency_ms": TARGET_LATENCY_MS,
-                            "local_repeat_count_completed": repeat_index + 1,
-                        },
-                        artifacts=failure_artifacts,
-                    )
-                }
-
-            if latency_ms <= 0:
-                return {
-                    "error_result": _result(
-                        "execution_failed",
-                        f"Local repeat {repeat_index + 1}/{required_repeats} passed all "
-                        "workloads but produced no positive latency.",
-                        0.0,
-                        metrics={
-                            "eval_time_s": elapsed,
-                            "target_latency_ms": TARGET_LATENCY_MS,
-                        },
-                        artifacts=failure_artifacts,
-                    )
-                }
-            local_latencies_ms.append(latency_ms)
-            repeat_index += 1
-
-        serializable_processes = [
-            {
-                "returncode": proc.returncode,
-                "stdout_tail": _tail(proc.stdout),
-                "stderr_tail": _tail(proc.stderr),
-            }
-            for proc in processes
-        ]
-        payload = {
-            "schema_version": LOCAL_EVAL_CACHE_SCHEMA_VERSION,
-            "complete": True,
-            "created_at": datetime.now(timezone.utc).isoformat(),
-            "source_sha256": source_sha256,
-            "source_language": source_language,
-            "contract": contract,
-            "contract_sha256": contract_sha256,
-            "measurement_profile_id": measurement_profile["id"],
-            "source_workspace": str(workspace),
-            "expected": expected,
-            "parsed_runs": parsed_runs,
-            "processes": serializable_processes,
-            "local_run_records": local_run_records,
-            "local_latencies_ms": local_latencies_ms,
-            "rejected_clock_attempts": rejected_clock_attempts,
-            "attempt_count": attempt_index,
-        }
-        if use_cache:
-            _atomic_write_json(cache_path, payload)
-        return {
-            **payload,
-            "processes": processes,
-            "cache_hit": False,
-            "cache_path": str(cache_path),
-        }
+    request = LocalEvaluationRequest(
+        workspace=workspace,
+        kernel_source=kernel_source,
+        source_language=source_language,
+        source_sha256=source_sha256,
+        measurement_profile=measurement_profile,
+        program_path=program_path,
+        started_at=start,
+    )
+    hooks = LocalEvaluationHooks(
+        copy_problem_files=_copy_problem_files,
+        write_solution=_write_solution,
+        load_workload_count=_load_workload_count,
+        cache_path=_local_evaluation_cache_path,
+        file_lock=_file_lock,
+        read_json=_read_json,
+        cache_is_valid=_cached_local_evaluation_is_valid,
+        ensure_clocks=_ensure_measurement_clocks,
+        run_monitored=_run_sol_execbench_monitored,
+        parse_traces=_parse_traces,
+        set_clocks=_set_measurement_clocks,
+        result=_result,
+        tail=_tail,
+        atomic_write_json=_atomic_write_json,
+    )
+    return collect_local_evaluation(request, config, hooks)
 
 
 def _gate_uncertainty_band(
