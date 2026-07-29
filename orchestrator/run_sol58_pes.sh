@@ -6,6 +6,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 TASK_DIR="${REPO_ROOT}/orchestrator/sol58_pes"
+export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH:-}"
 ORIGINAL_ARGS=("$@")
 INPUT_ENV_SNAPSHOT="$(mktemp --suffix=.json -t sol58_initial_env.XXXXXX)"
 CLOCKS_LOCKED_BY_RUNNER=0
@@ -93,7 +94,7 @@ CONTEST_ROOT="${MLSYS26_FLASHINFER_CONTEST_ROOT}"
 PROJECT_ROOT="${CONTEST_ROOT}/full-agent/moe/agent/loongflow"
 RUN_DIR="${SOL58_PES_RUN_DIR}"
 OFFICIAL_LOCAL_SOL_EXECBENCH="${SOL_EXECBENCH}"
-export PYTHONPATH="${REPO_ROOT}:${PROJECT_ROOT}:${PROJECT_ROOT}/src:${PYTHONPATH:-}"
+export PYTHONPATH="${PROJECT_ROOT}:${PROJECT_ROOT}/src:${PYTHONPATH}"
 
 if is_truthy "${SOL58_PES_KNOWLEDGE_GROUNDING}" && [[ ! -f "${SOL58_PES_KNOWLEDGE_PACK}" ]]; then
   echo "error: SOL58 knowledge pack not found: ${SOL58_PES_KNOWLEDGE_PACK}" >&2
