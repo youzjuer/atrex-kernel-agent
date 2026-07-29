@@ -52,6 +52,12 @@ from orchestrator.sol58_pes.official_probe import (
     architecture_probe_evidence,
     claim_official_probe,
 )
+from orchestrator.sol58_pes.official_fitness_pipeline import (
+    OfficialEvaluationState,
+    OfficialFitnessConfig,
+    OfficialFitnessHooks,
+    evaluate_official_fitness,
+)
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -1002,19 +1008,20 @@ def _measurement_implementation_hash() -> str:
         return _MEASUREMENT_IMPLEMENTATION_SHA256
 
     source_tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
-    selected = [
+    selected_functions = [
         node
         for node in source_tree.body
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
         and node.name in _MEASUREMENT_FUNCTIONS
     ]
-    found = {node.name for node in selected}
+    found = {node.name for node in selected_functions}
     missing = sorted(_MEASUREMENT_FUNCTIONS - found)
     if missing:
         raise RuntimeError(
             "local evaluation contract is missing measurement functions: "
             + ", ".join(missing)
         )
+    selected: list[ast.stmt] = list(selected_functions)
     canonical = ast.dump(
         ast.Module(body=selected, type_ignores=[]),
         annotate_fields=True,
@@ -1146,7 +1153,7 @@ def _collect_local_evaluation(
 
     with lock_context:
         cached = _read_json(cache_path) if use_cache else None
-        if _cached_local_evaluation_is_valid(
+        if isinstance(cached, dict) and _cached_local_evaluation_is_valid(
             cached,
             source_sha256=source_sha256,
             contract_sha256=contract_sha256,
@@ -2186,6 +2193,35 @@ def _refresh_due_official_results() -> dict[str, Any]:
     return report
 
 
+def _official_fitness_pipeline_config() -> OfficialFitnessConfig:
+    return OfficialFitnessConfig(
+        target_latency_ms=TARGET_LATENCY_MS,
+        minimum_local_score=OFFICIAL_MIN_LOCAL_SCORE,
+        local_best_gate=LOCAL_BEST_GATE,
+        pending_score_policy=OFFICIAL_PENDING_SCORE_POLICY,
+        provisional_projection_floor=OFFICIAL_PROVISIONAL_SCORE_CAP,
+        evaluation_stack_version=OFFICIAL_EVAL_STACK_VERSION,
+        gpu_type=OFFICIAL_GPU_TYPE,
+        submission_mode=OFFICIAL_SUBMISSION_MODE,
+        refreshable_statuses=frozenset(OFFICIAL_REFRESHABLE_STATUSES),
+    )
+
+
+def _official_fitness_pipeline_hooks() -> OfficialFitnessHooks:
+    return OfficialFitnessHooks(
+        result=_result,
+        fitness_anchor=_official_fitness_anchor,
+        record_authoritative_source=_record_authoritative_source_fitness,
+        anchored_provisional_score=_anchored_provisional_score,
+        submit_official=_submit_official,
+        official_status=_official_status,
+        save_local_best=_save_local_best,
+        record_calibration=_record_official_calibration,
+        local_provisional_score=_local_provisional_score,
+        provisional_official_score=_provisional_official_score,
+    )
+
+
 def evaluate(program_path: str) -> dict[str, Any]:
     start = time.time()
     eval_id = uuid.uuid4().hex[:12]
@@ -2277,6 +2313,7 @@ def evaluate(program_path: str) -> dict[str, Any]:
             OFFICIAL_FITNESS
             and same_as_local_best
             and local_best_profile_matches
+            and local_best_before is not None
             and recorded_anchor is not None
             and recorded_anchor["source"] == "completed_local_best"
         ):
@@ -2636,366 +2673,30 @@ def evaluate(program_path: str) -> dict[str, Any]:
         )
 
         if OFFICIAL_FITNESS:
-            recorded_anchor = _official_fitness_anchor(local_best_before)
-            if (
-                same_as_local_best
-                and recorded_anchor is not None
-                and recorded_anchor["source"] == "completed_local_best"
-            ):
-                recorded_score = float(recorded_anchor["score"])
-                _record_authoritative_source_fitness(
-                    kernel_source,
+            return evaluate_official_fitness(
+                OfficialEvaluationState(
+                    workspace=workspace,
+                    kernel_source=kernel_source,
                     source_language=source_language,
-                    official_score=recorded_score,
-                    official_latency_ms=float(
-                        local_best_before.get("official_latency_ms") or 0.0
-                    ),
-                    local_latency_ms=gate_latency_ms,
-                    submission_id=recorded_anchor.get("submission_id"),
-                )
-                metrics["official"] = {
-                    "enabled": True,
-                    "submitted": False,
-                    "status": "REUSED_LOCAL_BEST_OFFICIAL",
-                    "authoritative": True,
-                    "fitness_source": "official_local_best_record",
-                    "submission_id": recorded_anchor.get("submission_id"),
-                    "sol_score": recorded_score,
-                    "record_hit": True,
-                    "cache_hit": False,
-                }
-                summary = (
-                    f"{local_summary} Reused completed official v1.1 fitness from the "
-                    f"persisted local-best record: sol_score={recorded_score:.6f}, "
-                    f"submission_id={recorded_anchor.get('submission_id')}."
-                )
-                return _result(
-                    "success",
-                    summary,
-                    recorded_score,
-                    metrics=metrics,
-                    artifacts=common_artifacts,
-                )
-
-            if local_score < OFFICIAL_MIN_LOCAL_SCORE:
-                metrics["official"] = {
-                    "enabled": True,
-                    "status": "SKIPPED_LOCAL_PREFILTER",
-                    "authoritative": False,
-                    "fitness_source": "none",
-                }
-                summary = (
-                    f"{local_summary} Official v1.1 fitness skipped because local_score "
-                    f"{local_score:.6f} < SOL58_OFFICIAL_MIN_LOCAL_SCORE "
-                    f"{OFFICIAL_MIN_LOCAL_SCORE:.6f}; PES score forced to 0."
-                )
-                return _result(
-                    "success",
-                    summary,
-                    0.0,
-                    metrics=metrics,
-                    artifacts=common_artifacts,
-                )
-
-            if (
-                LOCAL_BEST_GATE
-                and not passes_official_gate
-                and not reuse_cached_official
-            ):
-                scoring_latency_ms = (
-                    best_latency_before
-                    if same_as_local_best and best_latency_before > 0
-                    else gate_latency_ms
-                )
-                scoring_local_score = TARGET_LATENCY_MS / scoring_latency_ms
-                provisional_score, provisional_details = _anchored_provisional_score(
-                    scoring_local_score,
-                    scoring_latency_ms,
-                    local_best_before,
-                )
-                skip_status = (
-                    "SKIPPED_SAME_AS_LOCAL_BEST"
-                    if same_as_local_best
-                    else "SKIPPED_NOT_LOCAL_BEST"
-                )
-                anchored = provisional_details["source"] == "incumbent_official_anchor"
-                provisional_label = (
-                    "incumbent-anchored" if anchored else "calibrated local"
-                )
-                metrics["official"] = {
-                    "enabled": True,
-                    "submitted": False,
-                    "status": skip_status,
-                    "authoritative": False,
-                    "fitness_source": (
-                        "provisional_official_anchor"
-                        if anchored
-                        else "provisional_local_proxy"
-                    ),
-                    "provisional": True,
-                    "provisional_score": provisional_score,
-                    "search_score": provisional_details["search_score"],
-                    "provisional_local_score": scoring_local_score,
-                    "provisional_projection_floor": OFFICIAL_PROVISIONAL_SCORE_CAP,
-                    "provisional_calibration": provisional_details,
-                }
-                if same_as_local_best:
-                    gate_detail = "candidate is the persisted local-best kernel"
-                else:
-                    gate_status = str(gate_result.get("status") or "rejected")
-                    gate_detail = (
-                        f"uncertainty gate classified the candidate as {gate_status}; "
-                        f"gate latency {gate_latency_ms:.6f} ms vs local best "
-                        f"{best_latency_before:.6f} ms"
-                    )
-                summary = (
-                    f"{local_summary} Official v1.1 submission skipped because {gate_detail}. "
-                    f"Using {provisional_label} provisional score {provisional_score:.6f}; "
-                    "no remote slot was consumed."
-                )
-                return _result(
-                    "success",
-                    summary,
-                    provisional_score,
-                    metrics=metrics,
-                    artifacts=common_artifacts,
-                )
-
-            official_started = time.time()
-            if official_probe.get("claimed"):
-                submission_reason = "architecture_probe"
-            elif gate_result.get("challenger_claimed"):
-                submission_reason = "uncertain_challenger"
-            else:
-                submission_reason = "local_best_improvement"
-            official = _submit_official(
-                workspace,
-                kernel_source,
-                source_language=source_language,
-                local_score=local_score,
-                local_latency_ms=gate_latency_ms,
-                measurement_profile=measurement_profile,
-                allow_upload=not same_as_local_best,
-                submission_reason=submission_reason,
-            )
-            official_request_time = time.time() - official_started
-            official_cache_metadata = official.get("_atrex")
-            actual_submission_reason = (
-                str(official_cache_metadata.get("submission_reason"))
-                if isinstance(official_cache_metadata, dict)
-                and official_cache_metadata.get("submission_reason")
-                else submission_reason
-            )
-            if new_local_best_record is not None:
-                new_local_best_record.update(
-                    {
-                        "remote_submitted": True,
-                        "official_submission_id": official.get("id"),
-                        "official_status": _official_status(official),
-                        "official_submission_reason": actual_submission_reason,
-                    }
-                )
-                _save_local_best(new_local_best_record, kernel_source)
-            metrics["eval_time_s"] = time.time() - start
-            official_status = _official_status(official)
-            official_correct = bool(official.get("is_correct"))
-            official_score = float(official.get("sol_score") or 0.0)
-            official_latency_ms = float(official.get("latency_ms") or 0.0)
-            official_stack = (
-                official.get("evaluation_stack_version") or OFFICIAL_EVAL_STACK_VERSION
-            )
-            official_metrics = {
-                "enabled": True,
-                "submitted": True,
-                "submission_id": official.get("id"),
-                "status": official_status,
-                "is_correct": official_correct,
-                "sol_score": official_score,
-                "latency_ms": official_latency_ms,
-                "fast_1_count": official.get("fast_1_count"),
-                "fast_1_total": official.get("fast_1_total"),
-                "avg_speedup": official.get("avg_speedup"),
-                "gpu_type": official.get("gpu_type") or OFFICIAL_GPU_TYPE,
-                "evaluation_stack_version": official_stack,
-                "submission_mode": OFFICIAL_SUBMISSION_MODE,
-                "cache_hit": bool(official.get("cache_hit")),
-                "upstream_status": official.get("upstream_status"),
-                "next_refresh_at": official.get("next_refresh_at"),
-                "request_time_s": official_request_time,
-                "submission_reason": actual_submission_reason,
-                "official_probe": official_probe,
-            }
-            if official_latency_ms > 0:
-                official_metrics["local_to_official_latency_ratio"] = (
-                    gate_latency_ms / official_latency_ms
-                )
-            metrics["official"] = official_metrics
-            common_artifacts["official_submission_id"] = official.get("id")
-            common_artifacts["official_status"] = official_status
-            common_artifacts["official_result_path"] = str(
-                workspace / "official_submission_result.json"
-            )
-            if (workspace / "official_submission.json").exists():
-                common_artifacts["official_submission_path"] = str(
-                    workspace / "official_submission.json"
-                )
-
-            authoritative_score = (
-                official_status == "COMPLETED"
-                and official_correct
-                and official_score > 0
-            )
-            if authoritative_score:
-                official_metrics.update(
-                    {
-                        "authoritative": True,
-                        "fitness_source": "official",
-                    }
-                )
-                _record_authoritative_source_fitness(
-                    kernel_source,
-                    source_language=source_language,
-                    official_score=official_score,
-                    official_latency_ms=official_latency_ms,
-                    local_latency_ms=gate_latency_ms,
-                    submission_id=official.get("id"),
-                )
-                _record_official_calibration(
                     local_score=local_score,
-                    official_score=official_score,
-                    local_latency_ms=gate_latency_ms,
-                    official_latency_ms=official_latency_ms,
-                    submission_id=official.get("id"),
-                    submission_reason=actual_submission_reason,
-                )
-                persisted_best = new_local_best_record
-                if persisted_best is None and same_as_local_best and local_best_before:
-                    persisted_best = dict(local_best_before)
-                if persisted_best is not None:
-                    persisted_best.update(
-                        {
-                            "remote_submitted": True,
-                            "official_submission_id": official.get("id"),
-                            "official_status": official_status,
-                            "official_score": official_score,
-                            "official_latency_ms": official_latency_ms,
-                            "official_anchor_score": official_score,
-                            "official_anchor_latency_ms": gate_latency_ms,
-                            "official_anchor_submission_id": official.get("id"),
-                        }
-                    )
-                    _save_local_best(persisted_best, kernel_source)
-                summary = (
-                    f"Official {official_stack} B200 fitness: submission_id={official.get('id')}, "
-                    f"status={official_status}, is_correct={official_correct}, "
-                    f"sol_score={official_score:.6f}, latency={official_latency_ms:.6f} ms. "
-                    f"{local_summary}"
-                )
-                return _result(
-                    "success",
-                    summary,
-                    official_score,
+                    gate_latency_ms=gate_latency_ms,
+                    best_latency_before=best_latency_before,
+                    local_best_before=local_best_before,
+                    same_as_local_best=same_as_local_best,
+                    passes_official_gate=passes_official_gate,
+                    reuse_cached_official=reuse_cached_official,
+                    gate_result=gate_result,
+                    official_probe=official_probe,
+                    new_local_best_record=new_local_best_record,
+                    measurement_profile=measurement_profile,
                     metrics=metrics,
                     artifacts=common_artifacts,
-                )
-
-            pending_like = (
-                official_status in OFFICIAL_REFRESHABLE_STATUSES
-                or official_status
-                in {
-                    "TIMEOUT",
-                    "STALE_PENDING_RESULT",
-                }
+                    local_summary=local_summary,
+                    started_at=start,
+                ),
+                _official_fitness_pipeline_config(),
+                _official_fitness_pipeline_hooks(),
             )
-            if pending_like and OFFICIAL_PENDING_SCORE_POLICY in {
-                "provisional",
-                "calibrated",
-                "local",
-                "local_proxy",
-            }:
-                scoring_latency_ms = (
-                    best_latency_before
-                    if same_as_local_best and best_latency_before > 0
-                    else gate_latency_ms
-                )
-                scoring_local_score = TARGET_LATENCY_MS / scoring_latency_ms
-                provisional_score, provisional_details = _anchored_provisional_score(
-                    scoring_local_score,
-                    scoring_latency_ms,
-                    local_best_before,
-                )
-                if provisional_details["source"] == "incumbent_official_anchor":
-                    provisional_ratio = provisional_details[
-                        "candidate_to_anchor_latency_ratio"
-                    ]
-                    provisional_search_score = provisional_details["search_score"]
-                    provisional_label = "incumbent-anchored"
-                elif OFFICIAL_PENDING_SCORE_POLICY in {"local", "local_proxy"}:
-                    provisional_score = _local_provisional_score(scoring_local_score)
-                    provisional_ratio = 1.0
-                    provisional_search_score = scoring_local_score
-                    provisional_label = "local-proxy fallback"
-                else:
-                    provisional_score, provisional_ratio = _provisional_official_score(
-                        scoring_local_score
-                    )
-                    provisional_search_score = scoring_local_score * provisional_ratio
-                    provisional_label = "calibrated"
-                official_metrics.update(
-                    {
-                        "authoritative": False,
-                        "fitness_source": "provisional",
-                        "provisional": True,
-                        "provisional_score": provisional_score,
-                        "search_score": provisional_search_score,
-                        "provisional_ratio": provisional_ratio,
-                        "provisional_projection_floor": OFFICIAL_PROVISIONAL_SCORE_CAP,
-                        "pending_policy": OFFICIAL_PENDING_SCORE_POLICY,
-                        "provisional_calibration": provisional_details,
-                    }
-                )
-                if official.get("upstream_status") == "QUEUED":
-                    pending_detail = "was accepted and queued asynchronously"
-                else:
-                    pending_detail = (
-                        f"is {official_status} after bounded polling/cache refresh"
-                    )
-                summary = (
-                    f"{local_summary} Official {official_stack} B200 submission "
-                    f"{official.get('id')} {pending_detail}; "
-                    f"using provisional {provisional_label} search_score "
-                    f"{provisional_search_score:.6f}, selection_score={provisional_score:.6f} "
-                    f"(ratio={provisional_ratio:.4f}, projection_floor="
-                    f"{OFFICIAL_PROVISIONAL_SCORE_CAP:.6f}) so PES can continue. The projected "
-                    "selection score remains below target and "
-                    "does not certify leaderboard rank."
-                )
-                return _result(
-                    "success",
-                    summary,
-                    provisional_score,
-                    metrics=metrics,
-                    artifacts=common_artifacts,
-                )
-
-            if (
-                official_status != "COMPLETED"
-                or not official_correct
-                or official_score <= 0
-            ):
-                summary = (
-                    f"{local_summary} Official {official_stack} fitness failed: status={official_status}, "
-                    f"is_correct={official_correct}, sol_score={official_score:.6f}; "
-                    "PES score forced to 0."
-                )
-                return _result(
-                    "validation_failed",
-                    summary,
-                    0.0,
-                    metrics=metrics,
-                    artifacts=common_artifacts,
-                )
-
         summary = local_summary.replace("Local prefilter ", "")
         return _result(
             "success",
