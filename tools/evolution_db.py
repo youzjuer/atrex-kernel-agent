@@ -174,7 +174,9 @@ def diverse_reference_set(codes: List[str], ref_size: int) -> List[str]:
     selected = [codes[best_pair[0]], codes[best_pair[1]]]
     remaining = [c for k, c in enumerate(codes) if k not in best_pair]
     while len(selected) < ref_size and remaining:
-        nxt = max(remaining, key=lambda c: min(fast_code_distance(c, s) for s in selected))
+        nxt = max(
+            remaining, key=lambda c: min(fast_code_distance(c, s) for s in selected)
+        )
         selected.append(nxt)
         remaining.remove(nxt)
     return selected
@@ -227,7 +229,11 @@ class EvolutionDB:
             "best_score": None,
             "baseline": {"solution_id": None, "latency_us": None},
             "history": [],
-            "convergence": {"no_improve_streak": 0, "stopped": False, "stop_reason": None},
+            "convergence": {
+                "no_improve_streak": 0,
+                "stopped": False,
+                "stop_reason": None,
+            },
         }
 
     def load(self) -> None:
@@ -240,7 +246,9 @@ class EvolutionDB:
         self.state_path.write_text(json.dumps(self.state, indent=2, ensure_ascii=False))
 
     def _write_config(self) -> None:
-        self.config_path.write_text(json.dumps(self.config, indent=2, ensure_ascii=False))
+        self.config_path.write_text(
+            json.dumps(self.config, indent=2, ensure_ascii=False)
+        )
 
     # ----- config helpers -------------------------------------------------- #
 
@@ -311,7 +319,9 @@ class EvolutionDB:
                 if len(others) < 1:
                     coords.append(0)
                     continue
-                ref = diverse_reference_set(others, self.config["diversity_reference_size"])
+                ref = diverse_reference_set(
+                    others, self.config["diversity_reference_size"]
+                )
                 ds = [fast_code_distance(code, r) for r in ref if r != code]
                 v = sum(ds) / len(ds) if ds else 0.0
             elif dim == "score":
@@ -386,10 +396,18 @@ class EvolutionDB:
         )
         lineage = float(cfg.get("lineage_gain", 0.08)) * depth
         denom = max(abs(parent_score), 1e-9)
-        relative = max(0.0, (float(score) - parent_score) / denom) if has_parent else 0.0
-        improvement = float(cfg.get("relative_improvement_gain", 1.0)) * relative * decay
-        quality = float(cfg.get("absolute_quality_gain", 0.25)) * math.log1p(max(float(score), 0.0))
-        total = self._clamp_sample_weight(base + inherited + lineage + improvement + quality)
+        relative = (
+            max(0.0, (float(score) - parent_score) / denom) if has_parent else 0.0
+        )
+        improvement = (
+            float(cfg.get("relative_improvement_gain", 1.0)) * relative * decay
+        )
+        quality = float(cfg.get("absolute_quality_gain", 0.25)) * math.log1p(
+            max(float(score), 0.0)
+        )
+        total = self._clamp_sample_weight(
+            base + inherited + lineage + improvement + quality
+        )
         return total, {
             "base": base,
             "inherited": inherited,
@@ -507,7 +525,9 @@ class EvolutionDB:
     def _effective_exploration_rate(self) -> float:
         sel = self.config["selection"]
         rate = float(sel["exploration_rate"])
-        streak = int((self.state.get("convergence") or {}).get("no_improve_streak") or 0)
+        streak = int(
+            (self.state.get("convergence") or {}).get("no_improve_streak") or 0
+        )
         if streak >= self._stuck_threshold():
             rate *= float(sel.get("stuck_exploration_multiplier", 2.0))
         return min(1.0, max(0.0, rate))
@@ -517,11 +537,15 @@ class EvolutionDB:
         if island is None:
             return list(sols)
         if not 0 <= island < self.config["num_islands"]:
-            raise DBError(f"island {island} out of range [0,{self.config['num_islands']})")
+            raise DBError(
+                f"island {island} out of range [0,{self.config['num_islands']})"
+            )
         ids = [sid for sid in self.state["islands"][island] if sid in sols]
         return ids or list(sols)
 
-    def _select_one(self, temperature: float, island: Optional[int] = None) -> Optional[str]:
+    def _select_one(
+        self, temperature: float, island: Optional[int] = None
+    ) -> Optional[str]:
         sel = self.config["selection"]
         sols = self.state["solutions"]
         if not sols:
@@ -550,9 +574,7 @@ class EvolutionDB:
             probs = [pow(max(s, 0.0) + 1e-9, 1.0 / temp) for s in scores]
         if sel["use_sampling_weight"]:
             power = sel["sampling_weight_power"]
-            weights = [
-                (sols[c]["sample_weight"] or 1.0) ** power for c in cand
-            ]
+            weights = [(sols[c]["sample_weight"] or 1.0) ** power for c in cand]
             probs = [p * w for p, w in zip(probs, weights, strict=True)]
         total = sum(probs)
         if total <= 0 or any(math.isnan(p) for p in probs):
@@ -580,7 +602,9 @@ class EvolutionDB:
         self.save()
         return {"database": str(self.db), "config": str(self.config_path)}
 
-    def _next_solution_id(self, code: str, parent: Optional[str], generation: int) -> str:
+    def _next_solution_id(
+        self, code: str, parent: Optional[str], generation: int
+    ) -> str:
         raw = f"{code}|{parent}|{generation}|{time.time()}|{random.random()}"
         return hashlib.sha256(raw.encode()).hexdigest()[:8]
 
@@ -630,7 +654,10 @@ class EvolutionDB:
                 "code_sha256": hashlib.sha256(code_text.encode()).hexdigest(),
                 "correctness": {"rel_err": None, "status": "PASS"},
                 "performance": {"latency_us": latency},
-                "optimization": {"action_category": "baseline", "action_description": "seed"},
+                "optimization": {
+                    "action_category": "baseline",
+                    "action_description": "seed",
+                },
             },
         ).to_dict()
         self.state["baseline"] = {"solution_id": sid, "latency_us": latency}
@@ -706,7 +733,8 @@ class EvolutionDB:
         self._admit(sol)
         self.save()
         occupies = sol["metadata"]["MAP_Elite_feature"] in {
-            k for k in self.state["island_feature_maps"][island]
+            k
+            for k in self.state["island_feature_maps"][island]
             if self.state["island_feature_maps"][island][k] == sid
         }
         return {
@@ -719,7 +747,9 @@ class EvolutionDB:
             "sample_weight": sol["sample_weight"],
         }
 
-    def select_parents(self, n: int, island: Optional[int] = None) -> List[Dict[str, Any]]:
+    def select_parents(
+        self, n: int, island: Optional[int] = None
+    ) -> List[Dict[str, Any]]:
         if not self.state["solutions"]:
             raise DBError("population is empty; import a seed first")
         temp = self._adaptive_temperature()
@@ -755,7 +785,9 @@ class EvolutionDB:
 
         # convergence vs previous checkpoint best
         conv = self.state["convergence"]
-        prev_best = self.state["history"][-1]["best_score"] if self.state["history"] else None
+        prev_best = (
+            self.state["history"][-1]["best_score"] if self.state["history"] else None
+        )
         if prev_best is not None and best_score is not None:
             denom = abs(prev_best) if prev_best else 1.0
             rel = (best_score - prev_best) / denom
@@ -764,12 +796,18 @@ class EvolutionDB:
             else:
                 conv["no_improve_streak"] = 0
         self.state["history"].append(
-            {"generation": generation, "best_score": best_score, "best_solution_id": best_id}
+            {
+                "generation": generation,
+                "best_score": best_score,
+                "best_solution_id": best_id,
+            }
         )
         # target_met (Stop Conditions) takes priority over no_improve / budget.
         target_score = self.config.get("target_score")
         target_reached = bool(target_met) or (
-            target_score is not None and best_score is not None and best_score >= target_score
+            target_score is not None
+            and best_score is not None
+            and best_score >= target_score
         )
         patience = self.config["convergence"]["no_improve_patience"]
         max_gen = self.config["budget"]["max_generations"]
@@ -783,10 +821,14 @@ class EvolutionDB:
         cdir = self.ckpt_dir / f"iter-{generation}"
         (cdir / "solutions").mkdir(parents=True, exist_ok=True)
         meta = self._build_metadata(generation)
-        (cdir / "metadata.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False))
+        (cdir / "metadata.json").write_text(
+            json.dumps(meta, indent=2, ensure_ascii=False)
+        )
         if best_id:
             (cdir / "best_solution.json").write_text(
-                json.dumps(self.state["solutions"][best_id], indent=2, ensure_ascii=False)
+                json.dumps(
+                    self.state["solutions"][best_id], indent=2, ensure_ascii=False
+                )
             )
         for sid, sol in self.state["solutions"].items():
             (cdir / "solutions" / f"{sid}.json").write_text(
@@ -831,7 +873,9 @@ class EvolutionDB:
                 "temperature": self._adaptive_temperature(),
                 "exploration_rate": self._effective_exploration_rate(),
             },
-            "migration": {"last_migration_generation": self.state["last_migration_generation"]},
+            "migration": {
+                "last_migration_generation": self.state["last_migration_generation"]
+            },
             "history": list(self.state["history"]),
             "convergence": dict(self.state["convergence"]),
         }
@@ -884,7 +928,9 @@ class EvolutionDB:
         ref = sol.get("metadata", {}).get("iteration_ref", "")
         return Path(ref).name if ref else ""
 
-    def _summary_for_solution(self, data: Any, sol: Dict[str, Any], default: str) -> str:
+    def _summary_for_solution(
+        self, data: Any, sol: Dict[str, Any], default: str
+    ) -> str:
         if not isinstance(data, dict):
             return default
         sid = sol["solution_id"]
@@ -953,7 +999,9 @@ class EvolutionDB:
                 sol["sample_weight"] = self._clamp_sample_weight(explicit_weight)
                 weights_updated += 1
             else:
-                multiplier = self._lookup_summary_number(data, "weight_adjustments", sol)
+                multiplier = self._lookup_summary_number(
+                    data, "weight_adjustments", sol
+                )
                 if multiplier is not None:
                     sol["sample_weight"] = self._clamp_sample_weight(
                         float(sol.get("sample_weight") or 1.0) * multiplier
@@ -980,14 +1028,18 @@ class EvolutionDB:
             "best_score": self.state["best_score"],
             "baseline": self.state["baseline"],
             "selection": {
-                "temperature": self._adaptive_temperature() if self.state["solutions"] else None,
+                "temperature": self._adaptive_temperature()
+                if self.state["solutions"]
+                else None,
                 "exploration_rate": self._effective_exploration_rate(),
             },
             "convergence": self.state["convergence"],
             "history": self.state["history"],
         }
 
-    def list_solutions(self, generation: Optional[int], island: Optional[int]) -> List[Dict[str, Any]]:
+    def list_solutions(
+        self, generation: Optional[int], island: Optional[int]
+    ) -> List[Dict[str, Any]]:
         out = []
         for sid, s in self.state["solutions"].items():
             if generation is not None and s["generation"] != generation:
@@ -1000,14 +1052,18 @@ class EvolutionDB:
                     "generation": s["generation"],
                     "island_id": s["island_id"],
                     "score": s["score"],
-                    "correctness": (s["metadata"].get("correctness") or {}).get("status"),
+                    "correctness": (s["metadata"].get("correctness") or {}).get(
+                        "status"
+                    ),
                     "parent_id": s["parent_id"],
                 }
             )
         out.sort(key=lambda x: (x["generation"], -(x["score"] or 0)))
         return out
 
-    def config_op(self, get: Optional[str], sets: Optional[List[str]]) -> Dict[str, Any]:
+    def config_op(
+        self, get: Optional[str], sets: Optional[List[str]]
+    ) -> Dict[str, Any]:
         if sets:
             for kv in sets:
                 if "=" not in kv:
@@ -1044,14 +1100,20 @@ def _emit(obj: Any, as_json: bool) -> None:
             print(json.dumps(row, ensure_ascii=False) if isinstance(row, dict) else row)
     elif isinstance(obj, dict):
         for k, v in obj.items():
-            print(f"{k}: {json.dumps(v, ensure_ascii=False) if isinstance(v, (dict, list)) else v}")
+            print(
+                f"{k}: {json.dumps(v, ensure_ascii=False) if isinstance(v, (dict, list)) else v}"
+            )
     else:
         print(obj)
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description="Evolutionary database manager for the atrex PES loop.")
-    p.add_argument("--seed", type=int, default=None, help="Seed RNG for reproducibility.")
+    p = argparse.ArgumentParser(
+        description="Evolutionary database manager for the atrex PES loop."
+    )
+    p.add_argument(
+        "--seed", type=int, default=None, help="Seed RNG for reproducibility."
+    )
     sub = p.add_subparsers(dest="command", required=True)
 
     def common(sp: argparse.ArgumentParser) -> None:
@@ -1062,7 +1124,9 @@ def build_parser() -> argparse.ArgumentParser:
     common(sp)
     sp.add_argument("--config", default=None)
 
-    sp = sub.add_parser("import-seed", help="Register baseline (v0) as the seed solution.")
+    sp = sub.add_parser(
+        "import-seed", help="Register baseline (v0) as the seed solution."
+    )
     common(sp)
     sp.add_argument("--from", dest="from_mem", default="memory/v0.json")
     sp.add_argument("--code", default="kernel.py")
@@ -1074,7 +1138,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--code", required=True)
     sp.add_argument("--lang", default=None)
     sp.add_argument("--score", type=float, default=None)
-    sp.add_argument("--correctness", choices=["PASS", "FAIL", "TIMEOUT_FAIL"], required=True)
+    sp.add_argument(
+        "--correctness", choices=["PASS", "FAIL", "TIMEOUT_FAIL"], required=True
+    )
     sp.add_argument("--rel-err", dest="rel_err", type=float, default=None)
     sp.add_argument("--latency-us", dest="latency_us", type=float, default=None)
     sp.add_argument("--tflops", type=float, default=None)
@@ -1086,12 +1152,16 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--evidence-file", dest="evidence_file", default=None)
     sp.add_argument("--iteration-ref", dest="iteration_ref", default=None)
 
-    sp = sub.add_parser("select-parents", help="Sample N parents (adaptive weighted selection).")
+    sp = sub.add_parser(
+        "select-parents", help="Sample N parents (adaptive weighted selection)."
+    )
     common(sp)
     sp.add_argument("--n", type=int, default=None)
     sp.add_argument("--island", type=int, default=None)
 
-    sp = sub.add_parser("annotate-generation", help="Write summarizer feedback into generation records.")
+    sp = sub.add_parser(
+        "annotate-generation", help="Write summarizer feedback into generation records."
+    )
     common(sp)
     sp.add_argument("--generation", type=int, required=True)
     sp.add_argument("--summary-file", required=True)
@@ -1099,8 +1169,12 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("checkpoint", help="Finalize a generation.")
     common(sp)
     sp.add_argument("--generation", type=int, required=True)
-    sp.add_argument("--target-met", dest="target_met", action="store_true",
-                    help="Signal Stop Conditions reached -> stop_reason=target_met.")
+    sp.add_argument(
+        "--target-met",
+        dest="target_met",
+        action="store_true",
+        help="Signal Stop Conditions reached -> stop_reason=target_met.",
+    )
 
     sp = sub.add_parser("best", help="Print the current best solution.")
     common(sp)

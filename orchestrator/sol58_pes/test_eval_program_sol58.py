@@ -89,9 +89,12 @@ class TestCalibration(unittest.TestCase):
                 + "\n"
             )
 
-            with mock.patch.object(evaluator, "EVAL_ROOT", root), mock.patch.dict(
-                evaluator.os.environ,
-                {"SOL58_OFFICIAL_PROVISIONAL_RATIO": ""},
+            with (
+                mock.patch.object(evaluator, "EVAL_ROOT", root),
+                mock.patch.dict(
+                    evaluator.os.environ,
+                    {"SOL58_OFFICIAL_PROVISIONAL_RATIO": ""},
+                ),
             ):
                 ratio = evaluator._load_official_calibration_ratio()
 
@@ -122,12 +125,16 @@ class TestCalibration(unittest.TestCase):
             path = root / "official_cache" / "calibration.jsonl"
             path.parent.mkdir()
             path.write_text("".join(json.dumps(row) + "\n" for row in rows))
-            with mock.patch.object(evaluator, "EVAL_ROOT", root), mock.patch.object(
-                evaluator,
-                "_measurement_profile",
-                return_value={"id": "profile-a", "name": "official_v1_1_b200"},
-            ), mock.patch.dict(
-                evaluator.os.environ, {"SOL58_OFFICIAL_PROVISIONAL_RATIO": ""}
+            with (
+                mock.patch.object(evaluator, "EVAL_ROOT", root),
+                mock.patch.object(
+                    evaluator,
+                    "_measurement_profile",
+                    return_value={"id": "profile-a", "name": "official_v1_1_b200"},
+                ),
+                mock.patch.dict(
+                    evaluator.os.environ, {"SOL58_OFFICIAL_PROVISIONAL_RATIO": ""}
+                ),
             ):
                 ratio = evaluator._load_official_calibration_ratio()
 
@@ -143,29 +150,44 @@ class TestMeasurementProfile(unittest.TestCase):
             "SOL58_CUDA_GENCODE": "-gencode=arch=compute_100,code=sm_100",
             "SOL58_LOCAL_EVAL_STACK_ID": "v1.1",
         }
-        with mock.patch.object(
-            evaluator, "MEASUREMENT_PROFILE_NAME", "official_v1_1_b200"
-        ), mock.patch.dict(evaluator.os.environ, common):
+        with (
+            mock.patch.object(
+                evaluator, "MEASUREMENT_PROFILE_NAME", "official_v1_1_b200"
+            ),
+            mock.patch.dict(evaluator.os.environ, common),
+        ):
             official = evaluator._measurement_profile()
-        with mock.patch.object(
-            evaluator, "MEASUREMENT_PROFILE_NAME", "official_v1_1_b200"
-        ), mock.patch.dict(
-            evaluator.os.environ,
-            {**common, "SOL58_CUDA_GENCODE": "-gencode=arch=compute_103,code=sm_103"},
+        with (
+            mock.patch.object(
+                evaluator, "MEASUREMENT_PROFILE_NAME", "official_v1_1_b200"
+            ),
+            mock.patch.dict(
+                evaluator.os.environ,
+                {
+                    **common,
+                    "SOL58_CUDA_GENCODE": "-gencode=arch=compute_103,code=sm_103",
+                },
+            ),
         ):
             native_codegen = evaluator._measurement_profile()
-        with mock.patch.object(
-            evaluator, "MEASUREMENT_PROFILE_NAME", "official_v1_1_b200"
-        ), mock.patch.dict(
-            evaluator.os.environ,
-            {**common, "SOL58_MEASUREMENT_DEVICE_ID": "GPU-a"},
+        with (
+            mock.patch.object(
+                evaluator, "MEASUREMENT_PROFILE_NAME", "official_v1_1_b200"
+            ),
+            mock.patch.dict(
+                evaluator.os.environ,
+                {**common, "SOL58_MEASUREMENT_DEVICE_ID": "GPU-a"},
+            ),
         ):
             device_a = evaluator._measurement_profile()
-        with mock.patch.object(
-            evaluator, "MEASUREMENT_PROFILE_NAME", "official_v1_1_b200"
-        ), mock.patch.dict(
-            evaluator.os.environ,
-            {**common, "SOL58_MEASUREMENT_DEVICE_ID": "GPU-b"},
+        with (
+            mock.patch.object(
+                evaluator, "MEASUREMENT_PROFILE_NAME", "official_v1_1_b200"
+            ),
+            mock.patch.dict(
+                evaluator.os.environ,
+                {**common, "SOL58_MEASUREMENT_DEVICE_ID": "GPU-b"},
+            ),
         ):
             device_b = evaluator._measurement_profile()
 
@@ -199,16 +221,14 @@ class TestMeasurementProfile(unittest.TestCase):
         restored = {"gpu_index": "0", "sm_clock_mhz": 1500, "dram_clock_mhz": 3996}
         proc = SimpleNamespace(returncode=0, stdout="", stderr="")
 
-        with mock.patch.object(
-            evaluator, "_measurement_profile", return_value=profile
-        ), mock.patch.object(
-            evaluator, "_query_gpu_clocks", side_effect=[stale, restored]
-        ), mock.patch.object(
-            evaluator.subprocess, "run", return_value=proc
-        ) as run, mock.patch.object(
-            evaluator.time, "sleep"
-        ), mock.patch.dict(
-            evaluator.os.environ, {"SOL58_AUTO_RELOCK_CLOCKS": "1"}
+        with (
+            mock.patch.object(evaluator, "_measurement_profile", return_value=profile),
+            mock.patch.object(
+                evaluator, "_query_gpu_clocks", side_effect=[stale, restored]
+            ),
+            mock.patch.object(evaluator.subprocess, "run", return_value=proc) as run,
+            mock.patch.object(evaluator.time, "sleep"),
+            mock.patch.dict(evaluator.os.environ, {"SOL58_AUTO_RELOCK_CLOCKS": "1"}),
         ):
             state = evaluator._ensure_measurement_clocks()
 
@@ -247,9 +267,10 @@ class TestStandaloneSource(unittest.TestCase):
             root = Path(tmp)
             program = root / "candidate.cu"
             program.write_text(source)
-            with mock.patch.object(
-                evaluator, "EVAL_ROOT", root / "eval"
-            ), mock.patch.object(evaluator, "_copy_problem_files") as copy_problem:
+            with (
+                mock.patch.object(evaluator, "EVAL_ROOT", root / "eval"),
+                mock.patch.object(evaluator, "_copy_problem_files") as copy_problem,
+            ):
                 result = evaluator.evaluate(str(program))
 
         self.assertEqual(result["status"], "validation_failed")
@@ -343,8 +364,9 @@ class TestCuTeDslSource(unittest.TestCase):
         self.assertEqual(submission["sources"][0]["content"], _CUTE_SOURCE)
 
     def test_cute_local_best_is_persisted_as_python(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
-            evaluator, "EVAL_ROOT", Path(tmp)
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            mock.patch.object(evaluator, "EVAL_ROOT", Path(tmp)),
         ):
             evaluator._save_local_best(
                 {
@@ -369,24 +391,22 @@ class TestCuTeDslSource(unittest.TestCase):
             root = Path(tmp)
             program = root / "candidate.py"
             program.write_text(_CUTE_SOURCE)
-            with mock.patch.object(
-                evaluator, "EVAL_ROOT", root / "eval"
-            ), mock.patch.object(evaluator, "CODE_LANGUAGE", "auto"), mock.patch.object(
-                evaluator, "LOCAL_REPEAT_COUNT", 1
-            ), mock.patch.object(
-                evaluator, "LOCAL_BEST_GATE", False
-            ), mock.patch.object(
-                evaluator, "OFFICIAL_FITNESS", False
-            ), mock.patch.object(
-                evaluator, "_copy_problem_files"
-            ), mock.patch.object(
-                evaluator,
-                "_run_sol_execbench",
-                return_value=SimpleNamespace(returncode=0, stdout="", stderr=""),
-            ), mock.patch.object(
-                evaluator, "_parse_traces", return_value=_parsed_result(0.01)
-            ), mock.patch.object(
-                evaluator, "_load_workload_count", return_value=16
+            with (
+                mock.patch.object(evaluator, "EVAL_ROOT", root / "eval"),
+                mock.patch.object(evaluator, "CODE_LANGUAGE", "auto"),
+                mock.patch.object(evaluator, "LOCAL_REPEAT_COUNT", 1),
+                mock.patch.object(evaluator, "LOCAL_BEST_GATE", False),
+                mock.patch.object(evaluator, "OFFICIAL_FITNESS", False),
+                mock.patch.object(evaluator, "_copy_problem_files"),
+                mock.patch.object(
+                    evaluator,
+                    "_run_sol_execbench",
+                    return_value=SimpleNamespace(returncode=0, stdout="", stderr=""),
+                ),
+                mock.patch.object(
+                    evaluator, "_parse_traces", return_value=_parsed_result(0.01)
+                ),
+                mock.patch.object(evaluator, "_load_workload_count", return_value=16),
             ):
                 result = evaluator.evaluate(str(program))
                 solution = json.loads(
@@ -408,15 +428,13 @@ class TestCuTeDslSource(unittest.TestCase):
             program = root / "51" / "executor" / "0_0" / "candidate.cu"
             program.parent.mkdir(parents=True)
             program.write_text(cuda_source)
-            with mock.patch.object(
-                evaluator, "EVAL_ROOT", root / "eval"
-            ), mock.patch.object(evaluator, "CODE_LANGUAGE", "auto"), mock.patch.object(
-                evaluator, "CUTEDSL_GENERATION_RATE", 0.7
-            ), mock.patch.object(
-                evaluator, "CUTEDSL_SCHEDULE_PERIOD", 10
-            ), mock.patch.object(
-                evaluator, "_copy_problem_files"
-            ) as copy_problem:
+            with (
+                mock.patch.object(evaluator, "EVAL_ROOT", root / "eval"),
+                mock.patch.object(evaluator, "CODE_LANGUAGE", "auto"),
+                mock.patch.object(evaluator, "CUTEDSL_GENERATION_RATE", 0.7),
+                mock.patch.object(evaluator, "CUTEDSL_SCHEDULE_PERIOD", 10),
+                mock.patch.object(evaluator, "_copy_problem_files") as copy_problem,
+            ):
                 result = evaluator.evaluate(str(program))
 
         self.assertEqual(result["status"], "validation_failed")
@@ -424,8 +442,9 @@ class TestCuTeDslSource(unittest.TestCase):
         copy_problem.assert_not_called()
 
     def test_authoritative_fitness_registry_is_keyed_by_source_hash(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
-            evaluator, "EVAL_ROOT", Path(tmp)
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            mock.patch.object(evaluator, "EVAL_ROOT", Path(tmp)),
         ):
             evaluator._record_authoritative_source_fitness(
                 _CUTE_SOURCE,
@@ -446,9 +465,10 @@ class TestCuTeDslSource(unittest.TestCase):
 
 class TestLocalBestGate(unittest.TestCase):
     def test_clear_slowdown_skips_paired_recheck(self) -> None:
-        with mock.patch.object(
-            evaluator, "LOCAL_GATE_RELATIVE_NOISE_FLOOR", 0.01
-        ), mock.patch.object(evaluator, "_collect_local_evaluation") as collect:
+        with (
+            mock.patch.object(evaluator, "LOCAL_GATE_RELATIVE_NOISE_FLOOR", 0.01),
+            mock.patch.object(evaluator, "_collect_local_evaluation") as collect,
+        ):
             result = evaluator._evaluate_local_best_gate(
                 workspace=Path("/tmp/unused"),
                 kernel_source="candidate",
@@ -481,15 +501,15 @@ class TestLocalBestGate(unittest.TestCase):
             root = Path(tmp)
             incumbent_path = root / "incumbent.cu"
             incumbent_path.write_text(incumbent)
-            with mock.patch.object(
-                evaluator, "LOCAL_GATE_RELATIVE_NOISE_FLOOR", 0.01
-            ), mock.patch.object(
-                evaluator, "LOCAL_GATE_RECHECK_PAIRS", 2
-            ), mock.patch.object(
-                evaluator,
-                "_collect_local_evaluation",
-                side_effect=[measured(value) for value in measurements],
-            ) as collect:
+            with (
+                mock.patch.object(evaluator, "LOCAL_GATE_RELATIVE_NOISE_FLOOR", 0.01),
+                mock.patch.object(evaluator, "LOCAL_GATE_RECHECK_PAIRS", 2),
+                mock.patch.object(
+                    evaluator,
+                    "_collect_local_evaluation",
+                    side_effect=[measured(value) for value in measurements],
+                ) as collect,
+            ):
                 result = evaluator._evaluate_local_best_gate(
                     workspace=root / "eval",
                     kernel_source=candidate,
@@ -523,20 +543,24 @@ class TestLocalBestGate(unittest.TestCase):
             root = Path(tmp)
             incumbent_path = root / "incumbent.cu"
             incumbent_path.write_text(incumbent)
-            with mock.patch.object(evaluator, "EVAL_ROOT", root), mock.patch.object(
-                evaluator, "LOCAL_GATE_RELATIVE_NOISE_FLOOR", 0.01
-            ), mock.patch.object(
-                evaluator, "LOCAL_GATE_RECHECK_PAIRS", 2
-            ), mock.patch.object(
-                evaluator, "LOCAL_GATE_UNCERTAIN_RELATIVE_TOLERANCE", 0.005
-            ), mock.patch.object(
-                evaluator, "LOCAL_GATE_CHALLENGER_COOLDOWN_S", 0.0
-            ), mock.patch.object(
-                evaluator, "LOCAL_GATE_ALLOW_UNCERTAIN_OFFICIAL", True
-            ), mock.patch.object(
-                evaluator,
-                "_collect_local_evaluation",
-                side_effect=[{"local_latencies_ms": [value]} for value in measurements],
+            with (
+                mock.patch.object(evaluator, "EVAL_ROOT", root),
+                mock.patch.object(evaluator, "LOCAL_GATE_RELATIVE_NOISE_FLOOR", 0.01),
+                mock.patch.object(evaluator, "LOCAL_GATE_RECHECK_PAIRS", 2),
+                mock.patch.object(
+                    evaluator, "LOCAL_GATE_UNCERTAIN_RELATIVE_TOLERANCE", 0.005
+                ),
+                mock.patch.object(evaluator, "LOCAL_GATE_CHALLENGER_COOLDOWN_S", 0.0),
+                mock.patch.object(
+                    evaluator, "LOCAL_GATE_ALLOW_UNCERTAIN_OFFICIAL", True
+                ),
+                mock.patch.object(
+                    evaluator,
+                    "_collect_local_evaluation",
+                    side_effect=[
+                        {"local_latencies_ms": [value]} for value in measurements
+                    ],
+                ),
             ):
                 result = evaluator._evaluate_local_best_gate(
                     workspace=root / "eval",
@@ -569,26 +593,25 @@ class TestLocalBestGate(unittest.TestCase):
             root = Path(tmp)
             program = root / "candidate.cu"
             program.write_text(source)
-            with mock.patch.object(
-                evaluator, "EVAL_ROOT", root / "eval"
-            ), mock.patch.object(evaluator, "LOCAL_REPEAT_COUNT", 1), mock.patch.object(
-                evaluator, "LOCAL_BEST_GATE", False
-            ), mock.patch.object(
-                evaluator, "OFFICIAL_FITNESS", False
-            ), mock.patch.object(
-                evaluator, "_copy_problem_files"
-            ), mock.patch.object(
-                evaluator, "_write_solution"
-            ), mock.patch.object(
-                evaluator, "_run_sol_execbench_monitored", return_value=(proc, [])
-            ), mock.patch.object(
-                evaluator, "_parse_traces", return_value=_parsed_result(0.008)
-            ), mock.patch.object(
-                evaluator, "_load_workload_count", return_value=16
-            ), mock.patch.object(
-                evaluator,
-                "_ncu_summary_evidence",
-                return_value={"enabled": True, "status": "timeout", "timeout_s": 3},
+            with (
+                mock.patch.object(evaluator, "EVAL_ROOT", root / "eval"),
+                mock.patch.object(evaluator, "LOCAL_REPEAT_COUNT", 1),
+                mock.patch.object(evaluator, "LOCAL_BEST_GATE", False),
+                mock.patch.object(evaluator, "OFFICIAL_FITNESS", False),
+                mock.patch.object(evaluator, "_copy_problem_files"),
+                mock.patch.object(evaluator, "_write_solution"),
+                mock.patch.object(
+                    evaluator, "_run_sol_execbench_monitored", return_value=(proc, [])
+                ),
+                mock.patch.object(
+                    evaluator, "_parse_traces", return_value=_parsed_result(0.008)
+                ),
+                mock.patch.object(evaluator, "_load_workload_count", return_value=16),
+                mock.patch.object(
+                    evaluator,
+                    "_ncu_summary_evidence",
+                    return_value={"enabled": True, "status": "timeout", "timeout_s": 3},
+                ),
             ):
                 result = evaluator.evaluate(str(program))
 
@@ -604,29 +627,27 @@ class TestLocalBestGate(unittest.TestCase):
             root = Path(tmp)
             program = root / "candidate.cu"
             program.write_text(source)
-            with mock.patch.object(
-                evaluator, "EVAL_ROOT", root / "eval"
-            ), mock.patch.object(evaluator, "LOCAL_REPEAT_COUNT", 1), mock.patch.object(
-                evaluator, "LOCAL_BEST_GATE", False
-            ), mock.patch.object(
-                evaluator, "OFFICIAL_FITNESS", False
-            ), mock.patch.object(
-                evaluator, "_copy_problem_files"
-            ), mock.patch.object(
-                evaluator, "_write_solution"
-            ), mock.patch.object(
-                evaluator,
-                "_run_sol_execbench_monitored",
-                side_effect=[
-                    (proc, [{"sm_clock_mhz": 2032, "dram_clock_mhz": 3996}]),
-                    (proc, []),
-                ],
-            ), mock.patch.object(
-                evaluator,
-                "_parse_traces",
-                side_effect=[_parsed_result(0.001), _parsed_result(0.008)],
-            ), mock.patch.object(
-                evaluator, "_load_workload_count", return_value=16
+            with (
+                mock.patch.object(evaluator, "EVAL_ROOT", root / "eval"),
+                mock.patch.object(evaluator, "LOCAL_REPEAT_COUNT", 1),
+                mock.patch.object(evaluator, "LOCAL_BEST_GATE", False),
+                mock.patch.object(evaluator, "OFFICIAL_FITNESS", False),
+                mock.patch.object(evaluator, "_copy_problem_files"),
+                mock.patch.object(evaluator, "_write_solution"),
+                mock.patch.object(
+                    evaluator,
+                    "_run_sol_execbench_monitored",
+                    side_effect=[
+                        (proc, [{"sm_clock_mhz": 2032, "dram_clock_mhz": 3996}]),
+                        (proc, []),
+                    ],
+                ),
+                mock.patch.object(
+                    evaluator,
+                    "_parse_traces",
+                    side_effect=[_parsed_result(0.001), _parsed_result(0.008)],
+                ),
+                mock.patch.object(evaluator, "_load_workload_count", return_value=16),
             ):
                 result = evaluator.evaluate(str(program))
 
@@ -675,8 +696,9 @@ class TestLocalBestGate(unittest.TestCase):
             write_trace(external / "traces_repeat_2.jsonl", 0.0005)
             write_trace(external / "traces_repeat_3.jsonl", 0.0005)
 
-            with mock.patch.object(evaluator, "EVAL_ROOT", root), mock.patch.object(
-                evaluator, "LOCAL_REPEAT_COUNT", 3
+            with (
+                mock.patch.object(evaluator, "EVAL_ROOT", root),
+                mock.patch.object(evaluator, "LOCAL_REPEAT_COUNT", 3),
             ):
                 best = evaluator._discover_local_best()
 
@@ -697,39 +719,35 @@ class TestLocalBestGate(unittest.TestCase):
                 "#include <torch/extension.h>\nPYBIND11_MODULE(x, m) {}\n"
             )
 
-            with mock.patch.object(
-                evaluator, "EVAL_ROOT", root / "eval"
-            ), mock.patch.object(evaluator, "LOCAL_REPEAT_COUNT", 3), mock.patch.object(
-                evaluator, "LOCAL_BEST_GATE", True
-            ), mock.patch.object(
-                evaluator, "OFFICIAL_FITNESS", True
-            ), mock.patch.object(
-                evaluator,
-                "_load_local_best",
-                return_value={
-                    "latency_ms_median": incumbent_latency,
-                    "kernel_sha256": "best",
-                    "official_status": "COMPLETED",
-                    "official_score": incumbent_official_score,
-                    "official_submission_id": 123,
-                },
-            ), mock.patch.object(
-                evaluator, "_save_local_best"
-            ) as save_best, mock.patch.object(
-                evaluator, "_copy_problem_files"
-            ), mock.patch.object(
-                evaluator, "_write_solution"
-            ), mock.patch.object(
-                evaluator, "_run_sol_execbench", return_value=proc
-            ) as local_run, mock.patch.object(
-                evaluator, "_parse_traces", side_effect=parsed_runs
-            ), mock.patch.object(
-                evaluator, "_load_workload_count", return_value=16
-            ), mock.patch.object(
-                evaluator, "_load_official_calibration_ratio", return_value=1.0
-            ), mock.patch.object(
-                evaluator, "_submit_official"
-            ) as submit:
+            with (
+                mock.patch.object(evaluator, "EVAL_ROOT", root / "eval"),
+                mock.patch.object(evaluator, "LOCAL_REPEAT_COUNT", 3),
+                mock.patch.object(evaluator, "LOCAL_BEST_GATE", True),
+                mock.patch.object(evaluator, "OFFICIAL_FITNESS", True),
+                mock.patch.object(
+                    evaluator,
+                    "_load_local_best",
+                    return_value={
+                        "latency_ms_median": incumbent_latency,
+                        "kernel_sha256": "best",
+                        "official_status": "COMPLETED",
+                        "official_score": incumbent_official_score,
+                        "official_submission_id": 123,
+                    },
+                ),
+                mock.patch.object(evaluator, "_save_local_best") as save_best,
+                mock.patch.object(evaluator, "_copy_problem_files"),
+                mock.patch.object(evaluator, "_write_solution"),
+                mock.patch.object(
+                    evaluator, "_run_sol_execbench", return_value=proc
+                ) as local_run,
+                mock.patch.object(evaluator, "_parse_traces", side_effect=parsed_runs),
+                mock.patch.object(evaluator, "_load_workload_count", return_value=16),
+                mock.patch.object(
+                    evaluator, "_load_official_calibration_ratio", return_value=1.0
+                ),
+                mock.patch.object(evaluator, "_submit_official") as submit,
+            ):
                 result = evaluator.evaluate(str(program))
 
         self.assertEqual(result["status"], "success")
@@ -762,38 +780,33 @@ class TestLocalBestGate(unittest.TestCase):
             incumbent_latency = 0.0076
             incumbent_official_score = 0.85
 
-            with mock.patch.object(
-                evaluator, "EVAL_ROOT", root / "eval"
-            ), mock.patch.object(evaluator, "LOCAL_REPEAT_COUNT", 3), mock.patch.object(
-                evaluator, "LOCAL_BEST_GATE", True
-            ), mock.patch.object(
-                evaluator, "OFFICIAL_FITNESS", True
-            ), mock.patch.object(
-                evaluator,
-                "_load_local_best",
-                return_value={
-                    "latency_ms_median": incumbent_latency,
-                    "local_score": evaluator.TARGET_LATENCY_MS / incumbent_latency,
-                    "kernel_sha256": evaluator._kernel_source_hash(source),
-                    "official_status": "COMPLETED",
-                    "official_score": incumbent_official_score,
-                    "official_submission_id": 123,
-                },
-            ), mock.patch.object(
-                evaluator, "_save_local_best"
-            ) as save_best, mock.patch.object(
-                evaluator, "_copy_problem_files"
-            ) as copy_problem, mock.patch.object(
-                evaluator, "_write_solution"
-            ), mock.patch.object(
-                evaluator, "_run_sol_execbench", return_value=proc
-            ) as local_run, mock.patch.object(
-                evaluator, "_parse_traces", side_effect=parsed_runs
-            ), mock.patch.object(
-                evaluator, "_load_workload_count", return_value=16
-            ), mock.patch.object(
-                evaluator, "_submit_official"
-            ) as submit:
+            with (
+                mock.patch.object(evaluator, "EVAL_ROOT", root / "eval"),
+                mock.patch.object(evaluator, "LOCAL_REPEAT_COUNT", 3),
+                mock.patch.object(evaluator, "LOCAL_BEST_GATE", True),
+                mock.patch.object(evaluator, "OFFICIAL_FITNESS", True),
+                mock.patch.object(
+                    evaluator,
+                    "_load_local_best",
+                    return_value={
+                        "latency_ms_median": incumbent_latency,
+                        "local_score": evaluator.TARGET_LATENCY_MS / incumbent_latency,
+                        "kernel_sha256": evaluator._kernel_source_hash(source),
+                        "official_status": "COMPLETED",
+                        "official_score": incumbent_official_score,
+                        "official_submission_id": 123,
+                    },
+                ),
+                mock.patch.object(evaluator, "_save_local_best") as save_best,
+                mock.patch.object(evaluator, "_copy_problem_files") as copy_problem,
+                mock.patch.object(evaluator, "_write_solution"),
+                mock.patch.object(
+                    evaluator, "_run_sol_execbench", return_value=proc
+                ) as local_run,
+                mock.patch.object(evaluator, "_parse_traces", side_effect=parsed_runs),
+                mock.patch.object(evaluator, "_load_workload_count", return_value=16),
+                mock.patch.object(evaluator, "_submit_official") as submit,
+            ):
                 result = evaluator.evaluate(str(program))
 
         self.assertEqual(result["status"], "success")
@@ -833,30 +846,28 @@ class TestLocalBestGate(unittest.TestCase):
             root = Path(tmp)
             program = root / "candidate.cu"
             program.write_text(source)
-            with mock.patch.object(
-                evaluator, "EVAL_ROOT", root / "eval"
-            ), mock.patch.object(evaluator, "LOCAL_REPEAT_COUNT", 1), mock.patch.object(
-                evaluator, "LOCAL_BEST_GATE", True
-            ), mock.patch.object(
-                evaluator, "OFFICIAL_FITNESS", True
-            ), mock.patch.object(
-                evaluator, "_measurement_profile", return_value=profile
-            ), mock.patch.object(
-                evaluator, "_load_local_best", return_value=incumbent
-            ), mock.patch.object(
-                evaluator, "_save_local_best"
-            ) as save_best, mock.patch.object(
-                evaluator, "_record_authoritative_source_fitness"
-            ), mock.patch.object(
-                evaluator, "_copy_problem_files"
-            ), mock.patch.object(
-                evaluator, "_write_solution"
-            ), mock.patch.object(
-                evaluator, "_run_sol_execbench", return_value=proc
-            ) as local_run, mock.patch.object(
-                evaluator, "_parse_traces", return_value=_parsed_result(0.0081)
-            ), mock.patch.object(
-                evaluator, "_load_workload_count", return_value=16
+            with (
+                mock.patch.object(evaluator, "EVAL_ROOT", root / "eval"),
+                mock.patch.object(evaluator, "LOCAL_REPEAT_COUNT", 1),
+                mock.patch.object(evaluator, "LOCAL_BEST_GATE", True),
+                mock.patch.object(evaluator, "OFFICIAL_FITNESS", True),
+                mock.patch.object(
+                    evaluator, "_measurement_profile", return_value=profile
+                ),
+                mock.patch.object(
+                    evaluator, "_load_local_best", return_value=incumbent
+                ),
+                mock.patch.object(evaluator, "_save_local_best") as save_best,
+                mock.patch.object(evaluator, "_record_authoritative_source_fitness"),
+                mock.patch.object(evaluator, "_copy_problem_files"),
+                mock.patch.object(evaluator, "_write_solution"),
+                mock.patch.object(
+                    evaluator, "_run_sol_execbench", return_value=proc
+                ) as local_run,
+                mock.patch.object(
+                    evaluator, "_parse_traces", return_value=_parsed_result(0.0081)
+                ),
+                mock.patch.object(evaluator, "_load_workload_count", return_value=16),
             ):
                 result = evaluator.evaluate(str(program))
 
@@ -888,15 +899,17 @@ class TestLocalBestGate(unittest.TestCase):
             root = Path(tmp)
             program = root / "candidate.cu"
             program.write_text(candidate_source)
-            with mock.patch.object(
-                evaluator, "EVAL_ROOT", root / "eval"
-            ), mock.patch.object(evaluator, "LOCAL_BEST_GATE", True), mock.patch.object(
-                evaluator, "_measurement_profile", return_value=profile
-            ), mock.patch.object(
-                evaluator, "_load_local_best", return_value=incumbent
-            ), mock.patch.object(
-                evaluator, "_copy_problem_files"
-            ) as copy_problem:
+            with (
+                mock.patch.object(evaluator, "EVAL_ROOT", root / "eval"),
+                mock.patch.object(evaluator, "LOCAL_BEST_GATE", True),
+                mock.patch.object(
+                    evaluator, "_measurement_profile", return_value=profile
+                ),
+                mock.patch.object(
+                    evaluator, "_load_local_best", return_value=incumbent
+                ),
+                mock.patch.object(evaluator, "_copy_problem_files") as copy_problem,
+            ):
                 result = evaluator.evaluate(str(program))
 
         self.assertEqual(result["status"], "framework_error")
@@ -912,28 +925,26 @@ class TestLocalEvaluationCache(unittest.TestCase):
             root = Path(tmp)
             program = root / "candidate.cu"
             program.write_text(source)
-            with mock.patch.object(
-                evaluator, "EVAL_ROOT", root / "eval"
-            ), mock.patch.object(evaluator, "LOCAL_REPEAT_COUNT", 1), mock.patch.object(
-                evaluator, "LOCAL_BEST_GATE", False
-            ), mock.patch.object(
-                evaluator, "OFFICIAL_FITNESS", False
-            ), mock.patch.object(
-                evaluator, "LOCAL_EVAL_CACHE", True
-            ), mock.patch.object(
-                evaluator, "_copy_problem_files"
-            ), mock.patch.object(
-                evaluator, "_write_solution"
-            ), mock.patch.object(
-                evaluator, "_detect_cuda_gencode_flags", return_value=[]
-            ), mock.patch.object(
-                evaluator,
-                "_run_sol_execbench_monitored",
-                return_value=(proc, []),
-            ) as local_run, mock.patch.object(
-                evaluator, "_parse_traces", return_value=_parsed_result(0.008)
-            ) as parse, mock.patch.object(
-                evaluator, "_load_workload_count", return_value=16
+            with (
+                mock.patch.object(evaluator, "EVAL_ROOT", root / "eval"),
+                mock.patch.object(evaluator, "LOCAL_REPEAT_COUNT", 1),
+                mock.patch.object(evaluator, "LOCAL_BEST_GATE", False),
+                mock.patch.object(evaluator, "OFFICIAL_FITNESS", False),
+                mock.patch.object(evaluator, "LOCAL_EVAL_CACHE", True),
+                mock.patch.object(evaluator, "_copy_problem_files"),
+                mock.patch.object(evaluator, "_write_solution"),
+                mock.patch.object(
+                    evaluator, "_detect_cuda_gencode_flags", return_value=[]
+                ),
+                mock.patch.object(
+                    evaluator,
+                    "_run_sol_execbench_monitored",
+                    return_value=(proc, []),
+                ) as local_run,
+                mock.patch.object(
+                    evaluator, "_parse_traces", return_value=_parsed_result(0.008)
+                ) as parse,
+                mock.patch.object(evaluator, "_load_workload_count", return_value=16),
             ):
                 first = evaluator.evaluate(str(program))
                 second = evaluator.evaluate(str(program))
@@ -948,18 +959,20 @@ class TestLocalEvaluationCache(unittest.TestCase):
         source = "kernel"
         profile_a = {"id": "a", "name": "native"}
         profile_b = {"id": "b", "name": "native"}
-        with mock.patch.object(
-            evaluator, "_detect_cuda_gencode_flags", return_value=[]
-        ), mock.patch.object(evaluator, "LOCAL_REPEAT_COUNT", 3):
+        with (
+            mock.patch.object(evaluator, "_detect_cuda_gencode_flags", return_value=[]),
+            mock.patch.object(evaluator, "LOCAL_REPEAT_COUNT", 3),
+        ):
             path_a, _, _ = evaluator._local_evaluation_cache_path(
                 source, evaluator.SOURCE_LANGUAGE_CUDA, profile_a
             )
             path_b, _, _ = evaluator._local_evaluation_cache_path(
                 source, evaluator.SOURCE_LANGUAGE_CUDA, profile_b
             )
-        with mock.patch.object(
-            evaluator, "_detect_cuda_gencode_flags", return_value=[]
-        ), mock.patch.object(evaluator, "LOCAL_REPEAT_COUNT", 5):
+        with (
+            mock.patch.object(evaluator, "_detect_cuda_gencode_flags", return_value=[]),
+            mock.patch.object(evaluator, "LOCAL_REPEAT_COUNT", 5),
+        ):
             path_repeat, _, _ = evaluator._local_evaluation_cache_path(
                 source, evaluator.SOURCE_LANGUAGE_CUDA, profile_a
             )
@@ -987,8 +1000,9 @@ class TestConcurrentState(unittest.TestCase):
     def test_corrupt_local_best_recovers_from_profile_index_without_glob(self) -> None:
         source = "kernel"
         profile = evaluator._measurement_profile()
-        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
-            evaluator, "EVAL_ROOT", Path(tmp)
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            mock.patch.object(evaluator, "EVAL_ROOT", Path(tmp)),
         ):
             evaluator._save_local_best(
                 {
@@ -1029,8 +1043,9 @@ class TestConcurrentState(unittest.TestCase):
                 source,
             )
 
-        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
-            evaluator, "EVAL_ROOT", Path(tmp)
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            mock.patch.object(evaluator, "EVAL_ROOT", Path(tmp)),
         ):
             threads = [
                 threading.Thread(target=write, args=(0.009, "slow")),
@@ -1070,15 +1085,14 @@ class TestOfficialRefresh(unittest.TestCase):
             cache_path = root / "official_cache" / ("a" * 64 + ".json")
             cache_path.parent.mkdir()
             cache_path.write_text(json.dumps(pending))
-            with mock.patch.object(evaluator, "EVAL_ROOT", root), mock.patch.object(
-                evaluator, "OFFICIAL_FITNESS", True
-            ), mock.patch.object(evaluator, "OFFICIAL_CACHE", True), mock.patch.object(
-                evaluator, "OFFICIAL_REFRESH_TIME_BUDGET", 0.0
-            ), mock.patch.object(
-                evaluator, "_official_token", return_value="token"
-            ), mock.patch.object(
-                evaluator, "_get_official_submission"
-            ) as request:
+            with (
+                mock.patch.object(evaluator, "EVAL_ROOT", root),
+                mock.patch.object(evaluator, "OFFICIAL_FITNESS", True),
+                mock.patch.object(evaluator, "OFFICIAL_CACHE", True),
+                mock.patch.object(evaluator, "OFFICIAL_REFRESH_TIME_BUDGET", 0.0),
+                mock.patch.object(evaluator, "_official_token", return_value="token"),
+                mock.patch.object(evaluator, "_get_official_submission") as request,
+            ):
                 report = evaluator._refresh_due_official_results()
 
         self.assertTrue(report["budget_exhausted"])
@@ -1114,14 +1128,15 @@ class TestOfficialRefresh(unittest.TestCase):
             cache_path = root / "official_cache" / ("a" * 64 + ".json")
             cache_path.parent.mkdir()
             cache_path.write_text(json.dumps(pending))
-            with mock.patch.object(evaluator, "EVAL_ROOT", root), mock.patch.object(
-                evaluator, "OFFICIAL_FITNESS", True
-            ), mock.patch.object(evaluator, "OFFICIAL_CACHE", True), mock.patch.object(
-                evaluator, "OFFICIAL_REFRESH_BATCH_SIZE", 1
-            ), mock.patch.object(
-                evaluator, "_official_token", return_value="token"
-            ), mock.patch.object(
-                evaluator, "_get_official_submission", return_value=completed
+            with (
+                mock.patch.object(evaluator, "EVAL_ROOT", root),
+                mock.patch.object(evaluator, "OFFICIAL_FITNESS", True),
+                mock.patch.object(evaluator, "OFFICIAL_CACHE", True),
+                mock.patch.object(evaluator, "OFFICIAL_REFRESH_BATCH_SIZE", 1),
+                mock.patch.object(evaluator, "_official_token", return_value="token"),
+                mock.patch.object(
+                    evaluator, "_get_official_submission", return_value=completed
+                ),
             ):
                 report = evaluator._refresh_due_official_results()
                 registry = json.loads(
@@ -1141,19 +1156,17 @@ class TestOfficialPolling(unittest.TestCase):
             }
         }
 
-        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
-            evaluator, "OFFICIAL_CACHE", False
-        ), mock.patch.object(
-            evaluator, "OFFICIAL_ASYNC_SUBMIT", True
-        ), mock.patch.object(
-            evaluator, "_official_token", return_value="test-token"
-        ), mock.patch.object(
-            evaluator, "_build_official_submission", return_value={"name": "test"}
-        ), mock.patch.object(
-            evaluator, "_http_json", return_value=upload
-        ) as request, mock.patch.object(
-            evaluator, "_poll_official_submission"
-        ) as poll:
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            mock.patch.object(evaluator, "OFFICIAL_CACHE", False),
+            mock.patch.object(evaluator, "OFFICIAL_ASYNC_SUBMIT", True),
+            mock.patch.object(evaluator, "_official_token", return_value="test-token"),
+            mock.patch.object(
+                evaluator, "_build_official_submission", return_value={"name": "test"}
+            ),
+            mock.patch.object(evaluator, "_http_json", return_value=upload) as request,
+            mock.patch.object(evaluator, "_poll_official_submission") as poll,
+        ):
             result = evaluator._submit_official(Path(tmp), "kernel source")
 
         self.assertEqual(result["status"], "DEFERRED_RESULT")
@@ -1176,9 +1189,13 @@ class TestOfficialPolling(unittest.TestCase):
             "result_available_at": available_at,
         }
 
-        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
-            evaluator, "_get_official_submission", return_value=payload
-        ), mock.patch.object(evaluator.time, "sleep") as sleep:
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            mock.patch.object(
+                evaluator, "_get_official_submission", return_value=payload
+            ),
+            mock.patch.object(evaluator.time, "sleep") as sleep,
+        ):
             result = evaluator._poll_official_submission(
                 123,
                 "test-token",
@@ -1212,12 +1229,10 @@ class TestProvisionalFitness(unittest.TestCase):
     def test_above_floor_candidates_remain_ordered_without_certifying_target(
         self,
     ) -> None:
-        with mock.patch.object(
-            evaluator, "OFFICIAL_TARGET_SCORE", 0.904135
-        ), mock.patch.object(
-            evaluator, "OFFICIAL_PROVISIONAL_SCORE_CAP", 0.899135
-        ), mock.patch.object(
-            evaluator, "OFFICIAL_FITNESS", True
+        with (
+            mock.patch.object(evaluator, "OFFICIAL_TARGET_SCORE", 0.904135),
+            mock.patch.object(evaluator, "OFFICIAL_PROVISIONAL_SCORE_CAP", 0.899135),
+            mock.patch.object(evaluator, "OFFICIAL_FITNESS", True),
         ):
             lower = evaluator._project_provisional_search_score(0.91)
             higher = evaluator._project_provisional_search_score(1.05)

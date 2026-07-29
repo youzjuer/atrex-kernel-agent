@@ -163,14 +163,10 @@ OFFICIAL_PROBE_POLICY = OfficialProbePolicy(
     cooldown_seconds=max(
         0.0, float(os.environ.get("SOL58_OFFICIAL_PROBE_COOLDOWN_S", "3600"))
     ),
-    max_per_day=max(
-        0, int(os.environ.get("SOL58_OFFICIAL_PROBE_MAX_PER_DAY", "6"))
-    ),
+    max_per_day=max(0, int(os.environ.get("SOL58_OFFICIAL_PROBE_MAX_PER_DAY", "6"))),
     max_relative_regression=max(
         0.0,
-        float(
-            os.environ.get("SOL58_OFFICIAL_PROBE_MAX_RELATIVE_REGRESSION", "0.10")
-        ),
+        float(os.environ.get("SOL58_OFFICIAL_PROBE_MAX_RELATIVE_REGRESSION", "0.10")),
     ),
     architecture_only=_env_bool("SOL58_OFFICIAL_PROBE_ARCHITECTURE_ONLY", True),
 )
@@ -613,7 +609,7 @@ def _run_sol_execbench(
     sol_execbench_path = Path(SOL_EXECBENCH)
     if sol_execbench_path.parent != Path(".") and sol_execbench_path.is_file():
         child_env["PATH"] = (
-            f"{sol_execbench_path.resolve().parent}:" f"{child_env.get('PATH', '')}"
+            f"{sol_execbench_path.resolve().parent}:{child_env.get('PATH', '')}"
         )
     return subprocess.run(
         cmd,
@@ -1880,9 +1876,7 @@ def _submit_official_unlocked(
         if isinstance(existing_metadata, dict) and existing_metadata.get(
             "submission_reason"
         ):
-            cache_metadata["submission_reason"] = existing_metadata[
-                "submission_reason"
-            ]
+            cache_metadata["submission_reason"] = existing_metadata["submission_reason"]
         cached = _with_official_cache_metadata(cached, cache_metadata)
         cached_status = _official_status(cached)
         next_refresh_at = _parse_timestamp(cached.get("next_refresh_at"))

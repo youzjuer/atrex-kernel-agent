@@ -680,9 +680,7 @@ def ensure_architecture_islands(memory: EvolutionMemory, num_islands: int) -> in
     return target
 
 
-def _map_elite_key(
-    memory: EvolutionMemory, solution: EvolutionSolution
-) -> str | None:
+def _map_elite_key(memory: EvolutionMemory, solution: EvolutionSolution) -> str | None:
     raw = _metadata(solution).get("MAP_Elite_feature")
     if isinstance(raw, str):
         try:
@@ -1118,9 +1116,7 @@ def restore_stagnation_checkpoint_state(
         retry_bucket = optional_int(latest.get("bucket")) if latest else None
         retries = max(0, int(latest.get("retry", 0) or 0)) if latest else 0
         last_seed_id = str(latest.get("seed_id") or "") if latest else ""
-        max_attempts = (
-            max(1, int(latest.get("max_attempts", 2) or 2)) if latest else 2
-        )
+        max_attempts = max(1, int(latest.get("max_attempts", 2) or 2)) if latest else 2
         seed_bucket = retry_bucket
         if (
             latest

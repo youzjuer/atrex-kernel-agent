@@ -101,9 +101,7 @@ def redact_arguments(arguments: Sequence[str]) -> list[str]:
             name, value = argument.split("=", 1)
             normalized_name = name.lstrip("-").replace("-", "_")
             value = (
-                "<redacted>"
-                if _is_sensitive_key(normalized_name) and value
-                else value
+                "<redacted>" if _is_sensitive_key(normalized_name) and value else value
             )
             redacted.append(f"{name}={value}")
             continue
@@ -256,9 +254,9 @@ def build_manifest(
         "resolved_task_sha256": _sha256_bytes(task_text.encode("utf-8")),
     }
     fingerprint = _sha256_bytes(
-        json.dumps(
-            fingerprint_payload, sort_keys=True, separators=(",", ":")
-        ).encode("utf-8")
+        json.dumps(fingerprint_payload, sort_keys=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
     )
     return {
         "schema_version": 1,
@@ -279,7 +277,8 @@ def build_manifest(
             "resolved_task": file_identity(task_copy),
         },
         "repositories": {
-            name: repository_identity(path) for name, path in sorted(repositories.items())
+            name: repository_identity(path)
+            for name, path in sorted(repositories.items())
         },
         "sources": {
             name: file_identity(path) for name, path in sorted(source_files.items())

@@ -85,9 +85,7 @@ class TestNcuSummary(unittest.TestCase):
         }
 
         def fake_profile(command, **kwargs):
-            self.assertEqual(
-                kwargs["env"]["PATH"].split(":", 1)[0], "/usr/local/bin"
-            )
+            self.assertEqual(kwargs["env"]["PATH"].split(":", 1)[0], "/usr/local/bin")
             self.assertNotIn("PYTHONPATH", kwargs["env"])
             if command[0].endswith("sol-execbench"):
                 staging = Path(kwargs["cwd"]).parent / "generated_staging"
@@ -121,14 +119,18 @@ class TestNcuSummary(unittest.TestCase):
                 "compile_timeout": 10,
                 "run_timeout": 10,
             }
-            with mock.patch.object(
-                ncu_summary.shutil, "which", return_value="/usr/local/bin/ncu"
-            ), mock.patch.object(
-                ncu_summary, "_run_profile_command", side_effect=fake_profile
-            ) as run_profile, mock.patch.object(
-                ncu_summary,
-                "_parse_report",
-                return_value=(raw_metrics, classification),
+            with (
+                mock.patch.object(
+                    ncu_summary.shutil, "which", return_value="/usr/local/bin/ncu"
+                ),
+                mock.patch.object(
+                    ncu_summary, "_run_profile_command", side_effect=fake_profile
+                ) as run_profile,
+                mock.patch.object(
+                    ncu_summary,
+                    "_parse_report",
+                    return_value=(raw_metrics, classification),
+                ),
             ):
                 first = ncu_summary.collect_ncu_analysis(**arguments)
                 second = ncu_summary.collect_ncu_analysis(**arguments)
@@ -169,9 +171,10 @@ class TestNcuSummary(unittest.TestCase):
                     "",
                 )
 
-            with mock.patch.object(
-                ncu_summary.subprocess, "run", side_effect=fake_run
-            ), mock.patch.object(ncu_summary.time, "sleep") as sleep:
+            with (
+                mock.patch.object(ncu_summary.subprocess, "run", side_effect=fake_run),
+                mock.patch.object(ncu_summary.time, "sleep") as sleep,
+            ):
                 metrics, classification = ncu_summary._parse_report(
                     report_path, profile_dir, 10
                 )
@@ -201,8 +204,7 @@ class TestNcuSummary(unittest.TestCase):
                     )
                     return subprocess.CompletedProcess(command, 0, csv_output, "")
                 metrics = json.loads(
-                    (profile_dir / "analysis" / "metrics_key_summary.json")
-                    .read_text()
+                    (profile_dir / "analysis" / "metrics_key_summary.json").read_text()
                 )
                 self.assertEqual(metrics["launch__grid_size"], 64)
                 return subprocess.CompletedProcess(
@@ -212,16 +214,18 @@ class TestNcuSummary(unittest.TestCase):
                     "",
                 )
 
-            with mock.patch.dict(
-                ncu_summary.os.environ,
-                {
-                    "PYTHONPATH": "/tmp/loongflow-sitecustomize",
-                    "SOL58_NCU_PARSE_RETRIES": "1",
-                },
-            ), mock.patch.object(
-                ncu_summary.shutil, "which", return_value="/usr/local/bin/ncu"
-            ), mock.patch.object(
-                ncu_summary.subprocess, "run", side_effect=fake_run
+            with (
+                mock.patch.dict(
+                    ncu_summary.os.environ,
+                    {
+                        "PYTHONPATH": "/tmp/loongflow-sitecustomize",
+                        "SOL58_NCU_PARSE_RETRIES": "1",
+                    },
+                ),
+                mock.patch.object(
+                    ncu_summary.shutil, "which", return_value="/usr/local/bin/ncu"
+                ),
+                mock.patch.object(ncu_summary.subprocess, "run", side_effect=fake_run),
             ):
                 metrics, classification = ncu_summary._parse_report(
                     report_path, profile_dir, 10
@@ -245,12 +249,15 @@ class TestNcuSummary(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             workspace = self._workspace(root)
-            with mock.patch.object(
-                ncu_summary.shutil, "which", return_value="/usr/local/bin/ncu"
-            ), mock.patch.object(
-                ncu_summary,
-                "_run_profile_command",
-                side_effect=subprocess.TimeoutExpired(["ncu"], 3),
+            with (
+                mock.patch.object(
+                    ncu_summary.shutil, "which", return_value="/usr/local/bin/ncu"
+                ),
+                mock.patch.object(
+                    ncu_summary,
+                    "_run_profile_command",
+                    side_effect=subprocess.TimeoutExpired(["ncu"], 3),
+                ),
             ):
                 result = ncu_summary.collect_ncu_analysis(
                     workspace=workspace,

@@ -201,7 +201,11 @@ def _reconcile_authoritative_scores(memory: EvolutionMemory) -> int:
     lock = getattr(memory, "_lock", None)
     if not registry:
         return 0
-    if not isinstance(solutions, dict) or not isinstance(populations, dict) or lock is None:
+    if (
+        not isinstance(solutions, dict)
+        or not isinstance(populations, dict)
+        or lock is None
+    ):
         raise RuntimeError(
             "authoritative fitness reconciliation requires LoongFlow "
             "solutions/populations dictionaries and _lock"
@@ -425,7 +429,9 @@ def _patch_evolution_database_selection() -> None:
         )
         from loongflow.framework.pes.database.database import EvolveDatabase
     except Exception as exc:
-        raise RuntimeError("cannot import LoongFlow evolution database targets") from exc
+        raise RuntimeError(
+            "cannot import LoongFlow evolution database targets"
+        ) from exc
 
     if getattr(EvolveDatabase, "_atrex_evolution_patched", False):
         return

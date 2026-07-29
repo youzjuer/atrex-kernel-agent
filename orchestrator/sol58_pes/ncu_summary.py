@@ -266,9 +266,9 @@ def _parse_report(
         env=parser_env,
     )
     if classify_proc.returncode != 0:
-        detail = (classify_proc.stderr or classify_proc.stdout or "no classifier output")[
-            -1200:
-        ]
+        detail = (
+            classify_proc.stderr or classify_proc.stdout or "no classifier output"
+        )[-1200:]
         raise RuntimeError(
             f"NCU classifier failed (returncode={classify_proc.returncode}): {detail}"
         )
@@ -363,11 +363,7 @@ def _parse_report_csv(
         for name, value in zip(header, values, strict=False)
         if name.strip()
     }
-    metrics = {
-        name: value
-        for name, value in exported.items()
-        if "__" in name
-    }
+    metrics = {name: value for name, value in exported.items() if "__" in name}
     metrics["__kernel_name__"] = exported.get("Kernel Name", "?")
 
     analysis_dir = profile_dir / "analysis"
@@ -405,9 +401,7 @@ def _implications(findings: list[dict[str, Any]]) -> list[str]:
     return actions
 
 
-def _write_log(
-    path: Path, content: str | bytes | None, limit: int = 100_000
-) -> None:
+def _write_log(path: Path, content: str | bytes | None, limit: int = 100_000) -> None:
     text = content or ""
     if isinstance(text, bytes):
         text = text.decode("utf-8", errors="replace")
@@ -457,7 +451,9 @@ def _extract_staging_dir(stdout: str | None, stderr: str | None) -> Path:
     output = f"{stdout or ''}\n{stderr or ''}"
     match = _STAGING_DIR_RE.search(output)
     if not match:
-        raise RuntimeError("sol-execbench preflight did not report its staging directory")
+        raise RuntimeError(
+            "sol-execbench preflight did not report its staging directory"
+        )
     staging_dir = Path(match.group("path").strip())
     if not staging_dir.is_dir():
         raise RuntimeError(
@@ -650,9 +646,7 @@ def collect_ncu_analysis(
             )
             _write_log(temp_dir / "preflight_stdout.log", preflight.stdout)
             _write_log(temp_dir / "preflight_stderr.log", preflight.stderr)
-            generated_staging = _extract_staging_dir(
-                preflight.stdout, preflight.stderr
-            )
+            generated_staging = _extract_staging_dir(preflight.stdout, preflight.stderr)
             profile_staging = temp_dir / "staging"
             shutil.move(str(generated_staging), profile_staging)
             if preflight.returncode != 0:
@@ -663,9 +657,10 @@ def collect_ncu_analysis(
                 )
             if not (profile_staging / "eval_driver.py").is_file():
                 raise RuntimeError("sol-execbench preflight produced no eval_driver.py")
-            if source_language == "cuda_cpp" and not (
-                profile_staging / "benchmark_kernel.so"
-            ).is_file():
+            if (
+                source_language == "cuda_cpp"
+                and not (profile_staging / "benchmark_kernel.so").is_file()
+            ):
                 raise RuntimeError("sol-execbench preflight produced no CUDA artifact")
 
             command = [

@@ -451,9 +451,7 @@ class TestSourceDeduplication(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             checkpoint = Path(tmp)
             (checkpoint / "metadata.json").write_text("{not-json", encoding="utf-8")
-            with self.assertRaisesRegex(
-                CheckpointCompatibilityError, "not valid JSON"
-            ):
+            with self.assertRaisesRegex(CheckpointCompatibilityError, "not valid JSON"):
                 sitecustomize._restore_checkpoint_population_indexes(
                     memory, str(checkpoint)
                 )

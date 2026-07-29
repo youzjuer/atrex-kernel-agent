@@ -50,7 +50,10 @@ def _load_checkpoint_islands(metadata_path: Path) -> list[list[str]]:
         raise CheckpointCompatibilityError(
             f"checkpoint metadata has no valid islands list: {metadata_path}"
         )
-    return [[str(solution_id) for solution_id in island if solution_id] for island in islands]
+    return [
+        [str(solution_id) for solution_id in island if solution_id]
+        for island in islands
+    ]
 
 
 def restore_checkpoint_population_indexes(
@@ -61,9 +64,7 @@ def restore_checkpoint_population_indexes(
     """Remove lineage-only records that upstream loaded into selectable populations."""
     metadata_path = Path(checkpoint_path) / "metadata.json"
     saved_islands = _load_checkpoint_islands(metadata_path)
-    selectable_ids = {
-        solution_id for island in saved_islands for solution_id in island
-    }
+    selectable_ids = {solution_id for island in saved_islands for solution_id in island}
 
     populations = getattr(memory, "populations", None)
     solutions = getattr(memory, "solutions", None)
