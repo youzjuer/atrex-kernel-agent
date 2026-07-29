@@ -35,19 +35,10 @@ jobs:
             orchestrator/run_manifest.py \
             tools/evolution_db.py
           ruff format --check \
-            orchestrator/sol58_pes/runtime_config.py \
-            orchestrator/sol58_pes/test_runtime_config.py \
-            orchestrator/sol58_pes/evaluator_state.py \
-            orchestrator/sol58_pes/source_contract.py \
-            orchestrator/sol58_pes/local_gate.py \
-            orchestrator/sol58_pes/local_best_store.py \
-            orchestrator/sol58_pes/fitness_calibration.py \
-            orchestrator/sol58_pes/official_protocol.py \
-            orchestrator/sol58_pes/official_probe.py \
-            orchestrator/sol58_pes/test_official_probe.py \
-            orchestrator/loongflow_compat/protocols.py \
-            orchestrator/loongflow_compat/upstream_contract.py \
-            orchestrator/loongflow_compat/test_upstream_contract.py
+            orchestrator/sol58_pes \
+            orchestrator/loongflow_compat \
+            orchestrator/run_manifest.py \
+            tools/evolution_db.py
           pyright
       - name: Run core unit tests
         env:
@@ -59,6 +50,10 @@ jobs:
             orchestrator/sol58_pes/test_ncu_summary.py \
             orchestrator/sol58_pes/test_runtime_config.py \
             orchestrator/sol58_pes/test_official_probe.py \
+            orchestrator/sol58_pes/test_local_gate.py \
+            orchestrator/sol58_pes/test_local_best_store.py \
+            orchestrator/sol58_pes/test_official_protocol.py \
+            orchestrator/sol58_pes/test_fitness_calibration.py \
             orchestrator/loongflow_compat/test_sitecustomize.py \
             orchestrator/loongflow_compat/test_upstream_contract.py \
             orchestrator/test_run_manifest.py
