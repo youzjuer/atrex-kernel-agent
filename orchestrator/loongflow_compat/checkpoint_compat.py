@@ -5,7 +5,10 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Callable
+from contextlib import AbstractContextManager
+from typing import Any, Callable, Sequence, cast
+
+from orchestrator.loongflow_compat.protocols import EvolutionMemory, EvolutionSolution
 
 
 class CheckpointCompatibilityError(RuntimeError):
@@ -59,7 +62,7 @@ def _load_checkpoint_islands(metadata_path: Path) -> list[list[str]]:
 def restore_checkpoint_population_indexes(
     memory: object,
     checkpoint_path: str | Path,
-    canonical_solution: Callable[[list[object]], object],
+    canonical_solution: Callable[[Sequence[EvolutionSolution]], EvolutionSolution],
 ) -> PopulationRestoreReport:
     """Remove lineage-only records that upstream loaded into selectable populations."""
     metadata_path = Path(checkpoint_path) / "metadata.json"
@@ -85,6 +88,12 @@ def restore_checkpoint_population_indexes(
         raise CheckpointCompatibilityError(
             "LoongFlow checkpoint memory contract mismatch: " + ", ".join(invalid)
         )
+
+    memory_view = cast(EvolutionMemory, memory)
+    populations = cast(dict[str, EvolutionSolution], populations)
+    solutions = cast(dict[str, EvolutionSolution], solutions)
+    islands = cast(list[set[str]], islands)
+    lock = cast(AbstractContextManager[Any], lock)
 
     missing = selectable_ids - set(solutions)
     if missing:
@@ -123,13 +132,13 @@ def restore_checkpoint_population_indexes(
                     if solution_id not in selectable_ids:
                         feature_map.pop(key, None)
 
-        if getattr(memory, "best_solution_id", None) not in selectable_ids:
-            memory.best_solution_id = (
+        if memory_view.best_solution_id not in selectable_ids:
+            memory_view.best_solution_id = (
                 canonical_solution(list(populations.values())).solution_id
                 if populations
                 else None
             )
-        memory.island_best_solution = [
+        memory_view.island_best_solution = [
             (
                 canonical_solution(
                     [populations[solution_id] for solution_id in island]
@@ -139,8 +148,8 @@ def restore_checkpoint_population_indexes(
             )
             for island in islands
         ]
-        if hasattr(memory, "island_capacity"):
-            memory.island_capacity = [len(island) for island in islands]
+        if hasattr(memory_view, "island_capacity"):
+            memory_view.island_capacity = [len(island) for island in islands]
 
     return PopulationRestoreReport(
         metadata_path=str(metadata_path),

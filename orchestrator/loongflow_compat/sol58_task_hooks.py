@@ -19,6 +19,7 @@ from orchestrator.loongflow_compat.architecture_islands import (
     island_profile,
 )
 from orchestrator.loongflow_compat.env_flags import enabled as _enabled
+from orchestrator.loongflow_compat.protocols import EvolutionMemory, EvolutionSolution
 from orchestrator.loongflow_compat.sol58_seed_bank import (
     load_seed_bank,
     seed_bank_fingerprint,
@@ -78,7 +79,7 @@ def _patch_summary_ncu_interpretation() -> None:
     summary_agent.EVOLVE_SUMMARY_USER_PROMPT = _append_ncu_summary_instructions(prompt)
 
 
-def _stagnation_state(memory: object) -> dict[str, float | int | str]:
+def _stagnation_state(memory: EvolutionMemory) -> dict[str, float | int | str]:
     """Measure plateau age from the first iteration that reached the best score."""
     populations = getattr(memory, "populations", {})
     candidates = list(populations.values()) if isinstance(populations, dict) else []
@@ -133,7 +134,7 @@ def _stagnation_state(memory: object) -> dict[str, float | int | str]:
 
 
 def _stagnation_seed_parent(
-    memory: object,
+    memory: EvolutionMemory,
     *,
     requested_island: int | None,
     num_islands: int,
@@ -252,7 +253,7 @@ def _stagnation_seed_parent(
     }
 
 
-def _local_best_improved(solution: object) -> bool:
+def _local_best_improved(solution: EvolutionSolution) -> bool:
     evaluation = getattr(solution, "evaluation", "")
     if isinstance(evaluation, str):
         try:
@@ -269,8 +270,8 @@ def _local_best_improved(solution: object) -> bool:
 
 
 def _apply_stagnation_architecture_gate(
-    memory: object,
-    solution: object,
+    memory: EvolutionMemory,
+    solution: EvolutionSolution,
     child_family: str,
 ) -> bool:
     """Reject a forced escape that silently reconstructs the stagnant family."""
@@ -355,7 +356,9 @@ def _apply_stagnation_architecture_gate(
     return False
 
 
-def _finalize_rejected_stagnation_child(memory: object, solution: object) -> str:
+def _finalize_rejected_stagnation_child(
+    memory: EvolutionMemory, solution: EvolutionSolution
+) -> str:
     """Advance iteration bookkeeping without admitting the rejected child anywhere."""
     lock = getattr(memory, "_lock", None)
     if lock is None:

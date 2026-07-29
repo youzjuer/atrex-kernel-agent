@@ -8,6 +8,8 @@ import json
 import logging
 import os
 from pathlib import Path
+from collections.abc import Callable, Sequence
+from typing import Any
 
 from orchestrator.loongflow_compat.architecture_islands import (
     architecture_label,
@@ -134,7 +136,7 @@ def _compact_result(value: object) -> object:
     return value
 
 
-def _solution_source_hash(solution: EvolutionSolution) -> str:
+def _solution_source_hash(solution: EvolutionSolution | str) -> str:
     source = getattr(solution, "solution", solution)
     text = source if isinstance(source, str) else str(source or "")
     return hashlib.sha256(text.strip().encode("utf-8")).hexdigest()
@@ -154,7 +156,7 @@ def _adaptive_exploration_rate(base_rate: float, recent_scores: list[float]) -> 
 
 
 def _canonical_solution(
-    solutions: list[EvolutionSolution],
+    solutions: Sequence[EvolutionSolution],
 ) -> EvolutionSolution:
     return min(
         solutions,
@@ -213,7 +215,7 @@ def _reconcile_authoritative_scores(memory: EvolutionMemory) -> int:
 
     changed_ids: set[str] = set()
     with lock:
-        records: dict[str, object] = dict(solutions)
+        records: dict[str, EvolutionSolution] = dict(solutions)
         if isinstance(populations, dict):
             records.update(populations)
 
@@ -222,8 +224,13 @@ def _reconcile_authoritative_scores(memory: EvolutionMemory) -> int:
             authoritative = registry.get(source_hash)
             if not isinstance(authoritative, dict):
                 continue
+            raw_official_score = authoritative.get("official_score")
+            if raw_official_score is not None and not isinstance(
+                raw_official_score, (int, float, str)
+            ):
+                continue
             try:
-                official_score = float(authoritative.get("official_score") or 0.0)
+                official_score = float(raw_official_score or 0.0)
             except (TypeError, ValueError):
                 continue
             if official_score <= 0:
@@ -396,7 +403,9 @@ def _restore_checkpoint_population_indexes(
     )
 
 
-def _require_signature(callable_obj: object, expected: tuple[str, ...]) -> None:
+def _require_signature(
+    callable_obj: Callable[..., object], expected: tuple[str, ...]
+) -> None:
     actual = tuple(inspect.signature(callable_obj).parameters)
     if actual != expected:
         name = getattr(callable_obj, "__qualname__", repr(callable_obj))
@@ -1047,8 +1056,8 @@ def _verify_fuse_patch() -> tuple[bool, str]:
 
 def _apply_manifest_patch(
     name: str,
-    patcher: object,
-    verifier: object,
+    patcher: Callable[[], Any],
+    verifier: Callable[[], tuple[bool, str]],
     *,
     required: bool,
 ) -> None:

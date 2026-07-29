@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import AbstractContextManager
 from typing import Any, Protocol
 
 
@@ -16,14 +17,16 @@ class EvolutionSolution(Protocol):
     parent_id: str | None
     generation: int
     timestamp: Any
+    evaluation: Any
+    summary: str
 
     def to_dict(self) -> dict[str, Any]: ...
 
 
 class EvolutionMemory(Protocol):
-    populations: dict[str, Any]
-    solutions: list[Any]
-    elites: list[Any]
+    populations: dict[str, EvolutionSolution]
+    solutions: dict[str, EvolutionSolution]
+    elites: set[str]
     islands: list[set[str]]
     island_feature_maps: list[dict[str, str]]
     island_best_solution: list[str | None]
@@ -40,8 +43,8 @@ class EvolutionMemory(Protocol):
     boltzmann_temperature: float
     sampling_weight_power: float
     use_sampling_weight: bool
-    _lock: Any
-    _island_locks: dict[int, Any]
+    _lock: AbstractContextManager[Any]
+    _island_locks: dict[int, AbstractContextManager[Any]]
     _atrex_architecture_pca_model: dict[str, Any] | None
     _atrex_pca_refit_iteration: int
     _atrex_last_migration_iteration: int
