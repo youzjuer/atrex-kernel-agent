@@ -277,7 +277,7 @@ def _parse_report(
 
 
 def _isolated_python_environment() -> dict[str, str]:
-    """Keep LoongFlow's sitecustomize out of native NCU parser processes."""
+    """Keep LoongFlow dependencies out of native NCU parser processes."""
     env = dict(os.environ)
     env.pop("PYTHONPATH", None)
     env.pop("PYTHONHOME", None)
@@ -424,8 +424,8 @@ def _profile_environment(sol_execbench: str) -> dict[str, str]:
         **os.environ,
         "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
     }
-    # The staged evaluator is self-contained. Inheriting LoongFlow's
-    # sitecustomize path can load ABI-incompatible packages under NCU injection.
+    # The staged evaluator is self-contained. Inheriting LoongFlow paths can load
+    # ABI-incompatible packages under NCU injection.
     env.pop("PYTHONPATH", None)
     executable = _resolve_executable(sol_execbench)
     if executable is not None:

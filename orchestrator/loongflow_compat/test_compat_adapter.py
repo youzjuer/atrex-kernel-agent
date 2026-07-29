@@ -11,7 +11,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 from orchestrator.loongflow_compat import architecture_islands
-from orchestrator.loongflow_compat import sitecustomize
+from orchestrator.loongflow_compat import compat_adapter
 from orchestrator.loongflow_compat.checkpoint_compat import (
     CheckpointCompatibilityError,
 )
@@ -70,17 +70,17 @@ def _memory(*solutions, last_iteration: int = 0):
 class TestAdaptiveExploration(unittest.TestCase):
     def test_requires_five_attempts(self) -> None:
         self.assertEqual(
-            sitecustomize._adaptive_exploration_rate(0.1, [1.0, 1.0, 1.0, 1.0]),
+            compat_adapter._adaptive_exploration_rate(0.1, [1.0, 1.0, 1.0, 1.0]),
             0.1,
         )
 
     def test_hard_stagnation_is_checked_before_medium(self) -> None:
         self.assertEqual(
-            sitecustomize._adaptive_exploration_rate(0.1, [0.8] * 5),
+            compat_adapter._adaptive_exploration_rate(0.1, [0.8] * 5),
             0.4,
         )
         self.assertEqual(
-            sitecustomize._adaptive_exploration_rate(
+            compat_adapter._adaptive_exploration_rate(
                 0.1,
                 [0.80, 0.805, 0.81, 0.815, 0.82],
             ),
@@ -89,7 +89,7 @@ class TestAdaptiveExploration(unittest.TestCase):
 
     def test_exploration_is_capped(self) -> None:
         self.assertEqual(
-            sitecustomize._adaptive_exploration_rate(0.3, [0.8] * 5),
+            compat_adapter._adaptive_exploration_rate(0.3, [0.8] * 5),
             0.9,
         )
 
@@ -118,7 +118,7 @@ class TestStagnationArchitectureEscape(unittest.TestCase):
         first_best = _solution("best", "a", iteration=4, score=0.9, weight=1)
         equal_later = _solution("tie", "b", iteration=11, score=0.9, weight=1)
         weaker = _solution("weak", "c", iteration=18, score=0.8, weight=1)
-        state = sitecustomize._stagnation_state(
+        state = compat_adapter._stagnation_state(
             _memory(first_best, equal_later, weaker, last_iteration=20)
         )
 
@@ -136,14 +136,14 @@ class TestStagnationArchitectureEscape(unittest.TestCase):
             "SOL58_CODE_LANGUAGE": "cuda_cpp",
         }
         with mock.patch.dict(os.environ, environment):
-            first = sitecustomize._stagnation_seed_parent(
+            first = compat_adapter._stagnation_seed_parent(
                 memory, requested_island=0, num_islands=8
             )
-            repeated = sitecustomize._stagnation_seed_parent(
+            repeated = compat_adapter._stagnation_seed_parent(
                 memory, requested_island=0, num_islands=8
             )
             memory.last_iteration = 21
-            second = sitecustomize._stagnation_seed_parent(
+            second = compat_adapter._stagnation_seed_parent(
                 memory, requested_island=0, num_islands=8
             )
 
@@ -181,7 +181,7 @@ class TestStagnationArchitectureEscape(unittest.TestCase):
         )
 
         with mock.patch.dict(os.environ, {"ATREX_PES_STAGNATION_MAX_ATTEMPTS": "2"}):
-            accepted = sitecustomize._apply_stagnation_architecture_gate(
+            accepted = compat_adapter._apply_stagnation_architecture_gate(
                 memory, child, "hierarchical_histogram"
             )
 
@@ -196,7 +196,7 @@ class TestStagnationArchitectureEscape(unittest.TestCase):
             child.metadata["stagnation_escape_violation"]["seed_family"],
             "cub_radix_sort",
         )
-        solution_id = sitecustomize._finalize_rejected_stagnation_child(memory, child)
+        solution_id = compat_adapter._finalize_rejected_stagnation_child(memory, child)
         self.assertEqual(solution_id, "child")
         self.assertEqual(memory.last_iteration, 12)
         self.assertNotIn("child", memory.solutions)
@@ -211,7 +211,7 @@ class TestStagnationArchitectureEscape(unittest.TestCase):
         child = _solution("child", "radix", iteration=12, score=0.7, weight=1)
         child.evaluation = {"metrics": {"local_best": {"strictly_improved": False}}}
 
-        accepted = sitecustomize._apply_stagnation_architecture_gate(
+        accepted = compat_adapter._apply_stagnation_architecture_gate(
             memory, child, "cub_radix_sort"
         )
 
@@ -236,7 +236,7 @@ class TestStagnationArchitectureEscape(unittest.TestCase):
             }
         )
 
-        accepted = sitecustomize._apply_stagnation_architecture_gate(
+        accepted = compat_adapter._apply_stagnation_architecture_gate(
             memory, child, "hierarchical_histogram"
         )
 
@@ -262,7 +262,7 @@ class TestStagnationArchitectureEscape(unittest.TestCase):
 
         memory.last_iteration = 17
         with mock.patch.dict(os.environ, environment):
-            seed = sitecustomize._stagnation_seed_parent(
+            seed = compat_adapter._stagnation_seed_parent(
                 memory, requested_island=0, num_islands=8
             )
 
@@ -289,14 +289,14 @@ class TestStagnationArchitectureEscape(unittest.TestCase):
         }
         with mock.patch.dict(os.environ, environment):
             self.assertIsNotNone(
-                sitecustomize._stagnation_seed_parent(
+                compat_adapter._stagnation_seed_parent(
                     memory, requested_island=0, num_islands=8
                 )
             )
             new_best = _solution("new", "kernel-b", iteration=14, score=0.91, weight=1)
             memory.populations[new_best.solution_id] = new_best
             memory.last_iteration = 26
-            reset = sitecustomize._stagnation_seed_parent(
+            reset = compat_adapter._stagnation_seed_parent(
                 memory, requested_island=0, num_islands=8
             )
 
@@ -306,11 +306,11 @@ class TestStagnationArchitectureEscape(unittest.TestCase):
 
 class TestNcuSummaryPrompt(unittest.TestCase):
     def test_ncu_interpretation_contract_is_added_once(self) -> None:
-        prompt = sitecustomize._append_ncu_summary_instructions("Base summary prompt")
-        repeated = sitecustomize._append_ncu_summary_instructions(prompt)
+        prompt = compat_adapter._append_ncu_summary_instructions("Base summary prompt")
+        repeated = compat_adapter._append_ncu_summary_instructions(prompt)
 
         self.assertEqual(prompt, repeated)
-        self.assertEqual(prompt.count(sitecustomize._NCU_SUMMARY_MARKER), 1)
+        self.assertEqual(prompt.count(compat_adapter._NCU_SUMMARY_MARKER), 1)
         self.assertIn("metrics.ncu_analysis", prompt)
         self.assertIn("must never change the fitness assessment", prompt)
 
@@ -325,15 +325,15 @@ class TestPatchManifest(unittest.TestCase):
                 "ATREX_PES_COMPACT_DB_TOOLS": "On",
             },
         ):
-            self.assertTrue(sitecustomize._enabled("ATREX_PES_SOURCE_DEDUP"))
-            self.assertTrue(sitecustomize._enabled("ATREX_PES_ARCHITECTURE_ISLANDS"))
-            self.assertTrue(sitecustomize._enabled("ATREX_PES_COMPACT_DB_TOOLS"))
+            self.assertTrue(compat_adapter._enabled("ATREX_PES_SOURCE_DEDUP"))
+            self.assertTrue(compat_adapter._enabled("ATREX_PES_ARCHITECTURE_ISLANDS"))
+            self.assertTrue(compat_adapter._enabled("ATREX_PES_COMPACT_DB_TOOLS"))
 
     def test_database_constructor_rejects_too_few_architecture_islands(self) -> None:
         with self.assertRaisesRegex(ValueError, "at least 8 islands"):
-            sitecustomize._architecture_num_islands(SimpleNamespace(num_islands=4))
+            compat_adapter._architecture_num_islands(SimpleNamespace(num_islands=4))
         self.assertEqual(
-            sitecustomize._architecture_num_islands(SimpleNamespace(num_islands=8)),
+            compat_adapter._architecture_num_islands(SimpleNamespace(num_islands=8)),
             8,
         )
 
@@ -346,14 +346,14 @@ class TestPatchManifest(unittest.TestCase):
                 "error": "",
             }
         }
-        with mock.patch.object(sitecustomize, "PATCH_MANIFEST", broken):
+        with mock.patch.object(compat_adapter, "PATCH_MANIFEST", broken):
             with self.assertRaisesRegex(RuntimeError, "evolution_database"):
-                sitecustomize.validate_patch_manifest()
+                compat_adapter.validate_patch_manifest()
 
     def test_compaction_keeps_normal_kernel_source_complete(self) -> None:
         source = "x" * 12000
         with mock.patch.dict(os.environ, {"ATREX_PES_DB_SOLUTION_CHARS": "65536"}):
-            compact = sitecustomize._compact_solution_record({"solution": source})
+            compact = compat_adapter._compact_solution_record({"solution": source})
 
         self.assertEqual(compact["solution"], source)
         self.assertEqual(compact["solution_chars"], len(source))
@@ -362,8 +362,8 @@ class TestPatchManifest(unittest.TestCase):
 class TestSourceDeduplication(unittest.TestCase):
     def test_hash_ignores_outer_whitespace(self) -> None:
         self.assertEqual(
-            sitecustomize._solution_source_hash(" kernel\n"),
-            sitecustomize._solution_source_hash("kernel"),
+            compat_adapter._solution_source_hash(" kernel\n"),
+            compat_adapter._solution_source_hash("kernel"),
         )
 
     def test_population_indexes_keep_one_source_representative(self) -> None:
@@ -389,7 +389,7 @@ class TestSourceDeduplication(unittest.TestCase):
             island_capacity=[3],
         )
 
-        removed = sitecustomize._deduplicate_memory_indexes(memory)
+        removed = compat_adapter._deduplicate_memory_indexes(memory)
 
         self.assertEqual(removed, 1)
         self.assertEqual(set(memory.populations), {"a", "c"})
@@ -430,7 +430,7 @@ class TestSourceDeduplication(unittest.TestCase):
             (checkpoint / "metadata.json").write_text(
                 json.dumps({"islands": [["valid"]]}), encoding="utf-8"
             )
-            report = sitecustomize._restore_checkpoint_population_indexes(
+            report = compat_adapter._restore_checkpoint_population_indexes(
                 memory, str(checkpoint)
             )
 
@@ -452,7 +452,7 @@ class TestSourceDeduplication(unittest.TestCase):
             checkpoint = Path(tmp)
             (checkpoint / "metadata.json").write_text("{not-json", encoding="utf-8")
             with self.assertRaisesRegex(CheckpointCompatibilityError, "not valid JSON"):
-                sitecustomize._restore_checkpoint_population_indexes(
+                compat_adapter._restore_checkpoint_population_indexes(
                     memory, str(checkpoint)
                 )
 
@@ -468,7 +468,7 @@ class TestSourceDeduplication(unittest.TestCase):
             with self.assertRaisesRegex(
                 CheckpointCompatibilityError, "_lock:context-manager"
             ):
-                sitecustomize._restore_checkpoint_population_indexes(
+                compat_adapter._restore_checkpoint_population_indexes(
                     memory, str(checkpoint)
                 )
 
@@ -498,11 +498,11 @@ class TestAuthoritativeFitnessReconciliation(unittest.TestCase):
         registry = {
             "version": 1,
             "sources": {
-                sitecustomize._solution_source_hash(stale): {
+                compat_adapter._solution_source_hash(stale): {
                     "official_score": 0.852202,
                     "submission_id": 25255,
                 },
-                sitecustomize._solution_source_hash(official_best): {
+                compat_adapter._solution_source_hash(official_best): {
                     "official_score": 0.856272,
                     "submission_id": 25293,
                 },
@@ -513,7 +513,7 @@ class TestAuthoritativeFitnessReconciliation(unittest.TestCase):
             registry_path.parent.mkdir()
             registry_path.write_text(json.dumps(registry))
             with mock.patch.dict(os.environ, {"SOL58_EVAL_ROOT": tmp}):
-                changed = sitecustomize._reconcile_authoritative_scores(memory)
+                changed = compat_adapter._reconcile_authoritative_scores(memory)
 
         self.assertEqual(changed, 2)
         self.assertAlmostEqual(stale.score, 0.852202)

@@ -211,7 +211,7 @@ the checkout commit, target-file SHA-256, patched callable signatures, or requir
 do not match. `ATREX_LOONGFLOW_EXPECTED_COMMIT` deliberately selects another reviewed commit;
 `ATREX_LOONGFLOW_ALLOW_UNPINNED=1` and `ATREX_LOONGFLOW_ALLOW_DIRTY=1` require a non-empty
 `ATREX_LOONGFLOW_OVERRIDE_REASON`, are recorded in the run manifest, and are forbidden in CI.
-Generic upstream integration remains in `sitecustomize.py`; kernel-58 NCU and stagnation policy
+Generic upstream integration remains in the explicit `compat_adapter.py`; kernel-58 NCU and stagnation policy
 lives in `sol58_task_hooks.py`.
 
 `tools/evolution_db.py` supports the standalone linear optimizer and its workspace memory. It is not

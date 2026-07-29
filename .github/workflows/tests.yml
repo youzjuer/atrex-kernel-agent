@@ -55,6 +55,7 @@ jobs:
             orchestrator/sol58_pes/test_official_protocol.py \
             orchestrator/sol58_pes/test_official_fitness_pipeline.py \
             orchestrator/sol58_pes/test_fitness_calibration.py \
-            orchestrator/loongflow_compat/test_sitecustomize.py \
+            orchestrator/loongflow_compat/test_compat_adapter.py \
+            orchestrator/loongflow_compat/test_bootstrap.py \
             orchestrator/loongflow_compat/test_upstream_contract.py \
             orchestrator/test_run_manifest.py

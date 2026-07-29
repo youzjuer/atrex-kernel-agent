@@ -1,4 +1,4 @@
-"""Process-wide compatibility hooks for local LoongFlow runners."""
+"""Explicit compatibility adapter for supported LoongFlow entrypoints."""
 
 from __future__ import annotations
 
@@ -53,13 +53,24 @@ logger = logging.getLogger("atrex.pes_compat")
 PATCH_MANIFEST: dict[str, dict[str, object]] = {}
 
 
-if os.environ.get("ATREX_LITELLM_DROP_PARAMS", "0") == "1":
+def _patch_litellm_drop_params() -> None:
+    if not _enabled("ATREX_LITELLM_DROP_PARAMS", "0"):
+        return
     try:
         import litellm
 
         litellm.drop_params = True
     except Exception as exc:
-        logger.warning("Could not enable LiteLLM drop_params compatibility: %s", exc)
+        raise RuntimeError("cannot enable LiteLLM drop_params compatibility") from exc
+
+
+def _verify_litellm_drop_params() -> tuple[bool, str]:
+    if not _enabled("ATREX_LITELLM_DROP_PARAMS", "0"):
+        return True, "disabled"
+    import litellm
+
+    applied = bool(getattr(litellm, "drop_params", False))
+    return applied, "litellm.drop_params" if applied else "drop_params remains false"
 
 
 def _truncate_text(value: object, limit: int) -> object:
@@ -1079,6 +1090,12 @@ def _apply_manifest_patch(
 def apply_compat_patches() -> None:
     PATCH_MANIFEST.clear()
     _apply_manifest_patch(
+        "litellm_drop_params",
+        _patch_litellm_drop_params,
+        _verify_litellm_drop_params,
+        required=_enabled("ATREX_LITELLM_DROP_PARAMS", "0"),
+    )
+    _apply_manifest_patch(
         "evolution_database",
         _patch_evolution_database_selection,
         _verify_evolution_patch,
@@ -1139,6 +1156,3 @@ def validate_patch_manifest() -> dict[str, dict[str, object]]:
         )
         raise RuntimeError(f"required Atrex LoongFlow patches are inactive: {details}")
     return json.loads(json.dumps(PATCH_MANIFEST))
-
-
-apply_compat_patches()

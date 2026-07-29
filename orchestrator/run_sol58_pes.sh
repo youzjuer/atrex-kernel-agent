@@ -219,7 +219,7 @@ CONTEST_ROOT="${MLSYS26_FLASHINFER_CONTEST_ROOT}"
 PROJECT_ROOT="${CONTEST_ROOT}/full-agent/moe/agent/loongflow"
 RUN_DIR="${SOL58_PES_RUN_DIR}"
 OFFICIAL_LOCAL_SOL_EXECBENCH="${SOL_EXECBENCH}"
-export PYTHONPATH="${REPO_ROOT}:${SCRIPT_DIR}/loongflow_compat:${PROJECT_ROOT}:${PROJECT_ROOT}/src:${PYTHONPATH:-}"
+export PYTHONPATH="${REPO_ROOT}:${PROJECT_ROOT}:${PROJECT_ROOT}/src:${PYTHONPATH:-}"
 
 if is_truthy "${SOL58_PES_KNOWLEDGE_GROUNDING}" && [[ ! -f "${SOL58_PES_KNOWLEDGE_PACK}" ]]; then
   echo "error: SOL58 knowledge pack not found: ${SOL58_PES_KNOWLEDGE_PACK}" >&2
@@ -332,13 +332,7 @@ for required in task_config.yaml task_prompt.txt initial_kernel.cu eval_program_
 done
 
 echo "[Atrex] Validating required LoongFlow compatibility patches..."
-python - <<'PY'
-import json
-import sitecustomize
-
-manifest = sitecustomize.validate_patch_manifest()
-print("[Atrex] Patch manifest: " + json.dumps(manifest, sort_keys=True))
-PY
+python -m orchestrator.loongflow_compat.bootstrap --validate-only
 
 mkdir -p "${RUN_DIR}" "${SOL58_PES_WORKSPACE}" "${SOL58_EVAL_ROOT}"
 cd "${RUN_DIR}" || exit 1
@@ -454,7 +448,8 @@ RUN_MANIFEST_ARGS=(
   --source "evaluator=${TASK_DIR}/eval_program_sol58.py"
   --source "ncu_summary=${TASK_DIR}/ncu_summary.py"
   --source "run_manifest=${REPO_ROOT}/orchestrator/run_manifest.py"
-  --source "sitecustomize=${SCRIPT_DIR}/loongflow_compat/sitecustomize.py"
+  --source "compat_adapter=${SCRIPT_DIR}/loongflow_compat/compat_adapter.py"
+  --source "compat_bootstrap=${SCRIPT_DIR}/loongflow_compat/bootstrap.py"
   --source "sol58_task_hooks=${SCRIPT_DIR}/loongflow_compat/sol58_task_hooks.py"
   --source "architecture_islands=${SCRIPT_DIR}/loongflow_compat/architecture_islands.py"
   --source "checkpoint_compat=${SCRIPT_DIR}/loongflow_compat/checkpoint_compat.py"
@@ -496,7 +491,8 @@ echo "        eval_root=${SOL58_EVAL_ROOT}"
 echo "        problem_dir=${SOL58_PROBLEM_DIR}"
 echo "        compile_timeout=${SOL58_COMPILE_TIMEOUT}s run_timeout=${SOL58_SOL_TIMEOUT}s evaluator_timeout=${SOL58_EVAL_TIMEOUT}s"
 
-python "${PROJECT_ROOT}/agents/math_agent/math_evolve_agent.py" \
+python -m orchestrator.loongflow_compat.bootstrap \
+  "${PROJECT_ROOT}/agents/math_agent/math_evolve_agent.py" \
   --config "${RENDERED_CONFIG}" \
   --task-file "${RENDERED_TASK}" \
   --initial-file "${INITIAL_FILE}" \
