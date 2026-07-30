@@ -17,6 +17,7 @@ def _config(**overrides: Any) -> OfficialFitnessConfig:
     values = {
         "target_latency_ms": 0.0068,
         "minimum_local_score": 0.0,
+        "maximum_local_latency_ms": 0.0,
         "local_best_gate": True,
         "pending_score_policy": "local_proxy",
         "provisional_projection_floor": 0.899,
@@ -35,6 +36,7 @@ def _state(workspace: Path, **overrides: Any) -> OfficialEvaluationState:
         "kernel_source": "// candidate",
         "source_language": "cuda_cpp",
         "local_score": 1.1,
+        "local_latency_ms": 0.006,
         "gate_latency_ms": 0.006,
         "best_latency_before": 0.0065,
         "local_best_before": None,
@@ -157,6 +159,60 @@ class TestOfficialFitnessPipeline(unittest.TestCase):
         )
         self.assertEqual(result["metrics"]["official"]["fitness_source"], "provisional")
         self.assertEqual(len(submissions), 1)
+
+    def test_strict_local_latency_threshold_blocks_upload_at_boundary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            submissions: list[dict[str, Any]] = []
+            state = _state(Path(tmp), local_latency_ms=0.0065)
+            result = evaluate_official_fitness(
+                state,
+                _config(maximum_local_latency_ms=0.0065),
+                _hooks(submissions=submissions),
+            )
+
+        self.assertEqual(result["score"], 0.88)
+        self.assertEqual(
+            result["metrics"]["official"]["status"],
+            "SKIPPED_LOCAL_LATENCY_THRESHOLD",
+        )
+        self.assertEqual(submissions, [])
+        self.assertIn("not below the strict upload threshold", result["summary"])
+
+    def test_strict_local_latency_threshold_allows_faster_candidate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            submissions: list[dict[str, Any]] = []
+            state = _state(Path(tmp), local_latency_ms=0.006499)
+            evaluate_official_fitness(
+                state,
+                _config(maximum_local_latency_ms=0.0065),
+                _hooks(
+                    submission={"id": 78, "status": "PENDING"},
+                    submissions=submissions,
+                ),
+            )
+
+        self.assertEqual(len(submissions), 1)
+        self.assertTrue(submissions[0]["kwargs"]["allow_upload"])
+
+    def test_threshold_cache_lookup_cannot_fall_through_to_upload(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            submissions: list[dict[str, Any]] = []
+            state = _state(
+                Path(tmp),
+                local_latency_ms=0.007,
+                reuse_cached_official=True,
+            )
+            evaluate_official_fitness(
+                state,
+                _config(maximum_local_latency_ms=0.0065),
+                _hooks(
+                    submission={"id": 79, "status": "PENDING"},
+                    submissions=submissions,
+                ),
+            )
+
+        self.assertEqual(len(submissions), 1)
+        self.assertFalse(submissions[0]["kwargs"]["allow_upload"])
 
 
 if __name__ == "__main__":

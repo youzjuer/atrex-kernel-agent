@@ -15,6 +15,7 @@ Result = dict[str, Any]
 class OfficialFitnessConfig:
     target_latency_ms: float
     minimum_local_score: float
+    maximum_local_latency_ms: float
     local_best_gate: bool
     pending_score_policy: str
     provisional_projection_floor: float
@@ -30,6 +31,7 @@ class OfficialEvaluationState:
     kernel_source: str
     source_language: str
     local_score: float
+    local_latency_ms: float
     gate_latency_ms: float
     best_latency_before: float
     local_best_before: dict[str, Any] | None
@@ -146,6 +148,67 @@ def _skip_outside_official_gate(
     ):
         return None
 
+    if state.same_as_local_best:
+        gate_detail = "candidate is the persisted local-best kernel"
+    else:
+        gate_status = str(state.gate_result.get("status") or "rejected")
+        gate_detail = (
+            f"uncertainty gate classified the candidate as {gate_status}; gate latency "
+            f"{state.gate_latency_ms:.6f} ms vs local best "
+            f"{state.best_latency_before:.6f} ms"
+        )
+    skip_status = (
+        "SKIPPED_SAME_AS_LOCAL_BEST"
+        if state.same_as_local_best
+        else "SKIPPED_NOT_LOCAL_BEST"
+    )
+    return _provisional_skip_result(
+        state,
+        config,
+        hooks,
+        status=skip_status,
+        detail=gate_detail,
+    )
+
+
+def _skip_above_local_latency_threshold(
+    state: OfficialEvaluationState,
+    config: OfficialFitnessConfig,
+    hooks: OfficialFitnessHooks,
+) -> Result | None:
+    threshold = config.maximum_local_latency_ms
+    if (
+        threshold <= 0
+        or state.local_latency_ms < threshold
+        or state.reuse_cached_official
+    ):
+        return None
+
+    return _provisional_skip_result(
+        state,
+        config,
+        hooks,
+        status="SKIPPED_LOCAL_LATENCY_THRESHOLD",
+        detail=(
+            f"measured local median latency {state.local_latency_ms:.6f} ms is not "
+            f"below the strict upload threshold {threshold:.6f} ms"
+        ),
+        extra_metrics={
+            "local_latency_ms": state.local_latency_ms,
+            "maximum_local_latency_ms": threshold,
+        },
+    )
+
+
+def _provisional_skip_result(
+    state: OfficialEvaluationState,
+    config: OfficialFitnessConfig,
+    hooks: OfficialFitnessHooks,
+    *,
+    status: str,
+    detail: str,
+    extra_metrics: dict[str, Any] | None = None,
+) -> Result:
     scoring_latency_ms = (
         state.best_latency_before
         if state.same_as_local_best and state.best_latency_before > 0
@@ -157,16 +220,11 @@ def _skip_outside_official_gate(
         scoring_latency_ms,
         state.local_best_before,
     )
-    skip_status = (
-        "SKIPPED_SAME_AS_LOCAL_BEST"
-        if state.same_as_local_best
-        else "SKIPPED_NOT_LOCAL_BEST"
-    )
     anchored = details["source"] == "incumbent_official_anchor"
-    state.metrics["official"] = {
+    official_metrics = {
         "enabled": True,
         "submitted": False,
-        "status": skip_status,
+        "status": status,
         "authoritative": False,
         "fitness_source": (
             "provisional_official_anchor" if anchored else "provisional_local_proxy"
@@ -178,18 +236,12 @@ def _skip_outside_official_gate(
         "provisional_projection_floor": config.provisional_projection_floor,
         "provisional_calibration": details,
     }
-    if state.same_as_local_best:
-        gate_detail = "candidate is the persisted local-best kernel"
-    else:
-        gate_status = str(state.gate_result.get("status") or "rejected")
-        gate_detail = (
-            f"uncertainty gate classified the candidate as {gate_status}; gate latency "
-            f"{state.gate_latency_ms:.6f} ms vs local best "
-            f"{state.best_latency_before:.6f} ms"
-        )
+    if extra_metrics:
+        official_metrics.update(extra_metrics)
+    state.metrics["official"] = official_metrics
     label = "incumbent-anchored" if anchored else "calibrated local"
     summary = (
-        f"{state.local_summary} Official submission skipped because {gate_detail}. "
+        f"{state.local_summary} Official submission skipped because {detail}. "
         f"Using {label} provisional score {provisional_score:.6f}; no remote slot "
         "was consumed."
     )
@@ -381,6 +433,7 @@ def evaluate_official_fitness(
     for resolver in (
         lambda: _reuse_completed_local_best(state, hooks),
         lambda: _skip_below_local_prefilter(state, config, hooks),
+        lambda: _skip_above_local_latency_threshold(state, config, hooks),
         lambda: _skip_outside_official_gate(state, config, hooks),
     ):
         resolved = resolver()
@@ -396,7 +449,13 @@ def evaluate_official_fitness(
         local_score=state.local_score,
         local_latency_ms=state.gate_latency_ms,
         measurement_profile=state.measurement_profile,
-        allow_upload=not state.same_as_local_best,
+        allow_upload=(
+            not state.same_as_local_best
+            and (
+                config.maximum_local_latency_ms <= 0
+                or state.local_latency_ms < config.maximum_local_latency_ms
+            )
+        ),
         submission_reason=reason,
     )
     request_time_s = time.time() - request_started

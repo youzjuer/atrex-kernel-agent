@@ -142,6 +142,10 @@ OFFICIAL_ASYNC_REFRESH_DELAY = float(
     os.environ.get("SOL58_OFFICIAL_ASYNC_REFRESH_DELAY", "60")
 )
 OFFICIAL_MIN_LOCAL_SCORE = float(os.environ.get("SOL58_OFFICIAL_MIN_LOCAL_SCORE", "0"))
+OFFICIAL_MAX_LOCAL_LATENCY_MS = max(
+    0.0,
+    float(os.environ.get("SOL58_OFFICIAL_MAX_LOCAL_LATENCY_MS", "0")),
+)
 OFFICIAL_PENDING_RESULT_GRACE = float(
     os.environ.get("SOL58_OFFICIAL_PENDING_RESULT_GRACE", "60")
 )
@@ -1952,6 +1956,7 @@ def _official_fitness_pipeline_config() -> OfficialFitnessConfig:
     return OfficialFitnessConfig(
         target_latency_ms=TARGET_LATENCY_MS,
         minimum_local_score=OFFICIAL_MIN_LOCAL_SCORE,
+        maximum_local_latency_ms=OFFICIAL_MAX_LOCAL_LATENCY_MS,
         local_best_gate=LOCAL_BEST_GATE,
         pending_score_policy=OFFICIAL_PENDING_SCORE_POLICY,
         provisional_projection_floor=OFFICIAL_PROVISIONAL_SCORE_CAP,
@@ -2273,6 +2278,10 @@ def evaluate(program_path: str) -> dict[str, Any]:
         passes_official_gate = bool(gate_result.get("submit_official"))
         raw_local_score = TARGET_LATENCY_MS / latency_ms
         local_score = TARGET_LATENCY_MS / gate_latency_ms
+        below_official_latency_threshold = (
+            OFFICIAL_MAX_LOCAL_LATENCY_MS <= 0
+            or latency_ms < OFFICIAL_MAX_LOCAL_LATENCY_MS
+        )
         metrics["raw_local_score"] = raw_local_score
         metrics["local_score"] = local_score
         metrics["local_best"] = {
@@ -2284,6 +2293,8 @@ def evaluate(program_path: str) -> dict[str, Any]:
             "same_kernel": same_as_local_best,
             "strictly_improved": beats_local_best,
             "official_gate_passed": passes_official_gate,
+            "below_official_latency_threshold": below_official_latency_threshold,
+            "official_max_local_latency_ms": (OFFICIAL_MAX_LOCAL_LATENCY_MS or None),
             "measurement_profile_matches": local_best_profile_matches,
             "profile_recalibration": profile_recalibration,
             "improvement_ms": (
@@ -2303,6 +2314,7 @@ def evaluate(program_path: str) -> dict[str, Any]:
         }
         if (
             OFFICIAL_FITNESS
+            and below_official_latency_threshold
             and LOCAL_BEST_GATE
             and str(gate_result.get("status") or "") == "confirmed_slower"
             and not same_as_local_best
@@ -2316,6 +2328,13 @@ def evaluate(program_path: str) -> dict[str, Any]:
             )
             if official_probe.get("claimed"):
                 passes_official_gate = True
+        elif OFFICIAL_FITNESS and not below_official_latency_threshold:
+            official_probe["reason"] = (
+                f"local median latency {latency_ms:.6f} ms is not below the strict "
+                f"upload threshold {OFFICIAL_MAX_LOCAL_LATENCY_MS:.6f} ms"
+            )
+        if not below_official_latency_threshold:
+            passes_official_gate = False
         gate_result["official_probe"] = official_probe
         metrics["local_best"].update(
             {
@@ -2434,6 +2453,7 @@ def evaluate(program_path: str) -> dict[str, Any]:
                     kernel_source=kernel_source,
                     source_language=source_language,
                     local_score=local_score,
+                    local_latency_ms=latency_ms,
                     gate_latency_ms=gate_latency_ms,
                     best_latency_before=best_latency_before,
                     local_best_before=local_best_before,
