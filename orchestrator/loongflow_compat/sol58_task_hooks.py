@@ -12,6 +12,7 @@ import logging
 import os
 
 from orchestrator.loongflow_compat.architecture_islands import (
+    architecture_home_occupancy,
     architecture_island_id,
     architecture_label,
     architecture_tags,
@@ -253,6 +254,206 @@ def _stagnation_seed_parent(
     }
 
 
+def _architecture_bootstrap_seed_parent(
+    memory: EvolutionMemory,
+    *,
+    requested_island: int | None,
+    num_islands: int,
+) -> dict[str, object] | None:
+    """Seed an underfilled semantic island with a bounded, checkpointed attempt budget."""
+    if not _enabled("ATREX_PES_STAGNATION_SEEDS", "0") or requested_island is None:
+        return None
+    if os.environ.get("SOL58_CODE_LANGUAGE", "cuda_cpp").strip().lower() not in {
+        "cuda",
+        "cuda_cpp",
+        "auto",
+    }:
+        return None
+    try:
+        minimum_home = int(os.environ.get("ATREX_PES_MIN_HOME_PER_ISLAND", "6"))
+    except ValueError as exc:
+        raise ValueError("ATREX_PES_MIN_HOME_PER_ISLAND must be an integer") from exc
+    if minimum_home <= 0:
+        return None
+    requested_island = int(requested_island) % max(1, int(num_islands))
+    occupancy = architecture_home_occupancy(memory)
+    if (
+        requested_island < len(occupancy)
+        and occupancy[requested_island] >= minimum_home
+    ):
+        return None
+    pending = getattr(memory, "_atrex_pending_architecture_bootstrap", None)
+    if isinstance(pending, dict):
+        return None
+
+    seeds = load_seed_bank(language="cuda_cpp")
+    matching = []
+    for seed in seeds:
+        features = extract_architecture_features(seed.source)
+        detected_family = architecture_label(features)
+        if detected_family != seed.family:
+            raise RuntimeError(
+                f"SOL58 seed {seed.seed_id!r} declares {seed.family!r} but feature "
+                f"analysis classified it as {detected_family!r}"
+            )
+        if architecture_island_id(detected_family, 0, num_islands) == requested_island:
+            matching.append((seed, features))
+    if not matching:
+        return None
+
+    attempts = getattr(memory, "_atrex_bootstrap_attempts", None)
+    if not isinstance(attempts, dict):
+        attempts = {}
+        memory._atrex_bootstrap_attempts = attempts
+    max_attempts = _positive_int_env("ATREX_PES_BOOTSTRAP_MAX_ATTEMPTS", 8)
+    available = [
+        pair
+        for pair in matching
+        if int(attempts.get(f"{requested_island}:{pair[0].seed_id}", 0) or 0)
+        < max_attempts
+    ]
+    if not available:
+        return None
+    seed, features = min(
+        available,
+        key=lambda pair: (
+            int(attempts.get(f"{requested_island}:{pair[0].seed_id}", 0) or 0),
+            pair[0].seed_id,
+        ),
+    )
+    key = f"{requested_island}:{seed.seed_id}"
+    attempt = int(attempts.get(key, 0) or 0) + 1
+    attempts[key] = attempt
+    current_iteration = max(0, int(getattr(memory, "last_iteration", 0) or 0))
+    directive = (
+        "MANDATORY ISLAND BOOTSTRAP: use this executable CUDA seed to establish "
+        f"the {island_profile(requested_island)} architecture family in island "
+        f"{requested_island}. Preserve the defining {seed.family} mechanism, "
+        "all 16-workload correctness, and produce a complete self-contained kernel."
+    )
+    memory._atrex_pending_architecture_bootstrap = {
+        "expected_iteration": current_iteration + 1,
+        "island_id": requested_island,
+        "seed_id": seed.seed_id,
+        "seed_family": seed.family,
+        "attempt": attempt,
+        "max_attempts": max_attempts,
+    }
+    logger.warning(
+        "Bootstrapping empty architecture island %d (%s): seed=%s attempt=%d/%d home=%s",
+        requested_island,
+        island_profile(requested_island),
+        seed.seed_id,
+        attempt,
+        max_attempts,
+        occupancy,
+    )
+    return {
+        "solution": seed.source,
+        "solution_id": "",
+        "generate_plan": directive,
+        "parent_id": "",
+        "island_id": requested_island,
+        "iteration": current_iteration,
+        "generation": 0,
+        "sample_cnt": 0,
+        "sample_weight": 0.05,
+        "score": 0.0,
+        "evaluation": "Unscored architecture bootstrap seed; evaluator evidence is required.",
+        "summary": f"{directive} Seed purpose: {seed.purpose}",
+        "metadata": {
+            "trace": [],
+            "architecture_bootstrap": dict(
+                memory._atrex_pending_architecture_bootstrap
+            ),
+            "source_sha256": seed.source_sha256,
+            "architecture_features": features,
+            "architecture_tags": architecture_tags(features),
+            "architecture_label": seed.family,
+            "architecture_island_id": requested_island,
+            "architecture_home_island_id": requested_island,
+            "architecture_island_profile": island_profile(requested_island),
+        },
+    }
+
+
+def _evaluation_passed_all_workloads(solution: EvolutionSolution) -> bool:
+    evaluation = getattr(solution, "evaluation", None)
+    if isinstance(evaluation, str):
+        try:
+            evaluation = json.loads(evaluation)
+        except (TypeError, ValueError):
+            return False
+    if (
+        not isinstance(evaluation, dict)
+        or str(evaluation.get("status", "")).lower() != "success"
+    ):
+        return False
+    metrics = evaluation.get("metrics")
+    if not isinstance(metrics, dict):
+        return False
+    try:
+        passed = int(metrics.get("passed", -1))
+        expected = int(metrics.get("expected_total", metrics.get("total", -2)))
+        total = int(metrics.get("total", expected))
+    except (TypeError, ValueError):
+        return False
+    return expected > 0 and passed == expected and total == expected
+
+
+def _record_architecture_bootstrap_outcome(
+    memory: EvolutionMemory,
+    solution: EvolutionSolution,
+    child_family: str,
+) -> bool:
+    pending = getattr(memory, "_atrex_pending_architecture_bootstrap", None)
+    if not isinstance(pending, dict):
+        return True
+    child_iteration = int(getattr(solution, "iteration", -2) or -2)
+    expected_iteration = int(pending.get("expected_iteration", -1) or -1)
+    if child_iteration != expected_iteration:
+        if child_iteration > expected_iteration:
+            logger.warning(
+                "Discarding stale architecture bootstrap for iteration %d while adding %d",
+                expected_iteration,
+                child_iteration,
+            )
+            memory._atrex_pending_architecture_bootstrap = None
+        return True
+    memory._atrex_pending_architecture_bootstrap = None
+    requested_island = int(pending.get("island_id", -1))
+    child_island = int(getattr(solution, "island_id", -2))
+    passed = _evaluation_passed_all_workloads(solution)
+    satisfied = passed and child_island == requested_island
+    metadata = getattr(solution, "metadata", None)
+    if not isinstance(metadata, dict):
+        metadata = {}
+        solution.metadata = metadata
+    outcome = {
+        **pending,
+        "child_family": child_family,
+        "child_island": child_island,
+        "all_workloads_correct": passed,
+        "satisfied": satisfied,
+    }
+    metadata[
+        "architecture_bootstrap_satisfied"
+        if satisfied
+        else "architecture_bootstrap_failed"
+    ] = outcome
+    if not satisfied:
+        logger.warning(
+            "Architecture bootstrap failed: seed=%s target_island=%d child_family=%s "
+            "child_island=%d all_correct=%s",
+            pending.get("seed_id"),
+            requested_island,
+            child_family,
+            child_island,
+            passed,
+        )
+    return satisfied
+
+
 def _local_best_improved(solution: EvolutionSolution) -> bool:
     evaluation = getattr(solution, "evaluation", "")
     if isinstance(evaluation, str):
@@ -298,11 +499,13 @@ def _apply_stagnation_architecture_gate(
         metadata = {}
         solution.metadata = metadata
     local_best_improved = _local_best_improved(solution)
-    if child_family != incumbent_family or local_best_improved:
+    evaluation_passed = _evaluation_passed_all_workloads(solution)
+    if evaluation_passed and (child_family != incumbent_family or local_best_improved):
         metadata["stagnation_escape_satisfied"] = {
             **pending,
             "child_family": child_family,
             "local_best_improved": local_best_improved,
+            "all_workloads_correct": True,
         }
         memory._atrex_stagnation_seed_retries = 0
         return True
@@ -318,11 +521,18 @@ def _apply_stagnation_architecture_gate(
     if retries < max_attempts:
         memory._atrex_stagnation_seed_bucket = None
 
+    if not evaluation_passed:
+        reason = "child did not complete evaluation with all workloads correct"
+    else:
+        reason = (
+            "child reconstructed the stagnant incumbent family without a new local best"
+        )
     violation = {
         **pending,
         "child_family": child_family,
-        "reason": "child reconstructed the stagnant incumbent family without a new local best",
+        "reason": reason,
         "score_before_gate": original_score,
+        "all_workloads_correct": evaluation_passed,
         "retry": retries,
         "max_attempts": max_attempts,
     }
@@ -394,7 +604,13 @@ def _verify_stagnation_seed_bank() -> tuple[bool, str]:
         return True, "disabled"
     seeds = load_seed_bank(language="cuda_cpp")
     families = {seed.family for seed in seeds}
-    required = {"cub_radix_sort", "expert_parallel_scan"}
+    required = {
+        "cluster_dsmem",
+        "cub_radix_sort",
+        "expert_parallel_scan",
+        "persistent_cooperative",
+        "warp_specialization",
+    }
     missing = sorted(required - families)
     if missing:
         return False, f"missing architecture seed families {missing}"

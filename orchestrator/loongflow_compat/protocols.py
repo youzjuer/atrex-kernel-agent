@@ -54,6 +54,8 @@ class EvolutionMemory(Protocol):
     _atrex_stagnation_seed_retries: int
     _atrex_last_stagnation_seed_id: str
     _atrex_pending_stagnation_escape: dict[str, Any] | None
+    _atrex_bootstrap_attempts: dict[str, int]
+    _atrex_pending_architecture_bootstrap: dict[str, Any] | None
     _atrex_stagnation_checkpoint_status: dict[str, Any]
 
     def _feature_coords_to_key(self, coordinates: Any) -> str: ...

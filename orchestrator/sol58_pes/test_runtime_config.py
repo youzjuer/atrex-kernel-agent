@@ -85,6 +85,11 @@ class TestRuntimeConfig(unittest.TestCase):
                     "SOL58_LOCAL_BEST_GATE": "off",
                     "SOL58_LOCAL_REPEAT_COUNT": "5",
                     "SOL58_MEASUREMENT_PROFILE": "official",
+                    "SOL58_OFFICIAL_MAX_LOCAL_LATENCY_MS": "0.0064",
+                    "SOL58_EXPLORATION_RATE": "0.3",
+                    "SOL58_SAMPLING_WEIGHT_POWER": "1.5",
+                    "ATREX_PES_MIN_HOME_PER_ISLAND": "7",
+                    "ATREX_PES_MAX_MIGRANT_FRACTION": "0.15",
                 },
             )
 
@@ -94,6 +99,14 @@ class TestRuntimeConfig(unittest.TestCase):
             result["values"]["SOL58_MEASUREMENT_PROFILE"],
             "official_v1_1_b200",
         )
+        self.assertEqual(
+            result["values"]["SOL58_OFFICIAL_MAX_LOCAL_LATENCY_MS"],
+            "0.0064",
+        )
+        self.assertEqual(result["values"]["SOL58_EXPLORATION_RATE"], "0.3")
+        self.assertEqual(result["values"]["SOL58_SAMPLING_WEIGHT_POWER"], "1.5")
+        self.assertEqual(result["values"]["ATREX_PES_MIN_HOME_PER_ISLAND"], "7")
+        self.assertEqual(result["values"]["ATREX_PES_MAX_MIGRANT_FRACTION"], "0.15")
         self.assertEqual(
             result["records"]["SOL58_LOCAL_REPEAT_COUNT"]["source"],
             "environment",

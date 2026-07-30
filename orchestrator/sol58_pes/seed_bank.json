@@ -14,6 +14,27 @@
       "language": "cuda_cpp",
       "path": "seeds/expert_parallel_scan.cu",
       "purpose": "Correct expert-owned stable scan probe; reduce its repeated input traffic through hierarchy or bitmasks."
+    },
+    {
+      "id": "warp_specialized_bucket",
+      "family": "warp_specialization",
+      "language": "cuda_cpp",
+      "path": "seeds/warp_specialized_bucket.cu",
+      "purpose": "Correct producer/consumer warp-role bucket seed for exploring role-specialized load, scan, and scatter pipelines."
+    },
+    {
+      "id": "cluster_dsmem",
+      "family": "cluster_dsmem",
+      "language": "cuda_cpp",
+      "path": "seeds/cluster_dsmem.cu",
+      "purpose": "Correct thread-block-cluster seed that aggregates per-CTA counts through distributed shared memory before stable scatter."
+    },
+    {
+      "id": "persistent_cooperative",
+      "family": "persistent_cooperative",
+      "language": "cuda_cpp",
+      "path": "seeds/persistent_cooperative.cu",
+      "purpose": "Correct cooperative single-launch seed that fuses count, prefix, and stable scatter behind grid-wide synchronization."
     }
   ]
 }

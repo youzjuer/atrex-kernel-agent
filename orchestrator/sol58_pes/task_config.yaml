@@ -67,8 +67,8 @@ evolve:
     population_size: 100
     elite_archive_size: 50
     use_sampling_weight: true
-    sampling_weight_power: 2
-    exploration_rate: 0.1
+    sampling_weight_power: ${SOL58_SAMPLING_WEIGHT_POWER}
+    exploration_rate: ${SOL58_EXPLORATION_RATE}
     # The Atrex Summary hook interprets this as a global iteration interval,
     # not the upstream per-island-capacity heuristic.
     migration_interval: ${SOL58_ARCHITECTURE_MIGRATION_INTERVAL}

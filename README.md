@@ -153,7 +153,10 @@ result. Set
 
 Remote submissions are also protected by a local-best gate. Every locally correct candidate is
 measured three complete times (`SOL58_LOCAL_REPEAT_COUNT=3`), and the median geomean latency is
-compared with the persisted local best. Non-slower candidates are remeasured in alternating
+first required to be strictly below `official.maximum_local_latency_ms` (currently `0.0065` ms)
+before any new upload is allowed. Candidates at or above the threshold retain provisional search
+fitness but consume no remote slot. The median is also compared with the persisted local best.
+Non-slower candidates are remeasured in alternating
 candidate/incumbent pairs and classified as confirmed faster, confirmed slower, or uncertain from a
 configurable noise band. Confirmed faster candidates replace the local best and are uploaded;
 uncertain candidates within the tolerance may be uploaded at most once per cooldown. Confirmed
@@ -180,8 +183,10 @@ from the official sandbox.
 Atrex also deduplicates selectable SOL58 PES members by stripped source SHA-256 within each island.
 Repeated source attempts remain in lineage/checkpoint history for diagnosis, but do not occupy
 population, elite, or MAP-Elites slots and cannot compound sampling weight. Parent sampling repairs
-older checkpoints before selection. Adaptive exploration requires five attempts and checks hard
-stagnation (`<0.001`, 4x) before medium stagnation (`<0.01`, 2x), capped at `0.9`.
+older checkpoints before selection, including reconstructing strict provisional ordering from
+legacy flat-cap scores. Adaptive exploration uses recent-score similarity when available, but a
+global plateau or empty home islands raises exploration without waiting for five similar scores;
+the rate remains capped at `0.9`.
 
 SOL58 PES defaults to eight architecture islands. At the Summary-to-database boundary, Atrex extracts
 named CUDA/CuTe features (including warp specialization, cluster TMA broadcast, WGMMA, cp.async,
@@ -191,7 +196,12 @@ anchors while PCA separates general variants. Every 20 completed iterations, the
 home members are reclassified, and each island exchanges its top fraction with adjacent islands.
 `SOL58_NUM_ISLANDS` and `SOL58_ARCHITECTURE_MIGRATION_INTERVAL` override these defaults. Architecture
 metadata and migration state are persisted in every checkpoint; legacy one-island checkpoints are
-expanded and reindexed on load.
+expanded and reindexed on load. Population cleanup protects a configurable minimum of home members
+per occupied island and limits migration copies to a bounded share, so a dominant family cannot
+erase weaker routes. Empty CUDA architecture islands are bootstrapped from validated CUB radix,
+expert scan, warp-specialized, cluster-DSMEM, and persistent-cooperative seeds; attempts and pending
+outcomes are checkpointed. Forced stagnation escapes count only after successful 16-workload
+correctness, and failed alternate-family children are rejected and retried.
 
 `orchestrator/sol58_pes/task_spec.json` owns immutable task identity and the timestamped leaderboard
 target: kernel ID, problem slug, GPU, API/leaderboard URLs, official stack, target score, and the

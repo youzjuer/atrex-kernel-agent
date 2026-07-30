@@ -93,6 +93,26 @@ class TestAdaptiveExploration(unittest.TestCase):
             0.9,
         )
 
+    def test_global_plateau_and_empty_islands_do_not_require_five_scores(self) -> None:
+        self.assertEqual(
+            compat_adapter._adaptive_exploration_rate(
+                0.2,
+                [0.8, 0.7],
+                plateau_rounds=24,
+                stagnation_rounds=12,
+            ),
+            0.8,
+        )
+        self.assertEqual(
+            compat_adapter._adaptive_exploration_rate(
+                0.2,
+                [],
+                empty_home_islands=4,
+                num_islands=8,
+            ),
+            0.8,
+        )
+
 
 class TestStagnationArchitectureEscape(unittest.TestCase):
     @staticmethod
@@ -159,8 +179,10 @@ class TestStagnationArchitectureEscape(unittest.TestCase):
         )
         self.assertIn("incumbent family (baseline)", first["generate_plan"])
         self.assertIsNone(repeated)
-        self.assertEqual(second["metadata"]["architecture_label"], "cub_radix_sort")
-        self.assertEqual(second["island_id"], 6)
+        self.assertEqual(
+            second["metadata"]["architecture_label"], "warp_specialization"
+        )
+        self.assertEqual(second["island_id"], 0)
 
     def test_unimproved_incumbent_child_is_zeroed_and_retried(self) -> None:
         memory = _memory(last_iteration=11)
@@ -209,7 +231,15 @@ class TestStagnationArchitectureEscape(unittest.TestCase):
         memory = _memory(last_iteration=11)
         self._set_pending_escape(memory)
         child = _solution("child", "radix", iteration=12, score=0.7, weight=1)
-        child.evaluation = {"metrics": {"local_best": {"strictly_improved": False}}}
+        child.evaluation = {
+            "status": "success",
+            "metrics": {
+                "passed": 16,
+                "total": 16,
+                "expected_total": 16,
+                "local_best": {"strictly_improved": False},
+            },
+        }
 
         accepted = compat_adapter._apply_stagnation_architecture_gate(
             memory, child, "cub_radix_sort"
@@ -231,8 +261,14 @@ class TestStagnationArchitectureEscape(unittest.TestCase):
         )
         child.evaluation = json.dumps(
             {
+                "status": "success",
                 "score": 0.91,
-                "metrics": {"local_best": {"strictly_improved": True}},
+                "metrics": {
+                    "passed": 16,
+                    "total": 16,
+                    "expected_total": 16,
+                    "local_best": {"strictly_improved": True},
+                },
             }
         )
 
@@ -245,6 +281,27 @@ class TestStagnationArchitectureEscape(unittest.TestCase):
         self.assertTrue(
             child.metadata["stagnation_escape_satisfied"]["local_best_improved"]
         )
+
+    def test_failed_alternate_family_is_rejected_and_retried(self) -> None:
+        memory = _memory(last_iteration=11)
+        self._set_pending_escape(memory)
+        child = _solution("child", "radix", iteration=12, score=0.7, weight=1)
+        child.evaluation = {
+            "status": "error",
+            "metrics": {"passed": 0, "total": 16, "expected_total": 16},
+        }
+
+        with mock.patch.dict(os.environ, {"ATREX_PES_STAGNATION_MAX_ATTEMPTS": "5"}):
+            accepted = compat_adapter._apply_stagnation_architecture_gate(
+                memory, child, "cub_radix_sort"
+            )
+
+        self.assertFalse(accepted)
+        self.assertEqual(child.score, 0.0)
+        violation = child.metadata["stagnation_escape_violation"]
+        self.assertFalse(violation["all_workloads_correct"])
+        self.assertIn("all workloads correct", violation["reason"])
+        self.assertIsNone(memory._atrex_stagnation_seed_bucket)
 
     def test_retry_budget_resets_for_each_stagnation_bucket(self) -> None:
         best = _solution("best", "kernel", iteration=1, score=0.9, weight=1)
@@ -274,7 +331,13 @@ class TestStagnationArchitectureEscape(unittest.TestCase):
         seeds = load_seed_bank()
         self.assertEqual(
             {seed.family for seed in seeds},
-            {"cub_radix_sort", "expert_parallel_scan"},
+            {
+                "cluster_dsmem",
+                "cub_radix_sort",
+                "expert_parallel_scan",
+                "persistent_cooperative",
+                "warp_specialization",
+            },
         )
         self.assertEqual(len(seed_bank_fingerprint(seeds)), 64)
 
@@ -522,6 +585,77 @@ class TestAuthoritativeFitnessReconciliation(unittest.TestCase):
         self.assertEqual(memory.best_solution_id, "local")
         self.assertEqual(memory.island_best_solution, ["local"])
 
+    def test_legacy_flat_cap_is_reconstructed_from_anchor_latency_ratio(self) -> None:
+        legacy = _solution(
+            "legacy", "kernel-a", iteration=1, score=0.899135, weight=99.0
+        )
+        legacy.evaluation = json.dumps(
+            {
+                "status": "success",
+                "score": 0.899135,
+                "metrics": {
+                    "passed": 16,
+                    "total": 16,
+                    "expected_total": 16,
+                    "official": {
+                        "authoritative": False,
+                        "provisional_calibration": {
+                            "anchor_score": 0.856301,
+                            "candidate_to_anchor_latency_ratio": 1.0610521819558296,
+                        },
+                    },
+                },
+            }
+        )
+        memory = _memory(legacy)
+
+        with mock.patch.dict(
+            os.environ,
+            {
+                "SOL58_TARGET_SCORE": "0.904135",
+                "SOL58_OFFICIAL_PROVISIONAL_SCORE_CAP": "0.899135",
+            },
+        ):
+            changed = compat_adapter._migrate_checkpoint_selection_scores(memory)
+
+        payload = json.loads(legacy.evaluation)
+        metrics = payload["metrics"]
+        expected_search = 0.856301 * 1.0610521819558296
+        expected_selection = compat_adapter.project_provisional_score(
+            expected_search,
+            target=0.904135,
+            floor=0.899135,
+        )
+        self.assertEqual(changed, 1)
+        self.assertAlmostEqual(metrics["search_score"], expected_search)
+        self.assertAlmostEqual(legacy.score, expected_selection)
+        self.assertAlmostEqual(metrics["selection_score"], expected_selection)
+        self.assertLessEqual(legacy.sample_weight, 1.0 + 3.0 * expected_selection)
+        self.assertEqual(
+            legacy.metadata["checkpoint_score_migration"]["source"],
+            "legacy_anchor_latency_ratio",
+        )
+
+    def test_authoritative_checkpoint_score_is_not_migrated(self) -> None:
+        official = _solution("official", "kernel", iteration=1, score=0.856, weight=2)
+        official.evaluation = {
+            "status": "success",
+            "score": 0.856,
+            "metrics": {
+                "certified_score": 0.856,
+                "selection_score": 0.856,
+                "search_score": 0.856,
+                "official": {"authoritative": True},
+            },
+        }
+        memory = _memory(official)
+
+        changed = compat_adapter._migrate_checkpoint_selection_scores(memory)
+
+        self.assertEqual(changed, 0)
+        self.assertEqual(official.score, 0.856)
+        self.assertNotIn("checkpoint_score_migration", official.metadata)
+
 
 class TestArchitectureFeatureAnalysis(unittest.TestCase):
     def test_detects_named_cuda_and_cute_routes(self) -> None:
@@ -559,6 +693,15 @@ class TestArchitectureFeatureAnalysis(unittest.TestCase):
         )
         self.assertEqual(cute["cute_dsl"], 1)
         self.assertEqual(architecture_islands.architecture_label(cute), "cute_dsl")
+
+        dsmem = architecture_islands.extract_architecture_features(
+            "cg::cluster_group cluster = cg::this_cluster(); "
+            "cluster.map_shared_rank(cluster_shared + threadIdx.x, 1);"
+        )
+        self.assertEqual(dsmem["cluster_dsmem"], 1)
+        self.assertEqual(
+            architecture_islands.architecture_label(dsmem), "cluster_dsmem"
+        )
 
     def test_detects_sort_families_and_hierarchical_histograms(self) -> None:
         cub = architecture_islands.extract_architecture_features(
@@ -657,6 +800,108 @@ class TestArchitectureFeatureAnalysis(unittest.TestCase):
             architecture_islands.architecture_island_id("warp_specialization", 0, 4)
 
 
+class TestArchitecturePopulationRetention(unittest.TestCase):
+    @staticmethod
+    def _routed_solution(
+        solution_id: str,
+        island: int,
+        score: float,
+        *,
+        migrated: bool = False,
+    ):
+        solution = _solution(
+            solution_id,
+            f"kernel-{solution_id}",
+            iteration=int(solution_id.rsplit("-", 1)[-1]),
+            score=score,
+            weight=1,
+        )
+        solution.island_id = island
+        solution.metadata = {
+            "architecture_home_island_id": (island - 1) % 8 if migrated else island,
+            "architecture_island_id": island,
+            "migrated": migrated,
+        }
+        return solution
+
+    @staticmethod
+    def _retention_memory(solutions):
+        populations = {solution.solution_id: solution for solution in solutions}
+        islands = [set() for _ in range(8)]
+        for solution in solutions:
+            islands[solution.island_id].add(solution.solution_id)
+        return SimpleNamespace(
+            _lock=threading.RLock(),
+            populations=populations,
+            solutions=dict(populations),
+            islands=islands,
+            island_feature_maps=[{} for _ in range(8)],
+            island_best_solution=[None] * 8,
+            island_capacity=[len(island) for island in islands],
+            elites=set(populations),
+            best_solution_id=max(solutions, key=lambda item: item.score).solution_id,
+            population_size=100,
+            num_islands=8,
+            last_iteration=200,
+        )
+
+    def test_weak_home_quota_survives_global_score_eviction(self) -> None:
+        solutions = []
+        for island in range(8):
+            solutions.extend(
+                self._routed_solution(
+                    f"home{island}-{index}", island, 0.1 + island * 0.01
+                )
+                for index in range(6)
+            )
+        solutions.extend(
+            self._routed_solution(f"dominant-{index}", 7, 0.8 + index * 0.001)
+            for index in range(53)
+        )
+        memory = self._retention_memory(solutions)
+
+        result = architecture_islands.enforce_architecture_population_limit(
+            memory,
+            minimum_home_per_island=6,
+            maximum_migrant_fraction=0.2,
+        )
+
+        self.assertEqual(result["removed"], 1)
+        self.assertEqual(result["home_occupancy"][:7], [6] * 7)
+        self.assertGreaterEqual(result["home_occupancy"][7], 6)
+        self.assertEqual(len(memory.populations), 100)
+
+    def test_migrants_are_bounded_even_when_population_drops_below_capacity(
+        self,
+    ) -> None:
+        homes = [
+            self._routed_solution(f"home-{index}", index % 8, 0.2 + index * 0.001)
+            for index in range(78)
+        ]
+        migrants = [
+            self._routed_solution(
+                f"migrant-{index}", index % 8, 0.95 + index * 0.001, migrated=True
+            )
+            for index in range(25)
+        ]
+        memory = self._retention_memory(homes + migrants)
+
+        result = architecture_islands.enforce_architecture_population_limit(
+            memory,
+            minimum_home_per_island=6,
+            maximum_migrant_fraction=0.2,
+        )
+
+        remaining_migrants = sum(
+            architecture_islands.is_migration_copy(solution)
+            for solution in memory.populations.values()
+        )
+        self.assertEqual(result["migrants_removed"], 6)
+        self.assertEqual(remaining_migrants, 19)
+        self.assertEqual(len(memory.populations), 97)
+        self.assertLessEqual(remaining_migrants / len(memory.populations), 0.2)
+
+
 class TestArchitectureIslandRouting(unittest.TestCase):
     WARP_SOURCE = r"""
     __global__ void warp_specialized() {
@@ -688,6 +933,49 @@ class TestArchitectureIslandRouting(unittest.TestCase):
         )
         self.assertEqual(len(child.metadata["pca_coordinates"]), 3)
         self.assertIn("warp_specialization", child.metadata["architecture_tags"])
+
+    def test_empty_semantic_island_bootstrap_attempt_is_checkpointed(self) -> None:
+        memory = _memory(last_iteration=10)
+        architecture_islands.ensure_architecture_islands(memory, 8)
+        environment = {
+            "ATREX_PES_STAGNATION_SEEDS": "1",
+            "ATREX_PES_MIN_HOME_PER_ISLAND": "6",
+            "ATREX_PES_BOOTSTRAP_MAX_ATTEMPTS": "8",
+            "SOL58_CODE_LANGUAGE": "cuda_cpp",
+        }
+
+        with mock.patch.dict(os.environ, environment):
+            parent = compat_adapter._architecture_bootstrap_seed_parent(
+                memory, requested_island=1, num_islands=8
+            )
+
+        self.assertEqual(parent["metadata"]["architecture_label"], "cluster_dsmem")
+        self.assertEqual(parent["island_id"], 1)
+        self.assertEqual(memory._atrex_bootstrap_attempts["1:cluster_dsmem"], 1)
+        state = architecture_islands.architecture_checkpoint_payload(memory)[
+            "stagnation_escape"
+        ]
+        restored = _memory(last_iteration=10)
+        architecture_islands.ensure_architecture_islands(restored, 8)
+        architecture_islands.restore_stagnation_checkpoint_state(restored, state)
+        self.assertEqual(restored._atrex_bootstrap_attempts, {"1:cluster_dsmem": 1})
+        self.assertEqual(
+            restored._atrex_pending_architecture_bootstrap["expected_iteration"], 11
+        )
+
+        child = _solution(
+            "cluster-child", self.CLUSTER_SOURCE, iteration=11, score=0.5, weight=1
+        )
+        child.island_id = 1
+        child.evaluation = {
+            "status": "success",
+            "metrics": {"passed": 16, "total": 16, "expected_total": 16},
+        }
+        satisfied = compat_adapter._record_architecture_bootstrap_outcome(
+            restored, child, "cluster_dsmem"
+        )
+        self.assertTrue(satisfied)
+        self.assertTrue(child.metadata["architecture_bootstrap_satisfied"]["satisfied"])
 
     def test_single_island_checkpoint_population_is_reclassified(self) -> None:
         warp = _solution("warp", self.WARP_SOURCE, iteration=1, score=0.8, weight=1)

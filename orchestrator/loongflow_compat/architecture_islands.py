@@ -19,13 +19,14 @@ from orchestrator.loongflow_compat.protocols import EvolutionMemory, EvolutionSo
 
 logger = logging.getLogger("atrex.pes_architecture")
 
-ANALYSIS_VERSION = 2
+ANALYSIS_VERSION = 3
 STAGNATION_CHECKPOINT_VERSION = 1
 PCA_COMPONENTS = 3
 
 FEATURE_NAMES = (
     "warp_specialization",
     "cluster_launch",
+    "cluster_dsmem",
     "tma",
     "cluster_tma_broadcast",
     "wgmma",
@@ -71,6 +72,7 @@ _LOG_SCALED_FEATURES = {
 
 _SEMANTIC_ANCHORS = {
     "warp_specialization": 0,
+    "cluster_dsmem": 1,
     "cluster_tma_broadcast": 1,
     "tma_wgmma": 2,
     "persistent_cooperative": 3,
@@ -160,6 +162,16 @@ def extract_architecture_features(source: str) -> dict[str, int]:
     multicast = _present(
         code,
         r"multicast|broadcast|cta[_ ]?mask|cluster[_ ]?mask|mcast",
+    )
+    cluster_dsmem = int(
+        bool(cluster_launch)
+        and bool(
+            _present(
+                code,
+                r"map_shared_rank|__cluster_map_shared_rank|distributed[_ ]?shared|"
+                r"cluster[_ ]?(?:shared|dsmem)|\bDSMEM\b",
+            )
+        )
     )
     cp_async = _present(
         code,
@@ -293,6 +305,7 @@ def extract_architecture_features(source: str) -> dict[str, int]:
     return {
         "warp_specialization": warp_specialization,
         "cluster_launch": cluster_launch,
+        "cluster_dsmem": cluster_dsmem,
         "tma": tma,
         "cluster_tma_broadcast": int(cluster_launch and tma and multicast),
         "wgmma": _present(code, r"\bwgmma\b|warp[_ ]?group[_ ]?mma|warpgroup"),
@@ -338,6 +351,8 @@ def extract_architecture_features(source: str) -> dict[str, int]:
 def architecture_label(features: dict[str, int]) -> str:
     if features.get("cluster_tma_broadcast"):
         return "cluster_tma_broadcast"
+    if features.get("cluster_dsmem"):
+        return "cluster_dsmem"
     if features.get("cub_radix_sort") or features.get("block_radix_sort"):
         return "cub_radix_sort"
     if features.get("bitwise_radix_sort"):
@@ -538,6 +553,223 @@ def _score(solution: EvolutionSolution) -> float:
         return float(getattr(solution, "score", 0.0) or 0.0)
     except (TypeError, ValueError):
         return 0.0
+
+
+def is_migration_copy(solution: EvolutionSolution) -> bool:
+    return bool(_metadata(solution).get("migrated", False))
+
+
+def architecture_home_island(solution: EvolutionSolution) -> int | None:
+    """Return the semantic home island; migration copies never count as home."""
+    if is_migration_copy(solution):
+        return None
+    metadata = _metadata(solution)
+    raw = metadata.get(
+        "architecture_home_island_id",
+        metadata.get("architecture_island_id", getattr(solution, "island_id", None)),
+    )
+    try:
+        return int(raw) if raw is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def architecture_home_occupancy(memory: EvolutionMemory) -> list[int]:
+    """Count selectable, non-migrated members whose semantic home is each island."""
+    populations = getattr(memory, "populations", {})
+    num_islands = max(0, int(getattr(memory, "num_islands", 0) or 0))
+    occupancy = [0] * num_islands
+    if not isinstance(populations, dict):
+        return occupancy
+    for solution in populations.values():
+        home = architecture_home_island(solution)
+        if home is not None and 0 <= home < num_islands:
+            occupancy[home] += 1
+    return occupancy
+
+
+def _remove_selectable_solutions(
+    memory: EvolutionMemory, solution_ids: set[str], *, reason: str
+) -> None:
+    populations = getattr(memory, "populations", {})
+    if not isinstance(populations, dict) or not solution_ids:
+        return
+    for solution_id in solution_ids:
+        solution = populations.pop(solution_id, None)
+        if solution is not None:
+            metadata = _metadata(solution)
+            metadata["population_eviction_reason"] = reason
+            metadata["population_evicted_at_iteration"] = int(
+                getattr(memory, "last_iteration", 0) or 0
+            )
+    for island in getattr(memory, "islands", []):
+        island.difference_update(solution_ids)
+    for feature_map in getattr(memory, "island_feature_maps", []):
+        for key, solution_id in list(feature_map.items()):
+            if solution_id in solution_ids:
+                feature_map.pop(key, None)
+    elites = getattr(memory, "elites", None)
+    if isinstance(elites, set):
+        elites.difference_update(solution_ids)
+
+
+def enforce_architecture_population_limit(
+    memory: EvolutionMemory,
+    *,
+    exclude_solution_id: str | None = None,
+    minimum_home_per_island: int = 6,
+    maximum_migrant_fraction: float = 0.2,
+) -> dict[str, Any]:
+    """Bound population size without allowing strong families to erase weak islands."""
+    populations = getattr(memory, "populations", None)
+    if not isinstance(populations, dict):
+        raise RuntimeError("architecture retention requires memory.populations:dict")
+    population_size = max(1, int(getattr(memory, "population_size", 100) or 100))
+    num_islands = max(1, int(getattr(memory, "num_islands", 1) or 1))
+    minimum_home_per_island = max(0, int(minimum_home_per_island))
+    minimum_home_per_island = min(
+        minimum_home_per_island, population_size // num_islands
+    )
+    maximum_migrant_fraction = min(1.0, max(0.0, float(maximum_migrant_fraction)))
+    migrant_budget = int(math.floor(population_size * maximum_migrant_fraction))
+    overflow = max(0, len(populations) - population_size)
+    migrant_count = sum(
+        is_migration_copy(solution) for solution in populations.values()
+    )
+    if maximum_migrant_fraction >= 1.0:
+        excess_migrants = 0
+    else:
+        # Removing a migrant shrinks both numerator and denominator. Solve for
+        # the smallest removal count that bounds the resulting population share.
+        excess_migrants = max(
+            0,
+            int(
+                math.ceil(
+                    (migrant_count - maximum_migrant_fraction * len(populations))
+                    / (1.0 - maximum_migrant_fraction)
+                )
+            ),
+        )
+    removal_target = max(overflow, excess_migrants)
+    if removal_target == 0:
+        _rebuild_rankings(memory)
+        return {
+            "removed": 0,
+            "migrants_removed": 0,
+            "migrant_budget": migrant_budget,
+            "home_occupancy": architecture_home_occupancy(memory),
+        }
+
+    protected = {
+        str(solution_id)
+        for solution_id in (
+            getattr(memory, "best_solution_id", None),
+            exclude_solution_id,
+        )
+        if solution_id
+    }
+    home_groups: list[list[EvolutionSolution]] = [[] for _ in range(num_islands)]
+    migrants: list[EvolutionSolution] = []
+    for solution in populations.values():
+        if is_migration_copy(solution):
+            migrants.append(solution)
+            continue
+        home = architecture_home_island(solution)
+        if home is not None and 0 <= home < num_islands:
+            home_groups[home].append(solution)
+
+    def rank_key(solution: EvolutionSolution) -> tuple[float, int, str]:
+        return (
+            _score(solution),
+            -int(getattr(solution, "iteration", 0) or 0),
+            str(getattr(solution, "solution_id", "")),
+        )
+
+    for group in home_groups:
+        for solution in sorted(group, key=rank_key, reverse=True)[
+            :minimum_home_per_island
+        ]:
+            protected.add(str(solution.solution_id))
+
+    removal: list[EvolutionSolution] = []
+    selected: set[str] = set()
+
+    def take(
+        candidates: Iterable[EvolutionSolution],
+        count: int,
+        protected_ids: set[str] | None = None,
+    ) -> None:
+        protected_ids = protected if protected_ids is None else protected_ids
+        for solution in sorted(candidates, key=rank_key):
+            solution_id = str(getattr(solution, "solution_id", ""))
+            if (
+                len(removal) >= removal_target
+                or count <= 0
+                or not solution_id
+                or solution_id in protected_ids
+                or solution_id in selected
+            ):
+                continue
+            removal.append(solution)
+            selected.add(solution_id)
+            count -= 1
+
+    take(migrants, excess_migrants)
+    take(
+        (
+            solution
+            for solution in populations.values()
+            if str(getattr(solution, "solution_id", "")) not in selected
+        ),
+        removal_target - len(removal),
+    )
+    if len(removal) < removal_target:
+        # A pathological configuration may protect more entries than the capacity.
+        # Preserve the global best/current child, but relax island quotas deterministically.
+        hard_protected = {
+            str(solution_id)
+            for solution_id in (
+                getattr(memory, "best_solution_id", None),
+                exclude_solution_id,
+            )
+            if solution_id
+        }
+        take(
+            (
+                solution
+                for solution in populations.values()
+                if str(getattr(solution, "solution_id", "")) not in hard_protected
+            ),
+            removal_target - len(removal),
+            hard_protected,
+        )
+
+    removed_ids = {str(solution.solution_id) for solution in removal[:removal_target]}
+    migrants_removed = sum(
+        is_migration_copy(solution) for solution in removal[:removal_target]
+    )
+    _remove_selectable_solutions(
+        memory,
+        removed_ids,
+        reason="architecture_retention_population_limit",
+    )
+    _rebuild_rankings(memory)
+    logger.info(
+        "Architecture retention removed %d solutions (%d migrants); home=%s "
+        "migrant_budget=%d population=%d/%d",
+        len(removed_ids),
+        migrants_removed,
+        architecture_home_occupancy(memory),
+        migrant_budget,
+        len(populations),
+        population_size,
+    )
+    return {
+        "removed": len(removed_ids),
+        "migrants_removed": migrants_removed,
+        "migrant_budget": migrant_budget,
+        "home_occupancy": architecture_home_occupancy(memory),
+    }
 
 
 def _analysis_for(
@@ -1028,6 +1260,10 @@ def _stagnation_checkpoint_payload(memory: EvolutionMemory) -> dict[str, Any]:
     ):
         marker = None
     pending = getattr(memory, "_atrex_pending_stagnation_escape", None)
+    bootstrap_attempts = getattr(memory, "_atrex_bootstrap_attempts", {})
+    if not isinstance(bootstrap_attempts, dict):
+        bootstrap_attempts = {}
+    pending_bootstrap = getattr(memory, "_atrex_pending_architecture_bootstrap", None)
     return {
         "version": STAGNATION_CHECKPOINT_VERSION,
         "best_marker": list(marker) if marker is not None else None,
@@ -1040,6 +1276,15 @@ def _stagnation_checkpoint_payload(memory: EvolutionMemory) -> dict[str, Any]:
             getattr(memory, "_atrex_last_stagnation_seed_id", "") or ""
         ),
         "pending_escape": copy.deepcopy(pending) if isinstance(pending, dict) else None,
+        "bootstrap_attempts": {
+            str(key): max(0, int(value or 0))
+            for key, value in bootstrap_attempts.items()
+        },
+        "pending_bootstrap": (
+            copy.deepcopy(pending_bootstrap)
+            if isinstance(pending_bootstrap, dict)
+            else None
+        ),
     }
 
 
@@ -1112,6 +1357,21 @@ def restore_stagnation_checkpoint_state(
         last_seed_id = str(payload.get("last_seed_id") or "")
         pending = payload.get("pending_escape")
         pending = copy.deepcopy(pending) if isinstance(pending, dict) else None
+        raw_bootstrap_attempts = payload.get("bootstrap_attempts")
+        bootstrap_attempts = (
+            {
+                str(key): max(0, int(value or 0))
+                for key, value in raw_bootstrap_attempts.items()
+            }
+            if isinstance(raw_bootstrap_attempts, dict)
+            else {}
+        )
+        pending_bootstrap = payload.get("pending_bootstrap")
+        pending_bootstrap = (
+            copy.deepcopy(pending_bootstrap)
+            if isinstance(pending_bootstrap, dict)
+            else None
+        )
     else:
         retry_bucket = optional_int(latest.get("bucket")) if latest else None
         retries = max(0, int(latest.get("retry", 0) or 0)) if latest else 0
@@ -1125,6 +1385,8 @@ def restore_stagnation_checkpoint_state(
         ):
             seed_bucket = None
         pending = None
+        bootstrap_attempts = {}
+        pending_bootstrap = None
 
     memory._atrex_stagnation_best_marker = best_marker
     memory._atrex_stagnation_seed_bucket = seed_bucket
@@ -1132,6 +1394,8 @@ def restore_stagnation_checkpoint_state(
     memory._atrex_stagnation_seed_retries = retries
     memory._atrex_last_stagnation_seed_id = last_seed_id
     memory._atrex_pending_stagnation_escape = pending
+    memory._atrex_bootstrap_attempts = bootstrap_attempts
+    memory._atrex_pending_architecture_bootstrap = pending_bootstrap
     return {
         "restored": is_current,
         "legacy_reconstructed": not is_current and latest is not None,
@@ -1139,6 +1403,8 @@ def restore_stagnation_checkpoint_state(
         "retry_bucket": retry_bucket,
         "seed_retries": retries,
         "pending_escape": pending is not None,
+        "bootstrap_attempts": len(bootstrap_attempts),
+        "pending_bootstrap": pending_bootstrap is not None,
     }
 
 

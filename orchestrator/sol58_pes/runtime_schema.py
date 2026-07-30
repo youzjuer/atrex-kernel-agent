@@ -56,6 +56,19 @@ SETTINGS = (
         "int",
         minimum=1,
     ),
+    _setting(
+        "search.exploration_rate",
+        "SOL58_EXPLORATION_RATE",
+        "float",
+        minimum=0,
+        maximum=0.9,
+    ),
+    _setting(
+        "search.sampling_weight_power",
+        "SOL58_SAMPLING_WEIGHT_POWER",
+        "float",
+        minimum=0,
+    ),
     _setting("search.knowledge_grounding", "SOL58_PES_KNOWLEDGE_GROUNDING", "bool"),
     _setting(
         "search.react_score_threshold",
@@ -136,6 +149,12 @@ SETTINGS = (
     _setting(
         "official.minimum_local_score",
         "SOL58_OFFICIAL_MIN_LOCAL_SCORE",
+        "float",
+        minimum=0,
+    ),
+    _setting(
+        "official.maximum_local_latency_ms",
+        "SOL58_OFFICIAL_MAX_LOCAL_LATENCY_MS",
         "float",
         minimum=0,
     ),
@@ -298,6 +317,25 @@ SETTINGS = (
     _setting(
         "compatibility.stagnation_max_attempts",
         "ATREX_PES_STAGNATION_MAX_ATTEMPTS",
+        "int",
+        minimum=1,
+    ),
+    _setting(
+        "compatibility.minimum_home_per_island",
+        "ATREX_PES_MIN_HOME_PER_ISLAND",
+        "int",
+        minimum=0,
+    ),
+    _setting(
+        "compatibility.maximum_migrant_fraction",
+        "ATREX_PES_MAX_MIGRANT_FRACTION",
+        "float",
+        minimum=0,
+        maximum=1,
+    ),
+    _setting(
+        "compatibility.bootstrap_max_attempts",
+        "ATREX_PES_BOOTSTRAP_MAX_ATTEMPTS",
         "int",
         minimum=1,
     ),

@@ -12,8 +12,10 @@ from collections.abc import Callable, Sequence
 from typing import Any
 
 from orchestrator.loongflow_compat.architecture_islands import (
+    architecture_home_occupancy,
     architecture_label,
     classify_and_route_solution,
+    enforce_architecture_population_limit,
     extract_architecture_features,
     initialize_architecture_memory,
     maybe_exchange_islands,
@@ -29,6 +31,7 @@ from orchestrator.loongflow_compat.env_flags import enabled as _enabled
 from orchestrator.loongflow_compat.protocols import EvolutionMemory, EvolutionSolution
 from orchestrator.loongflow_compat.sol58_task_hooks import (
     _NCU_SUMMARY_MARKER,
+    _architecture_bootstrap_seed_parent,
     _append_ncu_summary_instructions,
     _apply_stagnation_architecture_gate,
     _finalize_rejected_stagnation_child,
@@ -37,9 +40,11 @@ from orchestrator.loongflow_compat.sol58_task_hooks import (
     _positive_int_env,
     _stagnation_seed_parent,
     _stagnation_state,
+    _record_architecture_bootstrap_outcome,
     _verify_ncu_patch,
     _verify_stagnation_seed_bank,
 )
+from orchestrator.sol58_pes.fitness_calibration import project_provisional_score
 
 __all__ = [
     "_NCU_SUMMARY_MARKER",
@@ -153,17 +158,40 @@ def _solution_source_hash(solution: EvolutionSolution | str) -> str:
     return hashlib.sha256(text.strip().encode("utf-8")).hexdigest()
 
 
-def _adaptive_exploration_rate(base_rate: float, recent_scores: list[float]) -> float:
-    """Raise exploration only after five real attempts, checking hard stagnation first."""
+def _adaptive_exploration_rate(
+    base_rate: float,
+    recent_scores: list[float],
+    *,
+    plateau_rounds: int = 0,
+    stagnation_rounds: int = 12,
+    empty_home_islands: int = 0,
+    num_islands: int = 1,
+) -> float:
+    """Raise exploration from either local score similarity or global stagnation."""
     rate = max(0.0, float(base_rate))
+    multiplier = 1
     if len(recent_scores) >= 5:
         scores = recent_scores[:5]
         deltas = [abs(scores[i] - scores[i + 1]) for i in range(4)]
         if all(delta < 0.001 for delta in deltas):
-            rate *= 4
+            multiplier = max(multiplier, 4)
         elif all(delta < 0.01 for delta in deltas):
-            rate *= 2
-    return min(rate, 0.9)
+            multiplier = max(multiplier, 2)
+
+    stagnation_rounds = max(1, int(stagnation_rounds))
+    plateau_rounds = max(0, int(plateau_rounds))
+    if plateau_rounds >= 2 * stagnation_rounds:
+        multiplier = max(multiplier, 4)
+    elif plateau_rounds >= stagnation_rounds:
+        multiplier = max(multiplier, 2)
+
+    empty_home_islands = max(0, int(empty_home_islands))
+    num_islands = max(1, int(num_islands))
+    if empty_home_islands >= max(1, num_islands // 2):
+        multiplier = max(multiplier, 4)
+    elif empty_home_islands:
+        multiplier = max(multiplier, 2)
+    return min(rate * multiplier, 0.9)
 
 
 def _canonical_solution(
@@ -301,6 +329,151 @@ def _reconcile_authoritative_scores(memory: EvolutionMemory) -> int:
     return len(changed_ids)
 
 
+def _evaluation_payload(
+    solution: EvolutionSolution,
+) -> tuple[dict[str, Any] | None, bool]:
+    evaluation = getattr(solution, "evaluation", None)
+    if isinstance(evaluation, dict):
+        return evaluation, False
+    if not isinstance(evaluation, str):
+        return None, False
+    try:
+        payload = json.loads(evaluation)
+    except (TypeError, ValueError):
+        return None, True
+    return (payload if isinstance(payload, dict) else None), True
+
+
+def _is_authoritative_evaluation(
+    solution: EvolutionSolution, payload: dict[str, Any], metrics: dict[str, Any]
+) -> bool:
+    official = metrics.get("official")
+    official = official if isinstance(official, dict) else {}
+    certified = metrics.get("certified_score")
+    metadata = getattr(solution, "metadata", None)
+    return bool(
+        official.get("authoritative", False)
+        or certified is not None
+        or (isinstance(metadata, dict) and metadata.get("fitness_source") == "official")
+        or str(metrics.get("fitness_source") or "").lower() == "official"
+        or str(payload.get("fitness_source") or "").lower() == "official"
+    )
+
+
+def _migrate_checkpoint_selection_scores(memory: EvolutionMemory) -> int:
+    """Recover strict provisional ordering from legacy flat-cap checkpoints."""
+    solutions = getattr(memory, "solutions", None)
+    populations = getattr(memory, "populations", None)
+    lock = getattr(memory, "_lock", None)
+    if (
+        not isinstance(solutions, dict)
+        or not isinstance(populations, dict)
+        or lock is None
+    ):
+        raise RuntimeError(
+            "checkpoint score migration requires solutions/populations dictionaries and _lock"
+        )
+    try:
+        target = float(os.environ.get("SOL58_TARGET_SCORE", "0.904135"))
+        floor = float(
+            os.environ.get("SOL58_OFFICIAL_PROVISIONAL_SCORE_CAP", "0.899135")
+        )
+    except ValueError as exc:
+        raise RuntimeError("invalid provisional score migration environment") from exc
+
+    changed = 0
+    with lock:
+        records: dict[str, EvolutionSolution] = dict(solutions)
+        records.update(populations)
+        for solution in records.values():
+            payload, serialized = _evaluation_payload(solution)
+            if payload is None:
+                continue
+            metrics = payload.get("metrics")
+            if not isinstance(metrics, dict) or _is_authoritative_evaluation(
+                solution, payload, metrics
+            ):
+                continue
+
+            official = metrics.get("official")
+            official = official if isinstance(official, dict) else {}
+            calibration = official.get("provisional_calibration")
+            calibration = calibration if isinstance(calibration, dict) else {}
+            selection = metrics.get("selection_score")
+            search = metrics.get("search_score")
+            source = "metrics.selection_score"
+            if selection is not None:
+                try:
+                    selection_score = max(0.0, float(selection))
+                    search_score = max(
+                        0.0,
+                        float(search if search is not None else selection_score),
+                    )
+                except (TypeError, ValueError):
+                    continue
+            else:
+                source = "metrics.search_score"
+                if search is None:
+                    search = calibration.get("search_score")
+                    source = "provisional_calibration.search_score"
+                if search is None:
+                    anchor = calibration.get("anchor_score")
+                    ratio = calibration.get("candidate_to_anchor_latency_ratio")
+                    if anchor is None or ratio is None:
+                        continue
+                    try:
+                        search = float(anchor) * float(ratio)
+                    except (TypeError, ValueError):
+                        continue
+                    source = "legacy_anchor_latency_ratio"
+                try:
+                    search_score = max(0.0, float(search))
+                except (TypeError, ValueError):
+                    continue
+                selection_score = project_provisional_score(
+                    search_score,
+                    target=target,
+                    floor=floor,
+                )
+
+            previous = float(getattr(solution, "score", 0.0) or 0.0)
+            metrics["search_score"] = search_score
+            metrics["selection_score"] = selection_score
+            if isinstance(calibration, dict):
+                calibration["search_score"] = search_score
+                calibration["selection_score"] = selection_score
+            official["search_score"] = search_score
+            official["provisional_score"] = selection_score
+            payload["score"] = selection_score
+            solution.score = selection_score
+            solution.sample_weight = _bounded_sample_weight(
+                selection_score,
+                [getattr(solution, "sample_weight", 0.0)],
+            )
+            metadata = getattr(solution, "metadata", None)
+            if not isinstance(metadata, dict):
+                metadata = {}
+                solution.metadata = metadata
+            metadata["checkpoint_score_migration"] = {
+                "version": 1,
+                "source": source,
+                "previous_selection_score": previous,
+                "search_score": search_score,
+                "selection_score": selection_score,
+                "target": target,
+                "floor": floor,
+            }
+            if serialized:
+                solution.evaluation = json.dumps(payload, ensure_ascii=False, indent=2)
+            if abs(previous - selection_score) > 1e-15:
+                changed += 1
+
+        if populations:
+            best = max(populations.values(), key=lambda item: float(item.score or 0.0))
+            memory.best_solution_id = best.solution_id
+    return changed
+
+
 def _deduplicate_memory_indexes(memory: EvolutionMemory) -> int:
     """Keep one selectable representative per source and island; retain lineage records."""
     populations = getattr(memory, "populations", None)
@@ -432,6 +605,21 @@ def _architecture_num_islands(config: object) -> int:
     )
 
 
+def _architecture_retention_settings() -> tuple[int, float]:
+    try:
+        minimum_home = int(os.environ.get("ATREX_PES_MIN_HOME_PER_ISLAND", "6"))
+        maximum_migrants = float(
+            os.environ.get("ATREX_PES_MAX_MIGRANT_FRACTION", "0.2")
+        )
+    except ValueError as exc:
+        raise ValueError("invalid architecture retention environment") from exc
+    if minimum_home < 0:
+        raise ValueError("ATREX_PES_MIN_HOME_PER_ISLAND must be >= 0")
+    if not 0.0 <= maximum_migrants <= 1.0:
+        raise ValueError("ATREX_PES_MAX_MIGRANT_FRACTION must be in [0, 1]")
+    return minimum_home, maximum_migrants
+
+
 def _patch_evolution_database_selection() -> None:
     source_dedup_enabled = _enabled("ATREX_PES_SOURCE_DEDUP")
     architecture_enabled = _enabled("ATREX_PES_ARCHITECTURE_ISLANDS")
@@ -466,6 +654,10 @@ def _patch_evolution_database_selection() -> None:
     if architecture_enabled:
         _require_signature(InMemory._prepare_solution, ("self", "solution"))
         _require_signature(InMemory._check_migration, ("self",))
+        _require_signature(
+            InMemory._enforce_population_limit,
+            ("self", "exclude_solution_id"),
+        )
 
     original_init = EvolveDatabase.__init__
     original_add_solution = EvolveDatabase.add_solution
@@ -507,9 +699,27 @@ def _patch_evolution_database_selection() -> None:
                 validate_architecture_island_count(self.num_islands),
                 max(1, int(self.migration_interval)),
             )
+            minimum_home, maximum_migrants = _architecture_retention_settings()
+            enforce_architecture_population_limit(
+                self,
+                minimum_home_per_island=minimum_home,
+                maximum_migrant_fraction=maximum_migrants,
+            )
 
+        def patched_enforce_population_limit(self, exclude_solution_id=None):
+            minimum_home, maximum_migrants = _architecture_retention_settings()
+            enforce_architecture_population_limit(
+                self,
+                exclude_solution_id=exclude_solution_id,
+                minimum_home_per_island=minimum_home,
+                maximum_migrant_fraction=maximum_migrants,
+            )
+
+        patched_check_migration._atrex_fixed_interval_exchange = True
+        patched_enforce_population_limit._atrex_architecture_retention = True
         InMemory._prepare_solution = patched_prepare_solution
         InMemory._check_migration = patched_check_migration
+        InMemory._enforce_population_limit = patched_enforce_population_limit
         InMemory._atrex_architecture_patched = True
 
     def sample_architecture_parent(memory, island_id, exploration_rate):
@@ -531,6 +741,17 @@ def _patch_evolution_database_selection() -> None:
                 for solution_id in memory.elites
                 if solution_id in allowed_ids and solution_id in populations
             ]
+            if not candidates and island_id is not None:
+                candidates = list(populations.values())
+                elites = [
+                    populations[solution_id]
+                    for solution_id in memory.elites
+                    if solution_id in populations
+                ]
+                logger.warning(
+                    "Island %s has no selectable members; using global parent fallback",
+                    island_id,
+                )
         if not candidates:
             return None
         return select_parents_with_dynamic_temperature(
@@ -560,11 +781,17 @@ def _patch_evolution_database_selection() -> None:
             if architecture_enabled
             else max(1, int(getattr(self.config, "num_islands", 1) or 1))
         )
-        forced_seed = _stagnation_seed_parent(
-            memory,
-            requested_island=island_id,
-            num_islands=configured_islands,
-        )
+        forced_seed = None
+        if architecture_enabled:
+            forced_seed = _architecture_bootstrap_seed_parent(
+                memory,
+                requested_island=island_id,
+                num_islands=configured_islands,
+            )
+        if forced_seed is None:
+            forced_seed = _stagnation_seed_parent(
+                memory, requested_island=island_id, num_islands=configured_islands
+            )
         if forced_seed is not None:
             return forced_seed
         recent = memory.list_solutions(filter_type="desc", limit=5)
@@ -573,9 +800,19 @@ def _patch_evolution_database_selection() -> None:
             for solution in recent
             if getattr(solution, "score", None) is not None
         ]
+        stagnation = _stagnation_state(memory)
+        home_occupancy = (
+            architecture_home_occupancy(memory) if architecture_enabled else []
+        )
         exploration_rate = _adaptive_exploration_rate(
             self.config.exploration_rate,
             recent_scores,
+            plateau_rounds=int(stagnation["plateau_rounds"]),
+            stagnation_rounds=_positive_int_env(
+                "ATREX_PES_STAGNATION_ARCHITECTURE_ROUNDS", 12
+            ),
+            empty_home_islands=sum(count == 0 for count in home_occupancy),
+            num_islands=len(home_occupancy) or configured_islands,
         )
         if removed:
             logger.info(
@@ -589,9 +826,11 @@ def _patch_evolution_database_selection() -> None:
             )
         if exploration_rate != self.config.exploration_rate:
             logger.info(
-                "Adaptive exploration rate %.3f -> %.3f from recent scores",
+                "Adaptive exploration rate %.3f -> %.3f (plateau=%d empty_home=%d)",
                 self.config.exploration_rate,
                 exploration_rate,
+                int(stagnation["plateau_rounds"]),
+                sum(count == 0 for count in home_occupancy),
             )
         solution = (
             sample_architecture_parent(memory, island_id, exploration_rate)
@@ -626,6 +865,7 @@ def _patch_evolution_database_selection() -> None:
             child_family = architecture_label(extract_architecture_features(source))
 
         if isinstance(source, str) and source.strip():
+            _record_architecture_bootstrap_outcome(memory, solution, child_family)
             admitted = _apply_stagnation_architecture_gate(
                 memory, solution, child_family
             )
@@ -712,6 +952,12 @@ def _patch_evolution_database_selection() -> None:
             population_restore.removed_lineage_count,
             population_restore.metadata_path,
         )
+        migrated_scores = _migrate_checkpoint_selection_scores(memory)
+        if migrated_scores:
+            logger.info(
+                "Migrated %d legacy checkpoint scores away from flat provisional caps",
+                migrated_scores,
+            )
         _reconcile_authoritative_scores(memory)
         if source_dedup_enabled:
             removed = _deduplicate_memory_indexes(memory)
@@ -1008,6 +1254,12 @@ def _verify_evolution_patch() -> tuple[bool, str]:
             return False, "EvolveDatabase config validation sentinel missing"
         if not getattr(InMemory, "_atrex_architecture_patched", False):
             return False, "InMemory architecture sentinel missing"
+        if not getattr(
+            InMemory._enforce_population_limit,
+            "_atrex_architecture_retention",
+            False,
+        ):
+            return False, "InMemory architecture retention sentinel missing"
     if _enabled("ATREX_PES_STAGNATION_SEEDS", "0") and not getattr(
         EvolveDatabase.sample_solution, "_atrex_stagnation_seed_patched", False
     ):
