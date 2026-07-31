@@ -14,6 +14,7 @@ RENDERED_CONFIG=""
 RENDERED_TASK=""
 RUNTIME_ENV=""
 RESOLVED_RUNTIME_CONFIG=""
+PES_CHILD_PID=""
 
 is_truthy() {
   case "${1,,}" in
@@ -31,8 +32,25 @@ cleanup() {
   fi
 }
 
+terminate_run() {
+  local signal="$1"
+  local exit_code=143
+  trap - INT TERM
+  if [[ -n "${PES_CHILD_PID:-}" ]] && kill -0 "${PES_CHILD_PID}" 2>/dev/null; then
+    kill -s "${signal}" -- "-${PES_CHILD_PID}" 2>/dev/null \
+      || kill -s "${signal}" "${PES_CHILD_PID}" 2>/dev/null \
+      || true
+    wait "${PES_CHILD_PID}" 2>/dev/null || true
+  fi
+  if [[ "${signal}" == "INT" ]]; then
+    exit_code=130
+  fi
+  exit "${exit_code}"
+}
+
 trap cleanup EXIT
-trap 'exit 130' INT TERM
+trap 'terminate_run INT' INT
+trap 'terminate_run TERM' TERM
 
 python "${REPO_ROOT}/orchestrator/run_manifest.py" capture-env \
   --output "${INPUT_ENV_SNAPSHOT}"
@@ -368,11 +386,18 @@ echo "        eval_root=${SOL58_EVAL_ROOT}"
 echo "        problem_dir=${SOL58_PROBLEM_DIR}"
 echo "        compile_timeout=${SOL58_COMPILE_TIMEOUT}s run_timeout=${SOL58_SOL_TIMEOUT}s evaluator_timeout=${SOL58_EVAL_TIMEOUT}s"
 
-python -m orchestrator.loongflow_compat.bootstrap \
+setsid python -m orchestrator.loongflow_compat.bootstrap \
   "${PROJECT_ROOT}/agents/math_agent/math_evolve_agent.py" \
   --config "${RENDERED_CONFIG}" \
   --task-file "${RENDERED_TASK}" \
   --initial-file "${INITIAL_FILE}" \
   --eval-file "${TASK_DIR}/eval_program_sol58.py" \
   --log-level INFO \
-  "${RUNNER_ARGS[@]}"
+  "${RUNNER_ARGS[@]}" &
+PES_CHILD_PID=$!
+set +e
+wait "${PES_CHILD_PID}"
+PES_EXIT_STATUS=$?
+set -e
+PES_CHILD_PID=""
+exit "${PES_EXIT_STATUS}"

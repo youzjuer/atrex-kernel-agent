@@ -111,6 +111,29 @@ class TestLocalBestStore(unittest.TestCase):
         row = registry["sources"]["hash"]
         self.assertEqual(row["measurement_profile_id"], "profile-a")
         self.assertEqual(row["status"], "COMPLETED")
+        self.assertTrue(row["is_correct"])
+
+    def test_terminal_failure_is_recorded_as_authoritative_zero(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LocalBestStore(_context(Path(tmp)))
+            store.record_authoritative_fitness(
+                "hash",
+                source_language="cuda_cpp",
+                official_score=0.0,
+                official_latency_ms=0.0,
+                local_latency_ms=0.007,
+                submission_id=43,
+                official_status="FAILED",
+                is_correct=False,
+            )
+            registry = json.loads(
+                store.authoritative_fitness_path.read_text(encoding="utf-8")
+            )
+
+        row = registry["sources"]["hash"]
+        self.assertEqual(row["official_score"], 0.0)
+        self.assertEqual(row["status"], "FAILED")
+        self.assertFalse(row["is_correct"])
 
 
 if __name__ == "__main__":

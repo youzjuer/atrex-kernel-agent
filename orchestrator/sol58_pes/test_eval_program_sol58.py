@@ -1146,6 +1146,60 @@ class TestOfficialRefresh(unittest.TestCase):
         self.assertEqual(report["completed"], 1)
         self.assertEqual(registry["sources"][source_hash]["official_score"], 0.91)
 
+    def test_due_incorrect_result_populates_authoritative_zero(self) -> None:
+        source_hash = evaluator._kernel_source_hash("kernel")
+        pending = {
+            "id": 124,
+            "status": "DEFERRED_RESULT",
+            "next_refresh_at": datetime.fromtimestamp(
+                time.time() - 10, timezone.utc
+            ).isoformat(),
+            "_atrex": {
+                "source_sha256": source_hash,
+                "source_language": "cuda_cpp",
+                "local_score": 0.9,
+                "local_latency_ms": 0.007,
+                "measurement_profile_id": "profile-a",
+            },
+        }
+        completed_incorrect = {
+            "id": 124,
+            "status": "COMPLETED",
+            "is_correct": False,
+            "sol_score": 0.0,
+            "latency_ms": 0.0,
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cache_path = root / "official_cache" / f"{source_hash}.json"
+            cache_path.parent.mkdir()
+            cache_path.write_text(json.dumps(pending))
+            with (
+                mock.patch.object(evaluator, "EVAL_ROOT", root),
+                mock.patch.object(evaluator, "OFFICIAL_FITNESS", True),
+                mock.patch.object(evaluator, "OFFICIAL_CACHE", True),
+                mock.patch.object(evaluator, "OFFICIAL_REFRESH_BATCH_SIZE", 1),
+                mock.patch.object(evaluator, "_official_token", return_value="token"),
+                mock.patch.object(
+                    evaluator,
+                    "_get_official_submission",
+                    return_value=completed_incorrect,
+                ),
+            ):
+                report = evaluator._refresh_due_official_results()
+                registry = json.loads(
+                    evaluator._authoritative_fitness_registry_path().read_text()
+                )
+                cached = json.loads(cache_path.read_text())
+
+        row = registry["sources"][source_hash]
+        self.assertEqual(report["failed"], 1)
+        self.assertEqual(report["pending"], 0)
+        self.assertEqual(row["official_score"], 0.0)
+        self.assertEqual(row["status"], "COMPLETED")
+        self.assertFalse(row["is_correct"])
+        self.assertNotIn("next_refresh_at", cached)
+
 
 class TestOfficialPolling(unittest.TestCase):
     def test_async_submit_returns_after_upload(self) -> None:

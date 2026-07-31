@@ -637,20 +637,33 @@ def enforce_architecture_population_limit(
         is_migration_copy(solution) for solution in populations.values()
     )
     if maximum_migrant_fraction >= 1.0:
-        excess_migrants = 0
+        required_migrant_removals = 0
+        removal_target = overflow
     else:
-        # Removing a migrant shrinks both numerator and denominator. Solve for
-        # the smallest removal count that bounds the resulting population share.
-        excess_migrants = max(
+        final_capacity_size = len(populations) - overflow
+        required_at_capacity = max(
             0,
-            int(
-                math.ceil(
-                    (migrant_count - maximum_migrant_fraction * len(populations))
-                    / (1.0 - maximum_migrant_fraction)
-                )
-            ),
+            migrant_count
+            - int(math.floor(maximum_migrant_fraction * final_capacity_size)),
         )
-    removal_target = max(overflow, excess_migrants)
+        if required_at_capacity <= overflow:
+            # Capacity eviction can remove the required migrants and fill the
+            # remainder with home members without shrinking below capacity.
+            required_migrant_removals = required_at_capacity
+            removal_target = overflow
+        else:
+            # Every additional removal must itself be a migrant. Account for
+            # the shrinking denominator when solving the final fraction.
+            required_migrant_removals = max(
+                0,
+                int(
+                    math.ceil(
+                        (migrant_count - maximum_migrant_fraction * len(populations))
+                        / (1.0 - maximum_migrant_fraction)
+                    )
+                ),
+            )
+            removal_target = max(overflow, required_migrant_removals)
     if removal_target == 0:
         _rebuild_rankings(memory)
         return {
@@ -714,7 +727,7 @@ def enforce_architecture_population_limit(
             selected.add(solution_id)
             count -= 1
 
-    take(migrants, excess_migrants)
+    take(migrants, required_migrant_removals)
     take(
         (
             solution
@@ -1125,7 +1138,13 @@ def perform_island_exchange(memory: EvolutionMemory, boundary: int) -> int:
         ]
         snapshots.append(sorted(candidates, key=_score, reverse=True))
 
-    migration_rate = max(0.0, float(getattr(memory, "migration_rate", 0.2) or 0.2))
+    configured_migration_rate = getattr(memory, "migration_rate", 0.2)
+    migration_rate = max(
+        0.0,
+        float(0.2 if configured_migration_rate is None else configured_migration_rate),
+    )
+    if migration_rate == 0:
+        return 0
     migrated = 0
     for origin, candidates in enumerate(snapshots):
         if not candidates:

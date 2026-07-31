@@ -585,6 +585,38 @@ class TestAuthoritativeFitnessReconciliation(unittest.TestCase):
         self.assertEqual(memory.best_solution_id, "local")
         self.assertEqual(memory.island_best_solution, ["local"])
 
+    def test_terminal_official_failure_replaces_provisional_score_with_zero(
+        self,
+    ) -> None:
+        failed = _solution(
+            "failed", "kernel-a", iteration=1, score=0.899135, weight=10.0
+        )
+        local = _solution("local", "kernel-b", iteration=2, score=0.8, weight=2.0)
+        memory = _memory(failed, local)
+        registry = {
+            "version": 1,
+            "sources": {
+                compat_adapter._solution_source_hash(failed): {
+                    "official_score": 0.0,
+                    "status": "COMPLETED",
+                    "is_correct": False,
+                    "submission_id": 25296,
+                }
+            },
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            registry_path = Path(tmp) / "official_cache" / "authoritative_fitness.json"
+            registry_path.parent.mkdir()
+            registry_path.write_text(json.dumps(registry))
+            with mock.patch.dict(os.environ, {"SOL58_EVAL_ROOT": tmp}):
+                changed = compat_adapter._reconcile_authoritative_scores(memory)
+
+        self.assertEqual(changed, 1)
+        self.assertEqual(failed.score, 0.0)
+        self.assertEqual(failed.metadata["official_status"], "COMPLETED")
+        self.assertFalse(failed.metadata["official_is_correct"])
+        self.assertEqual(memory.best_solution_id, "local")
+
     def test_legacy_flat_cap_is_reconstructed_from_anchor_latency_ratio(self) -> None:
         legacy = _solution(
             "legacy", "kernel-a", iteration=1, score=0.899135, weight=99.0
@@ -901,6 +933,37 @@ class TestArchitecturePopulationRetention(unittest.TestCase):
         self.assertEqual(len(memory.populations), 97)
         self.assertLessEqual(remaining_migrants / len(memory.populations), 0.2)
 
+    def test_migrants_are_bounded_when_capacity_eviction_dominates(self) -> None:
+        homes = [
+            self._routed_solution(f"home-{index}", index % 8, 0.2 + index * 0.001)
+            for index in range(95)
+        ]
+        migrants = [
+            self._routed_solution(
+                f"migrant-{index}",
+                index % 8,
+                0.95 + index * 0.001,
+                migrated=True,
+            )
+            for index in range(25)
+        ]
+        memory = self._retention_memory(homes + migrants)
+
+        result = architecture_islands.enforce_architecture_population_limit(
+            memory,
+            minimum_home_per_island=6,
+            maximum_migrant_fraction=0.2,
+        )
+
+        remaining_migrants = sum(
+            architecture_islands.is_migration_copy(solution)
+            for solution in memory.populations.values()
+        )
+        self.assertEqual(result["removed"], 20)
+        self.assertEqual(result["migrants_removed"], 5)
+        self.assertEqual(len(memory.populations), 100)
+        self.assertLessEqual(remaining_migrants / len(memory.populations), 0.2)
+
 
 class TestArchitectureIslandRouting(unittest.TestCase):
     WARP_SOURCE = r"""
@@ -1047,6 +1110,22 @@ class TestArchitectureIslandRouting(unittest.TestCase):
         self.assertEqual(second["expired"], len(first_migrants))
         self.assertGreater(second["migrated"], 0)
         self.assertEqual(memory._atrex_last_migration_iteration, 40)
+
+    def test_zero_migration_rate_disables_exchange(self) -> None:
+        warp = _solution("warp", self.WARP_SOURCE, iteration=1, score=0.8, weight=1)
+        memory = _memory(warp, last_iteration=20)
+        architecture_islands.rebuild_architecture_islands(memory, 8, 20)
+        memory.migration_rate = 0
+
+        migrated = architecture_islands.perform_island_exchange(memory, 20)
+
+        self.assertEqual(migrated, 0)
+        self.assertFalse(
+            any(
+                solution.metadata.get("migrated")
+                for solution in memory.populations.values()
+            )
+        )
 
     def test_architecture_state_is_persisted_and_restored(self) -> None:
         warp = _solution("warp", self.WARP_SOURCE, iteration=20, score=0.8, weight=1)

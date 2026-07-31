@@ -235,7 +235,7 @@ def _load_authoritative_fitness_registry() -> dict[str, dict[str, object]]:
 
 
 def _reconcile_authoritative_scores(memory: EvolutionMemory) -> int:
-    """Replace stale provisional scores with completed official source fitness."""
+    """Replace stale provisional scores with terminal official source fitness."""
     registry = _load_authoritative_fitness_registry()
     solutions = getattr(memory, "solutions", None)
     populations = getattr(memory, "populations", None)
@@ -272,8 +272,20 @@ def _reconcile_authoritative_scores(memory: EvolutionMemory) -> int:
                 official_score = float(raw_official_score or 0.0)
             except (TypeError, ValueError):
                 continue
-            if official_score <= 0:
+            official_status = str(authoritative.get("status") or "").strip().upper()
+            if not official_status and official_score > 0:
+                # Version-1 registries stored successful rows without a status.
+                official_status = "COMPLETED"
+            if official_status not in {"COMPLETED", "FAILED", "ERROR", "CANCELLED"}:
                 continue
+            raw_is_correct = authoritative.get("is_correct")
+            is_correct = (
+                raw_is_correct
+                if isinstance(raw_is_correct, bool)
+                else official_score > 0
+            )
+            if official_status != "COMPLETED" or not is_correct or official_score <= 0:
+                official_score = 0.0
 
             previous_score = float(getattr(solution, "score", 0.0) or 0.0)
             if previous_score != official_score:
@@ -289,6 +301,8 @@ def _reconcile_authoritative_scores(memory: EvolutionMemory) -> int:
                     "fitness_source": "official",
                     "official_submission_id": authoritative.get("submission_id"),
                     "official_score": official_score,
+                    "official_status": official_status,
+                    "official_is_correct": bool(is_correct),
                 }
             )
             solution.sample_weight = _bounded_sample_weight(

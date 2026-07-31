@@ -71,6 +71,8 @@ class LocalBestStore:
         local_latency_ms: float,
         submission_id: Any,
         measurement_profile_id: str | None = None,
+        official_status: str = "COMPLETED",
+        is_correct: bool = True,
     ) -> None:
         path = self.authoritative_fitness_path
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -91,7 +93,8 @@ class LocalBestStore:
                 "submission_id": submission_id,
                 "evaluation_stack_version": self.context.evaluation_stack_version,
                 "gpu_type": self.context.gpu_type,
-                "status": "COMPLETED",
+                "status": str(official_status or "COMPLETED").strip().upper(),
+                "is_correct": bool(is_correct),
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             }
             registry["version"] = 1

@@ -818,6 +818,8 @@ def _record_authoritative_fitness_by_hash(
     local_latency_ms: float,
     submission_id: Any,
     measurement_profile_id: str | None = None,
+    official_status: str = "COMPLETED",
+    is_correct: bool = True,
 ) -> None:
     _local_best_store().record_authoritative_fitness(
         source_hash,
@@ -827,6 +829,8 @@ def _record_authoritative_fitness_by_hash(
         local_latency_ms=local_latency_ms,
         submission_id=submission_id,
         measurement_profile_id=measurement_profile_id,
+        official_status=official_status,
+        is_correct=is_correct,
     )
 
 
@@ -1811,21 +1815,29 @@ def _update_local_best_from_official(
             return False
         official_score = float(result.get("sol_score") or 0.0)
         official_latency_ms = float(result.get("latency_ms") or 0.0)
+        official_status = _official_status(result)
+        is_correct = bool(result.get("is_correct"))
         best.update(
             {
                 "remote_submitted": True,
                 "official_submission_id": result.get("id"),
-                "official_status": "COMPLETED",
+                "official_status": official_status,
+                "official_is_correct": is_correct,
                 "official_score": official_score,
                 "official_latency_ms": official_latency_ms,
-                "official_anchor_score": official_score,
-                "official_anchor_latency_ms": float(
-                    metadata.get("local_latency_ms") or 0.0
-                ),
-                "official_anchor_submission_id": result.get("id"),
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             }
         )
+        if official_status == "COMPLETED" and is_correct and official_score > 0:
+            best.update(
+                {
+                    "official_anchor_score": official_score,
+                    "official_anchor_latency_ms": float(
+                        metadata.get("local_latency_ms") or 0.0
+                    ),
+                    "official_anchor_submission_id": result.get("id"),
+                }
+            )
         _atomic_write_json(path, best)
     return True
 
@@ -1836,6 +1848,7 @@ def _refresh_due_official_results() -> dict[str, Any]:
         "enabled": bool(OFFICIAL_FITNESS and OFFICIAL_CACHE),
         "checked": 0,
         "completed": 0,
+        "failed": 0,
         "pending": 0,
         "time_budget_s": OFFICIAL_REFRESH_TIME_BUDGET,
         "budget_exhausted": False,
@@ -1900,6 +1913,11 @@ def _refresh_due_official_results() -> dict[str, Any]:
                     and refreshed.get("is_correct")
                     and float(refreshed.get("sol_score") or 0.0) > 0
                 )
+                is_final_failure = bool(
+                    refreshed_status in OFFICIAL_TERMINAL_STATUSES
+                    and refreshed_status not in OFFICIAL_REFRESHABLE_STATUSES
+                    and not is_authoritative
+                )
                 if is_authoritative:
                     refreshed.pop("next_refresh_at", None)
                     _record_authoritative_fitness_by_hash(
@@ -1930,6 +1948,25 @@ def _refresh_due_official_results() -> dict[str, Any]:
                     )
                     _update_local_best_from_official(metadata, refreshed)
                     report["completed"] += 1
+                elif is_final_failure:
+                    refreshed.pop("next_refresh_at", None)
+                    _record_authoritative_fitness_by_hash(
+                        str(metadata["source_sha256"]),
+                        source_language=str(
+                            metadata.get("source_language") or SOURCE_LANGUAGE_CUDA
+                        ),
+                        official_score=0.0,
+                        official_latency_ms=float(refreshed.get("latency_ms") or 0.0),
+                        local_latency_ms=float(metadata.get("local_latency_ms") or 0.0),
+                        submission_id=refreshed.get("id"),
+                        measurement_profile_id=str(
+                            metadata.get("measurement_profile_id") or ""
+                        ),
+                        official_status=refreshed_status,
+                        is_correct=bool(refreshed.get("is_correct")),
+                    )
+                    _update_local_best_from_official(metadata, refreshed)
+                    report["failed"] += 1
                 else:
                     available_at = _parse_timestamp(
                         refreshed.get("result_available_at")
