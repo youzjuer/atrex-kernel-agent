@@ -17,6 +17,7 @@
     "cutedsl_generation_rate": 0.0,
     "cutedsl_schedule_period": 10,
     "max_iterations": 200,
+    "stop_score": 10000.0,
     "concurrency": 1,
     "num_islands": 8,
     "migration_interval": 20,

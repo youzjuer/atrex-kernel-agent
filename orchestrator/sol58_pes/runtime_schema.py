@@ -48,6 +48,13 @@ SETTINGS = (
         minimum=1,
     ),
     _setting("search.max_iterations", "SOL58_MAX_ITERATIONS", "int", minimum=1),
+    _setting(
+        "search.stop_score",
+        "SOL58_PES_STOP_SCORE",
+        "float",
+        minimum=0,
+        maximum=10000,
+    ),
     _setting("search.concurrency", "SOL58_PES_CONCURRENCY", "int", minimum=1),
     _setting("search.num_islands", "SOL58_NUM_ISLANDS", "int", minimum=1),
     _setting(

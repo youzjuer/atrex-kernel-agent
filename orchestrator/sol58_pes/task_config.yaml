@@ -51,7 +51,9 @@ evolve:
   summary_name: "evolve_summary"
 
   max_iterations: ${SOL58_MAX_ITERATIONS}
-  target_score: ${SOL58_TARGET_SCORE}
+  # Official certification remains tied to SOL58_TARGET_SCORE in the evaluator.
+  # This sentinel leaves termination to the outer iteration/signal controller.
+  target_score: ${SOL58_PES_STOP_SCORE}
   concurrency: ${SOL58_PES_CONCURRENCY}
 
   # initial_score is intentionally omitted. The LoongFlow runner default is None,
