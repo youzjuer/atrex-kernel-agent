@@ -125,7 +125,8 @@
     "context_length": 1000000,
     "max_tokens": 32768,
     "timeout_seconds": 240,
-    "drop_unsupported_params": true
+    "drop_unsupported_params": true,
+    "buffered_streaming": true
   },
   "compatibility": {
     "max_parallel_candidates": 1,

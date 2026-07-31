@@ -7,9 +7,10 @@ import inspect
 import json
 import logging
 import os
+from functools import wraps
 from pathlib import Path
-from collections.abc import Callable, Sequence
-from typing import Any
+from collections.abc import AsyncIterable, Callable, Sequence
+from typing import Any, cast
 
 from orchestrator.loongflow_compat.architecture_islands import (
     architecture_home_occupancy,
@@ -76,6 +77,79 @@ def _verify_litellm_drop_params() -> tuple[bool, str]:
 
     applied = bool(getattr(litellm, "drop_params", False))
     return applied, "litellm.drop_params" if applied else "drop_params remains false"
+
+
+def _patch_litellm_buffered_stream() -> None:
+    """Receive long non-streaming completions as SSE, then rebuild one response."""
+    if not _enabled("ATREX_LITELLM_BUFFERED_STREAM", "0"):
+        return
+
+    try:
+        import litellm
+    except Exception as exc:
+        raise RuntimeError("cannot import LiteLLM for buffered streaming") from exc
+
+    original = litellm.acompletion
+    if getattr(original, "_atrex_buffered_stream_patched", False):
+        return
+
+    signature = inspect.signature(original)
+    parameter_names = tuple(signature.parameters)
+    try:
+        stream_position = parameter_names.index("stream")
+    except ValueError as exc:
+        raise RuntimeError("litellm.acompletion has no stream parameter") from exc
+
+    @wraps(original)
+    async def buffered_acompletion(*args: Any, **kwargs: Any) -> Any:
+        positional_stream = len(args) > stream_position
+        requested_stream = (
+            args[stream_position] if positional_stream else kwargs.get("stream", False)
+        )
+        if requested_stream is True:
+            return await original(*args, **kwargs)
+
+        stream_args = args
+        stream_kwargs = dict(kwargs)
+        if positional_stream:
+            mutable_args = list(args)
+            mutable_args[stream_position] = True
+            stream_args = tuple(mutable_args)
+        else:
+            stream_kwargs["stream"] = True
+
+        response = await original(*stream_args, **stream_kwargs)
+        if not hasattr(response, "__aiter__"):
+            logger.warning(
+                "LiteLLM ignored stream=True; returning its non-streaming response"
+            )
+            return response
+
+        stream_response = cast(AsyncIterable[Any], response)
+        chunks = [chunk async for chunk in stream_response]
+        messages = args[1] if len(args) > 1 else kwargs.get("messages")
+        rebuilt = litellm.stream_chunk_builder(chunks, messages=messages)
+        if rebuilt is None:
+            raise RuntimeError("LiteLLM returned an empty buffered stream")
+        return rebuilt
+
+    patched = cast(Any, buffered_acompletion)
+    patched._atrex_buffered_stream_patched = True
+    patched._atrex_buffered_stream_original = original
+    litellm.acompletion = patched
+
+
+def _verify_litellm_buffered_stream() -> tuple[bool, str]:
+    if not _enabled("ATREX_LITELLM_BUFFERED_STREAM", "0"):
+        return True, "disabled"
+    import litellm
+
+    applied = bool(
+        getattr(litellm.acompletion, "_atrex_buffered_stream_patched", False)
+    )
+    return applied, (
+        "litellm.acompletion" if applied else "buffered streaming sentinel missing"
+    )
 
 
 def _truncate_text(value: object, limit: int) -> object:
@@ -1360,6 +1434,12 @@ def apply_compat_patches() -> None:
         _patch_litellm_drop_params,
         _verify_litellm_drop_params,
         required=_enabled("ATREX_LITELLM_DROP_PARAMS", "0"),
+    )
+    _apply_manifest_patch(
+        "litellm_buffered_stream",
+        _patch_litellm_buffered_stream,
+        _verify_litellm_buffered_stream,
+        required=_enabled("ATREX_LITELLM_BUFFERED_STREAM", "0"),
     )
     _apply_manifest_patch(
         "evolution_database",

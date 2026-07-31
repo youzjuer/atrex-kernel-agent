@@ -291,6 +291,7 @@ SETTINGS = (
     _setting("llm.max_tokens", "LLM_MAX_TOKENS", "int", minimum=1),
     _setting("llm.timeout_seconds", "LLM_TIMEOUT", "int", minimum=1),
     _setting("llm.drop_unsupported_params", "ATREX_LITELLM_DROP_PARAMS", "bool"),
+    _setting("llm.buffered_streaming", "ATREX_LITELLM_BUFFERED_STREAM", "bool"),
     _setting(
         "compatibility.max_parallel_candidates",
         "ATREX_PES_MAX_PARALLEL_CANDIDATES",

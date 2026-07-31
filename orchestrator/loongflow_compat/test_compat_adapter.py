@@ -422,6 +422,80 @@ class TestPatchManifest(unittest.TestCase):
         self.assertEqual(compact["solution_chars"], len(source))
 
 
+class TestLiteLLMBufferedStream(unittest.IsolatedAsyncioTestCase):
+    async def test_non_streaming_request_is_buffered_and_rebuilt(self) -> None:
+        calls = []
+        chunks = [SimpleNamespace(value="a"), SimpleNamespace(value="b")]
+
+        async def original(model=None, messages=None, stream=False, **kwargs):
+            args = (model, messages)
+            kwargs = {**kwargs, "stream": stream}
+            calls.append((args, kwargs))
+
+            async def stream():
+                for chunk in chunks:
+                    yield chunk
+
+            return stream()
+
+        rebuilt = SimpleNamespace(content="ab")
+        with (
+            mock.patch("litellm.acompletion", original),
+            mock.patch("litellm.stream_chunk_builder", return_value=rebuilt) as builder,
+            mock.patch.dict(os.environ, {"ATREX_LITELLM_BUFFERED_STREAM": "true"}),
+        ):
+            compat_adapter._patch_litellm_buffered_stream()
+            import litellm
+
+            response = await litellm.acompletion(
+                model="model",
+                messages=[{"role": "user", "content": "long request"}],
+                stream=False,
+            )
+
+        self.assertIs(response, rebuilt)
+        self.assertTrue(calls[0][1]["stream"])
+        builder.assert_called_once_with(
+            chunks,
+            messages=[{"role": "user", "content": "long request"}],
+        )
+
+    async def test_explicit_streaming_request_is_unchanged(self) -> None:
+        response = object()
+
+        async def original(model=None, messages=None, stream=False, **kwargs):
+            self.assertTrue(stream)
+            return response
+
+        with (
+            mock.patch("litellm.acompletion", original),
+            mock.patch("litellm.stream_chunk_builder") as builder,
+            mock.patch.dict(os.environ, {"ATREX_LITELLM_BUFFERED_STREAM": "1"}),
+        ):
+            compat_adapter._patch_litellm_buffered_stream()
+            import litellm
+
+            actual = await litellm.acompletion(model="model", messages=[], stream=True)
+
+        self.assertIs(actual, response)
+        builder.assert_not_called()
+
+    async def test_patch_is_idempotent(self) -> None:
+        async def original(model=None, messages=None, stream=False, **kwargs):
+            return object()
+
+        with (
+            mock.patch("litellm.acompletion", original),
+            mock.patch.dict(os.environ, {"ATREX_LITELLM_BUFFERED_STREAM": "1"}),
+        ):
+            compat_adapter._patch_litellm_buffered_stream()
+            import litellm
+
+            first = litellm.acompletion
+            compat_adapter._patch_litellm_buffered_stream()
+            self.assertIs(litellm.acompletion, first)
+
+
 class TestSourceDeduplication(unittest.TestCase):
     def test_hash_ignores_outer_whitespace(self) -> None:
         self.assertEqual(

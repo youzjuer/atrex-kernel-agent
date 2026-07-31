@@ -90,6 +90,7 @@ class TestRuntimeConfig(unittest.TestCase):
                     "SOL58_SAMPLING_WEIGHT_POWER": "1.5",
                     "ATREX_PES_MIN_HOME_PER_ISLAND": "7",
                     "ATREX_PES_MAX_MIGRANT_FRACTION": "0.15",
+                    "ATREX_LITELLM_BUFFERED_STREAM": "off",
                 },
             )
 
@@ -107,6 +108,7 @@ class TestRuntimeConfig(unittest.TestCase):
         self.assertEqual(result["values"]["SOL58_SAMPLING_WEIGHT_POWER"], "1.5")
         self.assertEqual(result["values"]["ATREX_PES_MIN_HOME_PER_ISLAND"], "7")
         self.assertEqual(result["values"]["ATREX_PES_MAX_MIGRANT_FRACTION"], "0.15")
+        self.assertEqual(result["values"]["ATREX_LITELLM_BUFFERED_STREAM"], "0")
         self.assertEqual(
             result["records"]["SOL58_LOCAL_REPEAT_COUNT"]["source"],
             "environment",
